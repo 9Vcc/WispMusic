@@ -1,0 +1,875 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-main-background: var(--main-background);
+
+  /* ===== Wisp 填充 token =====
+     hover / 按下 / 斑马纹 / 选中这几类"透明叠色"的唯一来源。
+     页面里不要再散写 hover:bg-foreground/8、bg-foreground/5、bg-black/5 之类的
+     魔数透明度 —— 要调观感只改下面 :root 里的三个比例。
+     经 inline 原样写进工具类，所以按元素自身的 --foreground 解析：
+     .ambient-page 把 --foreground 覆写成白色时，高亮叠色自动变成白色系。 */
+  --color-fill-subtle: var(--fill-subtle);
+  --color-fill-hover: var(--fill-hover);
+  --color-fill-strong: var(--fill-strong);
+
+  /* ===== Wisp 阴影 token =====
+     四级足够覆盖项目所有用法；深浅由 :root / .dark 分别给出，
+     仍是 WinUI 取向的轻阴影，不引入大面积投影。 */
+  --shadow-wisp-sm: var(--wisp-shadow-sm);
+  --shadow-wisp-md: var(--wisp-shadow-md);
+  --shadow-wisp-lg: var(--wisp-shadow-lg);
+  --shadow-wisp-float: var(--wisp-shadow-float);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 滚动条滑块改为由 --foreground 派生：静止态与 hover 态都随主题自动反转。
+   原实现静止态恒为 12.5% 黑，深色下几乎不可见、只有 hover 才变白，
+   两个状态之间是断裂的（浅色↔深色也不对称）。 */
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--foreground) 14%, transparent);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--foreground) 26%, transparent);
+}
+
+:root {
+  color-scheme: light;
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  /* 内置主题色。用户在设置里自定义主题色时，由 settingStore.applyAccentColor
+     把 --primary 写到 <html> 的行内样式上（该写法会同时盖住 .dark 那一档），
+     明度按当前明暗重新给档：浅色 0.55 / 深色 0.72，色相与彩度取自用户所选颜色。
+     两档明度差是刻意的——--primary 既当背景（按钮/进度条）又当文字（激活图标/
+     歌名高亮），详见 src/lib/utils/accent-color.ts。 */
+  --primary: oklch(0.55 0.22 26.5);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  /* 0.556 → 0.5：云母底（≈#F3F3F3）上 text-muted-foreground 原为 4.26:1，
+     低于小字号 AA 的 4.5；内容区 #F7FAFC 上是 4.51，刚过线。取 0.5 后
+     两种底都稳定在 4.8 以上（深色侧 0.708 本就 6.28:1，不动） */
+  --muted-foreground: oklch(0.5 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.58 0.22 27);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+  --radius: 0.625rem;
+  --sidebar: rgba(255, 255, 255, 0.6);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: rgba(0, 0, 0, 0.05);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  /* 原为 2% 黑：压在云母底上对比度约 1.04:1，分隔线实际不可见，
+     而深色侧是白 10% 正常可见。改为 10% 后与深色侧严格对称 */
+  --sidebar-border: rgba(0, 0, 0, 0.1);
+  --sidebar-ring: oklch(0.708 0 0);
+  --foreground: oklch(0.145 0 0);
+
+  /* ===== 表面（暴露为 @theme 的 --color-surface-card / --color-border-subtle）=====
+     内容卡片：半透明卡片色打底 + 8% 前景色描边。
+     描边刻意比 --border 轻 —— 卡片是"内容分层"，不是"控件边界"，
+     用 --border(#E5E5E5) 会显得像输入框。 */
+  --surface-card-bg: color-mix(in srgb, var(--card) 55%, transparent);
+  --surface-card-border: color-mix(in oklab, var(--foreground) 8%, transparent);
+
+  /* ===== 填充比例（暴露为 @theme 的 --color-fill-*）=====
+     与 --foreground 同源派生，深浅主题自动反转：
+       subtle 5%  斑马纹 / 静止的次级底色
+       hover  8%  列表行 hover、菜单项 hover
+       strong 12% 按下态、选中态 */
+  --fill-subtle: color-mix(in oklab, var(--foreground) 5%, transparent);
+  --fill-hover: color-mix(in oklab, var(--foreground) 8%, transparent);
+  --fill-strong: color-mix(in oklab, var(--foreground) 12%, transparent);
+
+  /* ===== 阴影（暴露为 @theme 的 --shadow-wisp-*）=====
+     项目取向是"边框 + 层级"而不是重投影，所以四级都克制；
+     .dark 下加深，避免深底上阴影完全不可见。 */
+  --wisp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 1px rgba(0, 0, 0, 0.04);
+  --wisp-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05);
+  --wisp-shadow-lg:
+    0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+  /* 浮起按钮 / 卡片封面：与既有 .wisp-drop-shadow 完全一致，故可直接互换 */
+  --wisp-shadow-float: 0 10px 8px rgba(0, 0, 0, 0.1);
+
+  /* ===== 焦点环 =====
+     键盘焦点的统一观感；.ambient-page 会把颜色换成白色以适配环境色背景。 */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --focus-ring-color: var(--ring);
+}
+
+.dark {
+  color-scheme: dark;
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.72 0.18 26.5);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.371 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0% 0 0 / 0.123);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+
+  /* 深色侧阴影：同样的层级，但需要更高不透明度才看得出来 */
+  --wisp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 1px rgba(0, 0, 0, 0.3);
+  --wisp-shadow-md: 0 2px 10px rgba(0, 0, 0, 0.42), 0 1px 2px rgba(0, 0, 0, 0.32);
+  --wisp-shadow-lg:
+    0 10px 28px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.36);
+  --wisp-shadow-float: 0 10px 8px rgba(0, 0, 0, 0.28);
+}
+
+/* ===== 窗口材质压暗层 ===== */
+/* 材质只负责"申请哪一套系统特效"（见 settingStore.applyMaterial），
+   "在材质之上压多少底色"由 --scrim-main / --scrim-float 这一张表统一给出，
+   不再让每个窗口各自拼透明度。
+
+   一致性不能靠"半透明叠加"自动成立：--background 同时被 body 与布局根节点
+   绘制时 alpha 会相乘，浅色下曾得到 mica 0% / acrylic 64% / 托盘深色 76%
+   三个互不相干的观感。现在每个窗口只画一层。
+
+   取值依据是窗口背后实际存在什么：
+     mica    背后是壁纸样色（接近不透明，明暗随窗口主题）→ 极薄一层即可
+     acrylic 背后是桌面实时模糊（Win11 22H2+ 是 DWM 系统亚克力，tint 半透明
+             且随窗口深色标志；更老的构建走 SWCA，系统基本不给 tint）
+                                             → 浅色靠混入底色提亮（系统浅色 tint
+             单独看偏灰），深色压暗更深一档
+     none    背后是桌面原样                              → 较重压暗
+     solid   没有系统特效，CSS 自己就是底色              → 100%
+
+   --scrim-main   主窗口（标题栏 / 侧栏等露出材质的区域）
+   --scrim-float  mini 播放器：浮在其他应用之上，可读性下限比主窗口更高
+   --scrim-menu   托盘菜单：属于"浮层菜单"角色，见下方 .tray-menu-root */
+:root {
+  --scrim-main: 0%;
+  --scrim-float: 22%;
+  /* var(--main-background) 在同一元素内解析，与本行先后顺序无关；
+     两种主题的明暗差异由 --main-background 自带，无需再写 .dark 分支 */
+  --material-scrim: color-mix(
+    in srgb,
+    var(--main-background) var(--scrim-main),
+    transparent
+  );
+  --background: var(--material-scrim);
+}
+
+:root[data-material="acrylic"] {
+  --scrim-main: 56%;
+  --scrim-float: 60%;
+}
+
+/* 深色亚克力单独压深：Win11 系统亚克力的 tint 本身半透明，深色模式下
+   桌面亮色（白墙/亮色网页）透进来会把底色拉成发灰的中间调，比浅色侧更刺眼；
+   深色侧压深几乎无代价 —— 前景接近纯白，对比度只会更好。
+   浅色侧方向相反：系统浅色 tint 单独看偏灰，多数桌面上读起来发暗，
+   所以混入更多近白的 --main-background 提亮（约等于 WinUI 亚克力的观感），
+   同时保留四成系统实时模糊可见。:root.dark[...] 特异性更高，不依赖书写顺序。 */
+:root.dark[data-material="acrylic"] {
+  --scrim-main: 46%;
+  --scrim-float: 52%;
+}
+
+/* "透明"没有系统特效兜底，可读性只能由压暗自己扛 */
+:root[data-material="none"] {
+  --scrim-main: 60%;
+  --scrim-float: 72%;
+}
+
+/* 纯色材质：窗口不启用系统特效，100% 压暗即与内容区同色（不透明），
+   适配无法开启云母/亚克力的环境（虚拟机、远程桌面、旧系统等） */
+:root[data-material="solid"] {
+  --scrim-main: 100%;
+  --scrim-float: 100%;
+}
+
+/* mini 播放器：与主窗口共用材质压暗比例（--scrim-float），属"窗口背板"角色。
+   注：这里不能依赖 backdrop-filter —— 它只模糊页面内部内容，
+   够不到窗口后面的系统材质与桌面（见 TrayMenu 的历史修复）。 */
+.mini-player-root {
+  background: color-mix(
+    in srgb,
+    var(--main-background) var(--scrim-float),
+    transparent
+  );
+}
+
+/* 托盘菜单：角色是「浮层菜单」，不是窗口背板，因此不走压暗表，改用项目既有的
+   菜单面语言（UI_GUIDELINES §3.2 的 bg-card/80）：以卡片色高不透明度起底。
+   这样它的对比度不再取决于壁纸样色 —— 22% 压暗时浅色云母下根本没有面板，
+   边框（--border ≈ #E5E5E5）与分隔线压在浅色云母上只有约 1.13:1，等于不可见。
+   纯色材质没有系统特效托底，吃满不透明，避免 14% 桌面直接透出来。 */
+:root {
+  --scrim-menu: 86%;
+}
+
+:root[data-material="solid"] {
+  --scrim-menu: 100%;
+}
+
+.tray-menu-root {
+  background: color-mix(in srgb, var(--card) var(--scrim-menu), transparent);
+  /* 无边框窗口，外缘是菜单唯一的轮廓（窗口边界会把 CSS 阴影裁掉），
+     所以取比内部分隔线更重的比例；--foreground 随主题翻转，深浅自动对称 */
+  border-color: color-mix(in srgb, var(--foreground) 22%, transparent);
+}
+
+/* ===== 材质 / 明暗切换的过渡 =====
+   系统特效的重建（clearEffects → setEffects）是 DWM 侧的硬切，CSS 够不到；
+   能平滑的是 CSS 侧这一层压暗：切明暗时 --main-background / --card 翻色、
+   切材质时压暗比例跳变，都让 background-color 走一段短缓动，硬切感明显减轻。
+   transition 只声明过渡，不产生层叠上下文、不引入 transform/filter，
+   与 plus-lighter 文字的祖先链约束不冲突。
+   mini 播放器在 TSX 上自带 transition-[height,...] 工具类，单独扩展该列表。 */
+.wisp-window-base,
+.tray-menu-root {
+  transition: background-color 200ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wisp-window-base,
+  .tray-menu-root {
+    transition: none;
+  }
+}
+
+/* mini 播放器滑杆：填充轨道 + 主色圆点（默认 range 的填充在
+   appearance-none 下不可见，需自绘轨道渐变） */
+.mini-range {
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    var(--primary) 0%,
+    var(--primary) var(--fill, 0%),
+    color-mix(in oklab, var(--foreground) 12%, transparent) var(--fill, 0%),
+    color-mix(in oklab, var(--foreground) 12%, transparent) 100%
+  );
+}
+
+.mini-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--primary);
+  border: none;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--foreground) 15%, transparent);
+  transition: transform 0.15s ease;
+}
+
+.mini-range:hover::-webkit-slider-thumb,
+.mini-range:active::-webkit-slider-thumb {
+  transform: scale(1.3);
+}
+
+.mini-range:focus-visible {
+  outline: none;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body {
+    overflow: hidden;
+  }
+
+  body {
+    /* 这里**不要**再写 bg-background：index.html 的关键内联样式里有未分层的
+       body { background: transparent }，未分层样式优先于 @layer base，
+       写在这里也永远不生效（实测 body 的 computed background 恒为 rgba(0,0,0,0)）。
+       窗口底色由 RootLayout 根节点的 bg-background 独占绘制。 */
+    @apply text-foreground;
+    font-family: var(--app-font-family, "Google Sans", "Inter", sans-serif);
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* Virtuoso 虚拟列表内部滚动容器也使用 overlay scrollbar */
+[data-virtuoso-scroller] {
+  overflow-y: overlay !important;
+}
+
+@layer utilities {
+  .overflow-overlay {
+    overflow: overlay;
+  }
+
+  .overflow-y-overlay {
+    overflow-y: overlay;
+  }
+
+  .overflow-x-overlay {
+    overflow-x: overlay;
+  }
+
+  .animate-marquee {
+    display: inline-block;
+    min-width: 100%;
+    animation: marquee 10s linear infinite;
+  }
+
+  @keyframes marquee {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(100%);
+    }
+  }
+}
+
+:root {
+  --titlebar-h: 48px;
+  --sidebar-w: 240px;
+}
+
+:root {
+  --main-background: #f7fafc;
+}
+
+.dark {
+  --main-background: #202020;
+}
+
+/* 原为硬编码 color: white：深色主题的 --primary 是亮红（oklch 0.72），
+   白字压在其上只有 2.72:1。改用主题自带的配对前景色后，
+   浅色 5.44:1、深色约 7:1，两种主题都不再依赖"主色一定够深"的假设 */
+::selection {
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+/* ===== 焦点策略 =====
+   原实现是 `:focus { outline: none !important; box-shadow: none !important }`，
+   它把键盘焦点反馈也一起扼杀了 —— 组件里那些 focus-visible:ring-* 从未生效过
+   （ring 在 Tailwind v4 里就是 box-shadow，被 !important 直接吃掉）。
+
+   现在的策略分两条：
+     1. 鼠标 / 触摸点出来的焦点不画环（否则点一下到处是框，非常吵）；
+     2. 键盘 Tab 与程序化聚焦保留反馈：
+        · 组件自带 focus-visible:* 样式的，用它自己的（Button / Input / Slider...）；
+        · 没自带的，由下面这条 0 权重的兜底轮廓接管。
+   兜底用 :where() 把优先级压到 0，所以任何组件写 outline-none 或自定义 ring
+   都能盖掉它，不需要 !important 互相打架。 */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:where(:focus-visible) {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring-color, var(--ring));
+  outline-offset: var(--focus-ring-offset, 2px);
+}
+
+@layer utilities {
+  .wisp-drop-shadow {
+    filter: drop-shadow(0 10px 8px rgba(0, 0, 0, 0.1));
+  }
+}
+
+@layer components {
+  .wisp-glass-surface {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border: 1px solid transparent !important;
+    background: rgba(252, 252, 252, 0.58);
+    background: color-mix(in srgb, var(--main-background) 58%, transparent);
+    color: var(--primary);
+    -webkit-backdrop-filter: blur(18px) saturate(145%);
+    backdrop-filter: blur(18px) saturate(145%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.46),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.12),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 0 0 1px rgba(0, 0, 0, 0.06),
+      0 3px 10px rgba(0, 0, 0, 0.08) !important;
+  }
+
+  .wisp-glass-surface::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    background: linear-gradient(
+      var(--wisp-glass-highlight-angle, 135deg),
+      rgba(255, 255, 255, 0.42) 0%,
+      rgba(255, 255, 255, 0.14) 32%,
+      rgba(0, 0, 0, 0.04) 55%,
+      rgba(255, 255, 255, 0.22) 100%
+    );
+    opacity: 0.66;
+    transition: opacity 160ms ease;
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+  }
+
+  .wisp-glass-surface:hover {
+    background: rgba(252, 252, 252, 0.72);
+    background: color-mix(in srgb, var(--main-background) 72%, transparent);
+  }
+
+  /* 鼠标点出来的焦点沿用"按下"的收束阴影（原来是 :focus 一并处理）。
+     键盘焦点被排除在外：玻璃表面的 box-shadow 是 !important 的（它由高光描边
+     构成），会和 Button 基础类的 focus-visible:ring 争同一个属性，所以玻璃控件
+     的键盘焦点统一走 outline —— outline 不受这里的 box-shadow / border !important 影响。 */
+  .wisp-glass-surface:active,
+  .wisp-glass-surface:focus:not(:focus-visible) {
+    border-color: transparent !important;
+    color: var(--primary);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.48),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.14),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+      0 0 0 1px rgba(0, 0, 0, 0.06),
+      0 1px 4px rgba(0, 0, 0, 0.06) !important;
+  }
+
+  .wisp-glass-surface:focus-visible {
+    outline: var(--focus-ring-width, 2px) solid var(--focus-ring-color, var(--ring));
+    outline-offset: var(--focus-ring-offset, 2px);
+  }
+
+  .dark .wisp-glass-surface {
+    border-color: transparent !important;
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+      0 0 0 1px rgba(0, 0, 0, 0.28),
+      0 3px 10px rgba(0, 0, 0, 0.24) !important;
+  }
+
+  .dark .wisp-glass-surface::before {
+    background: linear-gradient(
+      var(--wisp-glass-highlight-angle, 135deg),
+      rgba(255, 255, 255, 0.2) 0%,
+      rgba(255, 255, 255, 0.08) 34%,
+      rgba(0, 0, 0, 0.16) 56%,
+      rgba(255, 255, 255, 0.12) 100%
+    );
+    opacity: 0.62;
+  }
+
+  .dark .wisp-glass-surface:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .dark .wisp-glass-surface:active,
+  .dark .wisp-glass-surface:focus:not(:focus-visible) {
+    border-color: transparent !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.24),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 0 0 1px rgba(0, 0, 0, 0.28),
+      0 1px 4px rgba(0, 0, 0, 0.18) !important;
+  }
+
+  [data-slot="tabs-list"][data-variant="default"]
+    > .wisp-glass-tab-trigger[data-state="active"] {
+    border-color: rgba(255, 255, 255, 0.56) !important;
+    background: rgba(255, 255, 255, 0.36) !important;
+    color: var(--foreground) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.78),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.2),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+      0 4px 12px rgba(0, 0, 0, 0.06) !important;
+  }
+
+  [data-slot="tabs-list"][data-variant="default"]
+    > .wisp-glass-tab-trigger[data-state="active"]::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    background: linear-gradient(
+      var(--wisp-glass-highlight-angle, 135deg),
+      rgba(255, 255, 255, 0.7) 0%,
+      rgba(255, 255, 255, 0.22) 42%,
+      rgba(0, 0, 0, 0.06) 64%,
+      rgba(255, 255, 255, 0.34) 100%
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+  }
+
+  .dark
+    [data-slot="tabs-list"][data-variant="default"]
+    > .wisp-glass-tab-trigger[data-state="active"] {
+    border-color: rgba(255, 255, 255, 0.16) !important;
+    background: rgba(255, 255, 255, 0.1) !important;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+      0 4px 14px rgba(0, 0, 0, 0.2) !important;
+  }
+
+  .dark
+    [data-slot="tabs-list"][data-variant="default"]
+    > .wisp-glass-tab-trigger[data-state="active"]::before {
+    background: linear-gradient(
+      var(--wisp-glass-highlight-angle, 135deg),
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(255, 255, 255, 0.08) 42%,
+      rgba(0, 0, 0, 0.18) 64%,
+      rgba(255, 255, 255, 0.12) 100%
+    );
+  }
+
+  /* ===== 表面语言（唯一实现，页面不要再手写 bg-card/80 backdrop-blur-md border …）===== */
+
+  /* 通用内容卡片表面：设置卡片、信息块等静态容器。
+     只负责底色 / 描边 / 圆角，间距与布局仍由调用方给 ——
+     它在 SettingsExpandar 里要 min-h-16、在信息块里要 p-4，形状不该被锁死。 */
+  .wisp-surface {
+    background: var(--surface-card-bg);
+    border: 1px solid var(--surface-card-border);
+    border-radius: var(--radius-md);
+    color: var(--card-foreground);
+  }
+
+  /* 浮层菜单表面：菜单 / 下拉 / 弹出层 / 右键菜单的统一实现。
+     这里是 UI_GUIDELINES §3.2 的菜单面语言 —— 以卡片色 80% 起底，而不是
+     靠压暗露底：菜单必须自己成面，压在浅色云母上时全靠这层底 + --border
+     描边把轮廓分出来，否则面板与背景只有约 1.09:1，等于看不见。 */
+  .wisp-menu-surface {
+    background: color-mix(in srgb, var(--card) 80%, transparent);
+    border-radius: var(--radius-md);
+    color: var(--popover-foreground);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    box-shadow: var(--wisp-shadow-lg);
+  }
+
+  /* 二级菜单 / 强可读性场景：玻璃叠玻璃会把两层模糊糊在一起，
+     所以这一类直接吃满卡片色，不参与模糊。 */
+  .wisp-menu-surface-solid {
+    background: var(--card);
+    border-radius: var(--radius-md);
+    color: var(--popover-foreground);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: var(--wisp-shadow-lg);
+  }
+
+  /* 菜单项：hover / 按下 / 选中 / 禁用四态的唯一来源。
+     行状态色一律取自 --fill-*，不再各处手写 foreground/7、/10、/14 这类魔数。 */
+  .wisp-menu-item {
+    color: color-mix(in srgb, var(--foreground) 82%, transparent);
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .wisp-menu-item:hover {
+    background: var(--fill-hover);
+    color: var(--foreground);
+  }
+
+  .wisp-menu-item:active {
+    background: var(--fill-strong);
+  }
+
+  .wisp-menu-item[data-active="true"] {
+    background: var(--fill-subtle);
+    color: var(--primary);
+    font-weight: 500;
+  }
+
+  /* 禁用态取 70%：50% 会让 14px 文字掉到约 3.9:1，低于 AA */
+  .wisp-menu-item:disabled,
+  .wisp-menu-item[data-disabled="true"] {
+    opacity: 0.7;
+    pointer-events: none;
+  }
+
+  .dark .wisp-menu-item {
+    color: color-mix(in srgb, var(--foreground) 78%, transparent);
+  }
+
+  /* ===== 列表行（歌曲 / 下载 / 网盘 / 本地音乐共用）=====
+     行高、hover、斑马纹的唯一来源。行高用 min-height 而不是给内容加 py，
+     保证"有封面"和"只有序号"两种行高度一致（此前两处各写各的 px-4 py-3 / p-3）。 */
+  .wisp-list-row {
+    border-radius: var(--radius-md);
+    transition: background-color 160ms ease;
+  }
+
+  /* 斑马纹必须在 hover 之前声明：两者同优先级，靠源序让 hover 压过斑马纹。
+     8%（hover）比 5%（斑马纹）重，悬停时行的归属感不会反转。 */
+  .wisp-list-row[data-zebra="true"] {
+    background: var(--fill-subtle);
+  }
+
+  .wisp-list-row:hover {
+    background: var(--fill-hover);
+  }
+
+  .wisp-list-row[aria-selected="true"] {
+    background: var(--fill-strong);
+  }
+
+  /* 行内操作按钮：默认弱化，行 hover / 键盘聚焦后才增强 —— 避免一屏都是按钮。
+     注意只在"行内"生效，行内独立按钮自己盖 hover:text-foreground 也能赢。 */
+  .wisp-list-row .wisp-list-row-action {
+    opacity: 0.55;
+    transition:
+      opacity 160ms ease,
+      color 160ms ease;
+  }
+
+  .wisp-list-row:hover .wisp-list-row-action,
+  .wisp-list-row:focus-within .wisp-list-row-action {
+    opacity: 1;
+  }
+}
+
+/* ===== 环境色详情页（封面取色铺底） ===== */
+/* 背景明度已被压进中间调，页内前景统一切换为白色体系；
+   color 显式声明让未带文字类的文本（如歌名）也继承白色；
+   main-background 指向环境色基色，PinnedBar 的 BlurLayer 等
+   依赖它的表面在深色环境背景上不再泛出白色 */
+.ambient-page {
+  --foreground: #fff;
+  --primary: #fff;
+  --muted-foreground: rgba(255, 255, 255, 0.72);
+  --main-background: var(--ambient-base, #202020);
+  /* --fill-* 在 :root 上是用深色 --foreground 算好的，环境色页面前景翻成白色，
+     这里必须跟着重算，否则行 hover / 斑马纹会变成一层近黑的压制色。 */
+  --fill-subtle: color-mix(in oklab, #fff 5%, transparent);
+  --fill-hover: color-mix(in oklab, #fff 8%, transparent);
+  --fill-strong: color-mix(in oklab, #fff 12%, transparent);
+  --focus-ring-color: #fff;
+  color: var(--foreground);
+}
+
+.ambient-page ::selection {
+  color: var(--ambient-accent, #333);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+/* 次级玻璃控件：固定透明度的白色叠加，深浅随背景色自动成立 */
+.ambient-page .wisp-glass-surface,
+.dark .ambient-page .wisp-glass-surface {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.ambient-page .wisp-glass-surface:hover,
+.dark .ambient-page .wisp-glass-surface:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+/* 主操作按钮：近纯白底 + 封面主色文字 */
+.ambient-page .ambient-primary.wisp-glass-surface,
+.dark .ambient-page .ambient-primary.wisp-glass-surface {
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ambient-accent, var(--primary));
+}
+
+.ambient-page .ambient-primary.wisp-glass-surface:hover,
+.ambient-page .ambient-primary.wisp-glass-surface:active,
+.ambient-page .ambient-primary.wisp-glass-surface:focus,
+.dark .ambient-page .ambient-primary.wisp-glass-surface:hover,
+.dark .ambient-page .ambient-primary.wisp-glass-surface:active,
+.dark .ambient-page .ambient-primary.wisp-glass-surface:focus {
+  background: #fff;
+  color: var(--ambient-accent, var(--primary));
+}
+
+/* ===== 专辑描述溢出渐变与“更多”提示 ===== */
+.desc-fade {
+  mask-image: 
+    linear-gradient(#000, #000),
+    linear-gradient(to right, #000 calc(100% - 80px), transparent calc(100% - 20px));
+  mask-position: 0 0, 0 24px;
+  mask-size: 100% 24px, 100% 24px;
+  mask-repeat: no-repeat, no-repeat;
+
+  -webkit-mask-image: 
+    linear-gradient(#000, #000),
+    linear-gradient(to right, #000 calc(100% - 80px), transparent calc(100% - 20px));
+  -webkit-mask-position: 0 0, 0 24px;
+  -webkit-mask-size: 100% 24px, 100% 24px;
+  -webkit-mask-repeat: no-repeat, no-repeat;
+}
+
+.desc-more {
+  position: relative;
+}
+
+.desc-more::after {
+  content: "更多";
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  height: 24px;
+  line-height: 24px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.95);
+  pointer-events: none;
+}
+
+/* ===== 全屏切换过渡 ===== */
+/* Tauri 的 setFullscreen() 是系统级窗口模式切换，尺寸与边框由合成器瞬时更换，
+   CSS 无法对它补间。改用「遮罩式换场」把硬切藏进不可见的一帧：
+     ① 收束 —— 同色遮罩淡入盖住画面
+     ② 换场 —— 在被遮住的瞬间执行窗口切换
+     ③ 展开 —— 遮罩淡出，露出已重排好的新布局
+   遮罩是独立于应用内容子树之外的 fixed 层，因此：
+     · 不会触碰 plus-lighter 混合文字的祖先链（加 transform/filter 会隔离混合）
+     · 不需要把含 WebGL 着色器背景的整个应用提升成整屏纹理
+   时长与曲线由 JS 下发的 --fs-out-ms / --fs-in-ms 驱动（单一数据源）。 */
+
+.wisp-fs-veil {
+  position: fixed;
+  inset: 0;
+  /* 高于歌词页标题栏的 z-10000，保证换场时画面被完全盖住 */
+  z-index: 2147483000;
+  pointer-events: none;
+  opacity: 0;
+  /* --fs-veil-active-color 由 JS 按当前可见表面解析后注入；
+     未注入时回落到应用底色 */
+  background: var(--fs-veil-active-color, var(--main-background));
+  transition: opacity var(--fs-in-ms, 260ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 半透明材质（云母/亚克力/透明窗）下改用同色高不透明度薄雾，
+   避免切换瞬间闪出一整块实色；纯色材质则可与内容区无缝衔接 */
+:root[data-material="mica"] .wisp-fs-veil,
+:root[data-material="acrylic"] .wisp-fs-veil,
+:root[data-material="none"] .wisp-fs-veil {
+  background: color-mix(
+    in srgb,
+    var(--fs-veil-active-color, var(--main-background)) 88%,
+    transparent
+  );
+}
+
+html[data-fs-veil="on"] .wisp-fs-veil {
+  opacity: 1;
+  transition-duration: var(--fs-out-ms, 140ms);
+  transition-timing-function: cubic-bezier(0.7, 0, 1, 0.5);
+}
+
+/* 减弱动态：整条链路退化为无过渡（JS 侧同样会跳过编排） */
+@media (prefers-reduced-motion: reduce) {
+  .wisp-fs-veil {
+    transition: none !important;
+  }
+}
+
+

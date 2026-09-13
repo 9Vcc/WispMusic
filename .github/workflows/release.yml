@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest]
+
+    permissions:
+      contents: write
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 私有仓库按分钟计费（Windows 2x），缓存 src-tauri 编译产物大幅提速
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # 内嵌解灰运行时：unm-server 依赖（include_dir 编译期嵌入 node_modules）
+      # 与 node.exe（setup-node 提供的复制一份），缺任一则 release 包解灰不可用
+      - name: Prepare embedded unm runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix unm-server
+          New-Item -ItemType Directory -Force node | Out-Null
+          Copy-Item (Get-Command node).Source node/node.exe -Force
+          if (-not (Test-Path node/node.exe)) { throw "node.exe not found on PATH" }
+
+      - name: Build and Release
+        id: tauri_build
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "WispMusic v__VERSION__"
+          releaseBody: "See the assets below to download the latest version."
+          releaseDraft: false
+          prerelease: false
+          args: --verbose
+
+      # 构建完成后立即发布更新链路产物到 CNB 公开更新仓库：
+      # 安装包 + 签名作为 CNB Release 附件上传（不进 git），update.json（安装包
+      # 直链指向 Release 附件）经 git push 写入仓库 main。要求 CNB_TOKEN 具备
+      # repo-release:rw（Release 读写）与 repo-code:rw（推送 update.json）。
+      - name: Publish updater to CNB
+        run: node scripts/publish-cnb.mjs
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPO: ${{ vars.CNB_REPO }}
+          TAG_NAME: ${{ github.ref_name }}

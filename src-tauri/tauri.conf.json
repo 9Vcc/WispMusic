@@ -1,0 +1,106 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WispMusic",
+  "version": "0.0.2",
+  "identifier": "com.isen.wisp-music",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "WispMusic",
+        "visible": false,
+        "width": 1440,
+        "height": 900,
+        "minHeight": 700,
+        "minWidth": 1000,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "dragDropEnabled": false,
+        "windowEffects": {
+          "effects": ["acrylic", "mica", "micaLight", "micaDark"]
+        }
+      },
+      {
+        "title": "TrayMenu",
+        "url": "/tray-menu",
+        "width": 200,
+        "height": 412,
+        "visible": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        },
+        "label": "tray-menu"
+      },
+      {
+        "title": "WispMusic Mini",
+        "url": "/mini-player",
+        "width": 360,
+        "height": 72,
+        "visible": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "label": "mini-player"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "icons/prev.png": "icons/prev.png",
+      "icons/play.png": "icons/play.png",
+      "icons/pause.png": "icons/pause.png",
+      "icons/next.png": "icons/next.png"
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxOUQ4M0Y3REU3QzE3MEMKUldRTUYzemU5NE9kSWZ2ekcrNHpBRysxZFpuU0FVL2w0NlNCZm1ucnpIUTJYMlNQUXliejlZUDYK",
+      "active": true,
+      "endpoints": [
+        "https://cnb.cool/MR9vcc/wisp-updater/-/git/raw/main/update.json"
+      ]
+    }
+  }
+}

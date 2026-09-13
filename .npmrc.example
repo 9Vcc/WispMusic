@@ -1,0 +1,8 @@
+# 复制为 .npmrc 后按需修改：cp .npmrc.example .npmrc
+#
+# .npmrc 已在 .gitignore 中，用来放「只属于你这台机器」的 pnpm 配置
+# （典型场景：自定义 store 路径、私有 registry、代理）。
+# 这些配置不应提交，否则换台机器就会因为路径不存在而装不上依赖。
+#
+# 只有当你遇到 pnpm 默认 store 损坏（安装报 EPERM / 无法读写）时才需要设置：
+# store-dir=<你的 store 路径>

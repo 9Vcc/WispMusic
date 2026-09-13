@@ -1,0 +1,11 @@
+{
+  "name": "ncm-embedded",
+  "version": "4.30.2",
+  "private": true,
+  "description": "Vendored from @neteasecloudmusicapienhanced/api@4.30.2 (module layer), patched for in-browser embedding via injected request/fetch/unblock implementations",
+  "main": "browser.js",
+  "dependencies": {
+    "crypto-js": "^4.2.0",
+    "qrcode": "^1.5.4"
+  }
+}

@@ -1,0 +1,15 @@
+# 本机专属配置（如 pnpm store 路径）请写入 .npmrc，该文件已加入 .gitignore，
+# 不会污染仓库 —— 见同目录 .npmrc.example 说明。
+
+# 运行脚本前跳过依赖一致性校验：node_modules/.modules.yaml 的 hash 元数据缺失时，
+# pnpm 会反复触发自动 install；一旦 install 失败（如 store 损坏）脚本链会整体中断，
+# tauri dev 的 beforeDevCommand 挂掉导致 WebView 白屏。依赖同步由手动 pnpm install 保证。
+verifyDepsBeforeRun: false
+
+packages:
+  - packages/*
+
+allowBuilds:
+  esbuild: false
+  msw: false
+  sharp: false

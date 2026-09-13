@@ -1,0 +1,192 @@
+import { useAppWindow } from "@/hooks/use-app-window";
+import { WispButton } from "../wisp-button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { useRef, useState } from "react";
+import { cn } from "@/lib/utils";
+import {
+  ChevronDown24Filled,
+  Dismiss24Filled,
+  Maximize24Regular,
+  SquareMultiple24Regular,
+  Subtract24Filled,
+} from "@fluentui/react-icons";
+import { motion } from "framer-motion";
+import SFIcon from "@bradleyhodges/sfsymbols-react";
+import {
+  sfArrowDownBackwardAndArrowUpForwardSquareFill,
+  sfArrowDownForwardAndArrowUpBackwardSquareFill,
+} from "@bradleyhodges/sfsymbols";
+import { lyricSheetEase } from "./lyric-sheet-motion";
+
+const controlButtonClassName =
+  "text-white size-8 hover:bg-white/10 hover:text-white rounded-lg active:scale-[0.97]";
+export function LyricSheetTitlebar({
+  setIsOpen,
+}: {
+  setIsOpen: (open: boolean) => void;
+}) {
+  const {
+    startDragging,
+    isFullscreen,
+    toggleFullscreen,
+    toogleMaximize,
+    close,
+    isMaximized,
+    minimize,
+  } = useAppWindow();
+  const fullScreenIcon = isFullscreen ? (
+    <SFIcon icon={sfArrowDownForwardAndArrowUpBackwardSquareFill} />
+  ) : (
+    <SFIcon icon={sfArrowDownBackwardAndArrowUpForwardSquareFill} />
+  );
+  const lastClickTimeRef = useRef(0);
+  const MaxmizeIcon = isMaximized ? SquareMultiple24Regular : Maximize24Regular;
+  const [isHovered, setIsHovered] = useState(false);
+  const [isFocusWithin, setIsFocusWithin] = useState(false);
+  const controlsVisible = isHovered || isFocusWithin;
+  const handleToggleMaximize = async () => {
+    if (isFullscreen) {
+      await toggleFullscreen();
+      return;
+    }
+
+    await toogleMaximize();
+  };
+
+  return (
+    <motion.div
+      className="w-screen h-16 grid grid-cols-[1fr_auto_1fr] items-center overflow-hidden px-4 absolute top-0 left-0 z-10000"
+      initial={{ opacity: 0, y: -16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.46, ease: lyricSheetEase }}
+      onMouseDown={(e) => {
+        if (e.button !== 0 || isFullscreen) return;
+        const currentTime = new Date().getTime();
+        const timeDiff = currentTime - lastClickTimeRef.current;
+        if (timeDiff < 300) {
+          toogleMaximize();
+          lastClickTimeRef.current = 0;
+        } else {
+          lastClickTimeRef.current = currentTime;
+          startDragging();
+        }
+      }}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+    >
+      <div
+        className="flex items-center justify-start"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <Tooltip>
+          <TooltipTrigger>
+            <WispButton
+              variant="ghost"
+              aria-label="返回主界面"
+              icon={<ChevronDown24Filled />}
+              onClick={() => {
+                if (isFullscreen) {
+                  toggleFullscreen();
+                }
+                setIsOpen(false);
+              }}
+              className={cn(controlButtonClassName, "text-white/70")}
+            />
+          </TooltipTrigger>
+          <TooltipContent sideOffset={10}>收起歌词页</TooltipContent>
+        </Tooltip>
+      </div>
+      <div
+        className="w-full flex justify-center py-4 group col-end-3 mix-blend-plus-lighter"
+        onClick={() => {
+          if (isFullscreen) {
+            toggleFullscreen();
+          }
+          setIsOpen(false);
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <svg
+          viewBox="0 0 128 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          className={cn(
+            "h-1.5",
+            "w-32 group-hover:w-16",
+            "opacity-40 group-hover:opacity-70",
+            "transition-all duration-300 ease-in-out",
+            "delay-300 group-hover:delay-0",
+          )}
+          style={{ overflow: "visible" }}
+        >
+          <path
+            stroke="white"
+            strokeWidth="12"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={cn(
+              "[d:path('M0,12_L64,12_L128,12')] group-hover:[d:path('M0,0_L64,24_L128,0')]",
+              "transition-all duration-300 ease-in-out",
+              "delay-0 group-hover:delay-300",
+            )}
+          />
+        </svg>
+      </div>
+      <div
+        className="flex items-center justify-end"
+        onFocus={() => setIsFocusWithin(true)}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) {
+            setIsFocusWithin(false);
+          }
+        }}
+      >
+        <motion.div
+          className={cn(
+            "flex items-center gap-2",
+            !controlsVisible && "pointer-events-none",
+          )}
+          initial={false}
+          animate={
+            controlsVisible ? { opacity: 1, y: 0 } : { opacity: 0, y: -6 }
+          }
+          transition={
+            controlsVisible
+              ? { duration: 0.18, ease: [0.23, 1, 0.32, 1] }
+              : { duration: 0.12, ease: "easeIn" }
+          }
+          aria-hidden={!controlsVisible}
+        >
+          <WispButton
+            variant="ghost"
+            icon={fullScreenIcon}
+            onClick={toggleFullscreen}
+            className={controlButtonClassName}
+            onMouseDown={(e) => e.stopPropagation()}
+          />
+          <WispButton
+            variant="ghost"
+            icon={<Subtract24Filled />}
+            className={controlButtonClassName}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={minimize}
+          />
+          <WispButton
+            variant="ghost"
+            icon={<MaxmizeIcon />}
+            className={controlButtonClassName}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={handleToggleMaximize}
+          />
+          <WispButton
+            variant="ghost"
+            icon={<Dismiss24Filled />}
+            className={controlButtonClassName}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={close}
+          />
+        </motion.div>
+      </div>
+    </motion.div>
+  );
+}

@@ -1,0 +1,10 @@
+[package]
+name = "soundtouch-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Pure Rust implementation of the SoundTouch audio time-stretch library (vendored, LGPL-2.1)"
+license = "LGPL-2.1"
+
+[dependencies]
+thiserror = "2.0.18"
+wide = "1.5.0"

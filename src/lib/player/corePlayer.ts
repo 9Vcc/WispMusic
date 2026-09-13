@@ -1,0 +1,426 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+type TimeListener = (currentTime: number) => void;
+
+interface AudioSnapshot {
+	requestId: number;
+	isReady: boolean;
+	isPlaying: boolean;
+	currentTime: number;
+	duration: number;
+	volume: number;
+	speed: number;
+	source: string | null;
+	audioLevel: number;
+	audioSpectrum: number[];
+	replayGainDb: number | null;
+	replayGainApplied: boolean;
+	replayGainPreampDb: number;
+	equalizerEnabled: boolean;
+	equalizerGainsDb: number[];
+	crossfadeDuration: number;
+}
+
+interface NativePlayerEvent {
+	kind: "loaded" | "progress" | "ended" | "state";
+	snapshot?: AudioSnapshot;
+	message?: string;
+}
+
+interface PreloadResult {
+	requestId: number;
+	isReady: boolean;
+	source: string | null;
+	duration: number;
+}
+
+export interface AudioDeviceInfo {
+	id: string;
+	name: string;
+	isDefault: boolean;
+}
+
+class CorePlayer {
+	private rafId: number | null = null;
+	private unlistenPromise: Promise<UnlistenFn> | null = null;
+	private onProgressCallback: ((currentTime: number) => void) | null = null;
+	private onEndCallback: (() => void) | null = null;
+	private onErrorCallback: (() => void) | null = null;
+
+	private _currentTime = 0;
+	private _duration = 0;
+	private _isReady = false;
+	private _isPlaying = false;
+	// 变速倍率：进度插值按此缩放（音频时间 = 墙钟时间 × speed）
+	private _speed = 1;
+	private anchorTime = 0;
+	private anchorUpdatedAt = performance.now();
+	private playRequestId = 0;
+	private endedRequestId: number | null = null;
+	// seek 序列守卫：快速连续 seek 时只采纳最新一次的响应，
+	// 期间忽略音频线程 progress 事件，防止旧位置把进度锚点拉回去
+	private seekSeq = 0;
+	private pendingSeekSeq: number | null = null;
+	private seekPendingTimer: ReturnType<typeof setTimeout> | null = null;
+	private timeListeners: Set<TimeListener> = new Set();
+	private smoothVolume = 0;
+	private nativeAudioLevel = 0;
+	private nativeSpectrum: number[] = [];
+	private replayGainDb: number | null = null;
+	private replayGainApplied = false;
+	private replayGainPreampDb = 0;
+	private equalizerEnabled = false;
+	private equalizerGainsDb: number[] = [];
+	private crossfadeDuration = 0;
+	private fallbackDuration = 0;
+
+	getCurrentTime(): number {
+		return this._currentTime;
+	}
+
+	getProgress(): number {
+		return this._duration > 0 ? (this._currentTime / this._duration) * 100 : 0;
+	}
+
+	subscribeTime(listener: TimeListener): () => void {
+		this.timeListeners.add(listener);
+		return () => {
+			this.timeListeners.delete(listener);
+		};
+	}
+
+	private ensureEventListener() {
+		if (this.unlistenPromise) return;
+
+		this.unlistenPromise = listen<NativePlayerEvent>(
+			"native-player-event",
+			(event) => {
+				const { kind, snapshot } = event.payload;
+				// seek 未确认前，250ms progress 快照携带的还是 seek 前的位置，忽略
+				if (kind === "progress" && this.pendingSeekSeq !== null) return;
+				if (snapshot && !this.applySnapshot(snapshot)) return;
+
+				if (kind === "ended") {
+					if (this.endedRequestId === this.playRequestId) return;
+					this.endedRequestId = this.playRequestId;
+					this.stopProgressLoop();
+					this.onEndCallback?.();
+				}
+			},
+		);
+	}
+
+	private applySnapshot(snapshot: AudioSnapshot): boolean {
+		if (this.playRequestId > 0 && snapshot.requestId !== this.playRequestId) {
+			return false;
+		}
+
+		this._isReady = snapshot.isReady;
+		this._isPlaying = snapshot.isPlaying;
+		// 单曲循环通过 seek(0)+resume 重播时 playRequestId 不变，
+		// 恢复播放后需要清除 ended 去重标记，否则下一次自然结束会被吞掉
+		if (this._isPlaying) this.endedRequestId = null;
+		this._duration =
+			snapshot.duration > 0 ? snapshot.duration : this.fallbackDuration;
+		this.nativeAudioLevel = snapshot.audioLevel || 0;
+		this.nativeSpectrum = Array.isArray(snapshot.audioSpectrum)
+			? snapshot.audioSpectrum
+			: [];
+		this.replayGainDb = snapshot.replayGainDb ?? null;
+		this.replayGainApplied = Boolean(snapshot.replayGainApplied);
+		this.replayGainPreampDb = snapshot.replayGainPreampDb || 0;
+		this.equalizerEnabled = Boolean(snapshot.equalizerEnabled);
+		this.equalizerGainsDb = Array.isArray(snapshot.equalizerGainsDb)
+			? snapshot.equalizerGainsDb
+			: [];
+		this.crossfadeDuration = snapshot.crossfadeDuration || 0;
+		this._speed = snapshot.speed > 0 ? snapshot.speed : 1;
+		this.anchorTime = snapshot.currentTime || 0;
+		this.anchorUpdatedAt = performance.now();
+		this._currentTime = this.anchorTime;
+
+		if (this._isPlaying) this.startProgressLoop();
+		else this.stopProgressLoop();
+
+		return true;
+	}
+
+	private getInterpolatedTime() {
+		if (!this._isPlaying) return this.anchorTime;
+
+		const elapsed = (performance.now() - this.anchorUpdatedAt) / 1000;
+		const nextTime = this.anchorTime + elapsed * this._speed;
+		return this._duration > 0 ? Math.min(nextTime, this._duration) : nextTime;
+	}
+
+	private notifyTimeListeners() {
+		const t = this._currentTime;
+		this.timeListeners.forEach((fn) => {
+			fn(t);
+		});
+	}
+
+	play(
+		url: string,
+		onEnd: () => void,
+		onPlay: (duration: number) => void,
+		onProgress?: (currentTime: number) => void,
+		onError?: () => void,
+		fallbackDuration = 0,
+	) {
+		this.ensureEventListener();
+		this.stopProgressLoop();
+		this.clearSeekPending();
+		this.fallbackDuration = Number.isFinite(fallbackDuration)
+			? Math.max(0, fallbackDuration)
+			: 0;
+
+		const requestId = ++this.playRequestId;
+		this.endedRequestId = null;
+		this.onEndCallback = onEnd;
+		this.onProgressCallback = onProgress || null;
+		this.onErrorCallback = onError || null;
+		this._isReady = false;
+		this._isPlaying = false;
+		this._duration = this.fallbackDuration;
+		this._currentTime = 0;
+		this.anchorTime = 0;
+		this.anchorUpdatedAt = performance.now();
+
+		invoke<AudioSnapshot>("player_load", {
+			source: url,
+			autoplay: true,
+			requestId,
+		})
+			.then((snapshot) => {
+				if (requestId !== this.playRequestId) return;
+				if (!this.applySnapshot(snapshot)) return;
+				onPlay(this._duration);
+			})
+			.catch((error) => {
+				if (requestId !== this.playRequestId) return;
+				console.error("[CorePlayer] native load error:", error);
+				this.onErrorCallback?.();
+			});
+	}
+
+	private startProgressLoop() {
+		if (this.rafId !== null) return;
+
+		let lastStoreUpdate = 0;
+		const STORE_UPDATE_INTERVAL = 200;
+
+		const loop = () => {
+			this._currentTime = this.getInterpolatedTime();
+			this.notifyTimeListeners();
+
+			if (this.onProgressCallback) {
+				const now = performance.now();
+				if (now - lastStoreUpdate > STORE_UPDATE_INTERVAL) {
+					this.onProgressCallback(this._currentTime);
+					lastStoreUpdate = now;
+				}
+			}
+
+			if (this._isPlaying) {
+				this.rafId = requestAnimationFrame(loop);
+			} else {
+				this.rafId = null;
+			}
+		};
+
+		this.rafId = requestAnimationFrame(loop);
+	}
+
+	private stopProgressLoop() {
+		if (this.rafId !== null) {
+			cancelAnimationFrame(this.rafId);
+			this.rafId = null;
+		}
+	}
+
+	pause() {
+		this._isPlaying = false;
+		this.anchorTime = this._currentTime;
+		this.anchorUpdatedAt = performance.now();
+		this.stopProgressLoop();
+		invoke<AudioSnapshot>("player_pause")
+			.then((snapshot) => this.applySnapshot(snapshot))
+			.catch((error) => {
+				console.error("[CorePlayer] native pause error:", error);
+			});
+	}
+
+	resume() {
+		this._isPlaying = true;
+		this.anchorUpdatedAt = performance.now();
+		this.startProgressLoop();
+		invoke<AudioSnapshot>("player_play")
+			.then((snapshot) => this.applySnapshot(snapshot))
+			.catch((error) => {
+				console.error("[CorePlayer] native play error:", error);
+			});
+	}
+
+	seek(per: number) {
+		if (!this._isReady) return;
+
+		const clamped = Math.max(0, Math.min(1, per));
+		const time = this._duration * clamped;
+		this.anchorTime = time;
+		this.anchorUpdatedAt = performance.now();
+		this._currentTime = time;
+		this.notifyTimeListeners();
+
+		const seq = ++this.seekSeq;
+		this.pendingSeekSeq = seq;
+		if (this.seekPendingTimer !== null) clearTimeout(this.seekPendingTimer);
+		// 兜底：seek 响应异常丢失时恢复进度同步，避免 UI 永久停在乐观位置
+		this.seekPendingTimer = setTimeout(() => {
+			if (this.pendingSeekSeq === seq) this.pendingSeekSeq = null;
+		}, 2000);
+
+		invoke<AudioSnapshot>("player_seek", { positionSecs: time })
+			.then((snapshot) => {
+				if (seq !== this.seekSeq) return;
+				this.clearSeekPending();
+				this.applySnapshot(snapshot);
+			})
+			.catch((error) => {
+				if (seq !== this.seekSeq) return;
+				this.clearSeekPending();
+				console.error("[CorePlayer] native seek error:", error);
+			});
+	}
+
+	private clearSeekPending() {
+		this.pendingSeekSeq = null;
+		if (this.seekPendingTimer !== null) {
+			clearTimeout(this.seekPendingTimer);
+			this.seekPendingTimer = null;
+		}
+	}
+
+	setVolume(val: number) {
+		invoke<AudioSnapshot>("player_set_volume", { volume: val })
+			.then((snapshot) => this.applySnapshot(snapshot))
+			.catch((error) => {
+				console.error("[CorePlayer] native volume error:", error);
+			});
+	}
+
+	setSpeed(speed: number) {
+		const clamped = Math.min(5, Math.max(0.1, speed));
+		// 以当前位置重锚定，插值随后按新倍率推进
+		this.anchorTime = this.getInterpolatedTime();
+		this.anchorUpdatedAt = performance.now();
+		this._currentTime = this.anchorTime;
+		this._speed = clamped;
+		this.notifyTimeListeners();
+
+		invoke<AudioSnapshot>("player_set_speed", { speed: clamped })
+			.then((snapshot) => this.applySnapshot(snapshot))
+			.catch((error) => {
+				console.error("[CorePlayer] native speed error:", error);
+			});
+	}
+
+	getSpeed() {
+		return this._speed;
+	}
+
+	preload(url: string) {
+		const requestId = this.playRequestId;
+		invoke<PreloadResult>("player_preload", {
+			source: url,
+			requestId,
+		}).catch((error) => {
+			if (requestId !== this.playRequestId) return;
+			console.warn("[CorePlayer] native preload skipped:", error);
+		});
+	}
+
+	listOutputDevices() {
+		return invoke<AudioDeviceInfo[]>("list_audio_output_devices");
+	}
+
+	setOutputDevice(deviceId: string | null) {
+		return invoke<AudioSnapshot>("player_set_output_device", {
+			deviceId,
+		}).then((snapshot) => {
+			this.applySnapshot(snapshot);
+			return snapshot;
+		});
+	}
+
+	setReplayGain(enabled: boolean, preampDb = 0) {
+		return invoke<AudioSnapshot>("player_set_replay_gain", {
+			enabled,
+			preampDb,
+		}).then((snapshot) => {
+			this.applySnapshot(snapshot);
+			return snapshot;
+		});
+	}
+
+	getReplayGainState() {
+		return {
+			gainDb: this.replayGainDb,
+			applied: this.replayGainApplied,
+			preampDb: this.replayGainPreampDb,
+		};
+	}
+
+	setEqualizer(enabled: boolean, gainsDb: number[]) {
+		return invoke<AudioSnapshot>("player_set_equalizer", {
+			enabled,
+			gainsDb,
+		}).then((snapshot) => {
+			this.applySnapshot(snapshot);
+			return snapshot;
+		});
+	}
+
+	getEqualizerState() {
+		return {
+			enabled: this.equalizerEnabled,
+			gainsDb: [...this.equalizerGainsDb],
+		};
+	}
+
+	setCrossfade(durationSecs: number) {
+		return invoke<AudioSnapshot>("player_set_crossfade", {
+			durationSecs,
+		}).then((snapshot) => {
+			this.applySnapshot(snapshot);
+			return snapshot;
+		});
+	}
+
+	getCrossfadeDuration() {
+		return this.crossfadeDuration;
+	}
+
+	getPosition() {
+		this._currentTime = this.getInterpolatedTime();
+		return this._currentTime;
+	}
+
+	isReady() {
+		return this._isReady;
+	}
+
+	getReactVolume(): number {
+		const target = this._isPlaying ? this.nativeAudioLevel : 0;
+		const factor = target > this.smoothVolume ? 0.5 : 0.08;
+		this.smoothVolume += (target - this.smoothVolume) * factor;
+		return this.smoothVolume;
+	}
+
+	getSpectrum(): number[] {
+		return this._isPlaying ? [...this.nativeSpectrum] : [];
+	}
+}
+
+export const corePlayer = new CorePlayer();

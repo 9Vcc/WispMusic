@@ -1,0 +1,80 @@
+[package]
+name = "wisp-music-react-tauri"
+version = "0.0.1"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "wisp_music_react_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+souvlaki = "0.8"
+raw-window-handle = "0.6"
+lofty = "0.22"
+walkdir = "2"
+percent-encoding = "2"
+base64 = "0.22"
+windows = { version = "0.44", features = [
+  "Win32_Foundation", 
+  "Win32_Graphics_Gdi", 
+  "Win32_System_Com", 
+  "Win32_UI_Shell", 
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Imaging",
+  "Win32_Storage_FileSystem",
+  # dev 专属看门狗用：抓父进程句柄 + 等待其退出，见 src/dev_watchdog.rs
+  "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+  # unm sidecar 随宿主进程退出：KILL_ON_JOB_CLOSE，见 src/unm.rs
+  "Win32_System_JobObjects",
+  # CreateJobObjectW 的 SECURITY_ATTRIBUTES 参数需要
+  "Win32_Security",
+] }
+tauri-plugin-process = "2"
+tauri-plugin-store = "2"
+tauri-plugin-dialog = "2"
+reqwest = { version = "0.12", features = ["stream", "gzip", "brotli", "json"] }
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "time"] }
+soundtouch-rs = { path = "vendor/soundtouch-rs" }
+dirs = "5"
+futures-util = "0.3"
+# 本地歌词文件编码探测（GBK/GB18030 → UTF-8），reqwest 已传递依赖，无额外体积
+encoding_rs = "0.8"
+rodio = { version = "0.20", default-features = false, features = [
+  "symphonia-aac",
+  "symphonia-isomp4",
+  "symphonia-mp3",
+  "symphonia-flac",
+  "symphonia-vorbis",
+  "symphonia-wav",
+] }
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4"] }
+tauri-plugin-global-shortcut = "2.3.2"
+# 将 unm-server 与 node.exe 嵌入二进制（release 免依赖解灰运行时）
+include_dir = "0.7"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
+
+[profile.release]
+# 音频解码在 rodio 实时路径上，opt-level 选 3（执行速度）而非 "s"（体积）
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,180 @@
+"use client";
+
+import { Slider as SliderPrimitive } from "radix-ui";
+import * as React from "react";
+import { useRef, useState } from "react";
+import { cn } from "@/lib/utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "./ui/tooltip";
+
+const sliderFloatingTooltipClassName =
+  "select-none animate-in fade-in-0 zoom-in-95 z-50 w-fit max-w-xs rounded-sm border border-black/10 bg-white/95 px-2.5 py-1.5 text-xs font-medium text-zinc-900 shadow-[0_2px_6px_rgba(0,0,0,0.14),0_1px_2px_rgba(0,0,0,0.08)] backdrop-blur-xl dark:border-white/10 dark:bg-zinc-800/95 dark:text-zinc-50 dark:shadow-[0_3px_8px_rgba(0,0,0,0.32),0_1px_2px_rgba(0,0,0,0.22)]";
+
+interface WispSliderProps extends Omit<
+	React.ComponentProps<typeof SliderPrimitive.Root>,
+	"onValueChange"
+> {
+	tooltip?: string;
+	hoverTooltip?: (value: number) => string;
+	/** 悬停气泡弹出方向，默认向上；贴顶边的滑条需用 "bottom" 向下弹出 */
+	hoverTooltipSide?: "top" | "bottom";
+	trackClassName?: string;
+	rangeClassName?: string;
+	thumbClassName?: string;
+	showThumb?: boolean;
+	showThumbTooltip?: boolean;
+	onValueChange: (value: number) => void;
+	/** 拖动过程中的实时回调（音量等需要即时生效的场景）；
+	    默认仅松手（onValueCommit）才触发 onValueChange，避免进度条高频 seek */
+	onValueDragging?: (value: number) => void;
+}
+
+function WispSlider({
+	className,
+	defaultValue,
+	value,
+	min = 0,
+	max = 100,
+	tooltip,
+	hoverTooltip,
+	hoverTooltipSide = "top",
+	trackClassName,
+	rangeClassName,
+	thumbClassName,
+	showThumb = true,
+	showThumbTooltip = true,
+	onValueChange,
+	onValueDragging,
+	...props
+}: WispSliderProps) {
+  const sliderRef = useRef<HTMLSpanElement>(null);
+  const _values = React.useMemo(
+    () =>
+      Array.isArray(value)
+        ? value
+        : Array.isArray(defaultValue)
+          ? defaultValue
+          : [min, max],
+    [value, defaultValue, min, max],
+  );
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [showHoverTooltip, setShowHoverTooltip] = useState(false);
+  const [hoverState, setHoverState] = useState({ value: min, left: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragValue, setDragValue] = useState(0);
+  const shouldTrackHover = Boolean(hoverTooltip);
+  const shouldShowThumbTooltip = showThumb && showThumbTooltip;
+
+  const updateHoverState = (clientX: number) => {
+    if (!shouldTrackHover) return;
+    const slider = sliderRef.current;
+    if (!slider) return;
+    const rect = slider.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    setHoverState({
+      value: min + ratio * (max - min),
+      left: ratio * rect.width,
+    });
+  };
+
+  return (
+    <TooltipProvider>
+      <SliderPrimitive.Root
+        ref={sliderRef}
+        data-slot="slider"
+        defaultValue={defaultValue}
+        value={isDragging ? [dragValue] : value}
+        min={min}
+        max={max}
+        className={cn(
+          "group relative flex w-full touch-none items-center select-none data-disabled:opacity-50 data-vertical:h-full data-vertical:min-h-40 data-vertical:w-auto data-vertical:flex-col",
+          className,
+        )}
+        {...props}
+        onMouseEnter={(event) => {
+          if (shouldShowThumbTooltip) setShowTooltip(true);
+          if (shouldTrackHover) {
+            setShowHoverTooltip(true);
+            updateHoverState(event.clientX);
+          }
+        }}
+        onMouseMove={(event) => {
+          if (shouldTrackHover) updateHoverState(event.clientX);
+        }}
+        onMouseLeave={() => {
+          if (shouldShowThumbTooltip) setShowTooltip(false);
+          if (shouldTrackHover) setShowHoverTooltip(false);
+        }}
+        onValueChange={(value) => {
+          setIsDragging(true);
+          setDragValue(value[0]);
+          onValueDragging?.(value[0]);
+        }}
+        onValueCommit={(value) => {
+          onValueChange(value[0]);
+          setIsDragging(false);
+        }}
+      >
+        <SliderPrimitive.Track
+          data-slot="slider-track"
+          className={cn(
+            "relative grow overflow-hidden rounded-full data-horizontal:h-1 data-horizontal:w-full data-vertical:h-full data-vertical:w-1",
+            trackClassName,
+          )}
+        >
+          <SliderPrimitive.Range
+            data-slot="slider-range"
+            className={cn(
+              "absolute rounded-full select-none data-horizontal:h-full data-vertical:w-full",
+              rangeClassName,
+            )}
+          />
+        </SliderPrimitive.Track>
+        {showThumb &&
+          _values.map((_, index) =>
+            shouldShowThumbTooltip ? (
+              <Tooltip key={index} open={showTooltip}>
+                <TooltipTrigger asChild>
+                  <SliderPrimitive.Thumb
+                    data-slot="slider-thumb"
+                    data-dragging={isDragging ? "" : undefined}
+                    className={cn("opacity-0", thumbClassName)}
+                  />
+                </TooltipTrigger>
+                <TooltipContent sideOffset={10}>
+                  <p>{tooltip || value}</p>
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <SliderPrimitive.Thumb
+                key={index}
+                data-slot="slider-thumb"
+                data-dragging={isDragging ? "" : undefined}
+                className={cn("opacity-0", thumbClassName)}
+              />
+            ),
+          )}
+        {hoverTooltip && showHoverTooltip && !isDragging && (
+          <div
+            className={cn(
+              "pointer-events-none absolute -translate-x-1/2",
+              hoverTooltipSide === "bottom"
+                ? "top-full mt-1 slide-in-from-top-1"
+                : "bottom-full mb-0 slide-in-from-bottom-1",
+              sliderFloatingTooltipClassName,
+            )}
+            style={{ left: hoverState.left }}
+          >
+            {hoverTooltip(hoverState.value)}
+          </div>
+        )}
+      </SliderPrimitive.Root>
+    </TooltipProvider>
+  );
+}
+
+export { WispSlider };
