@@ -27,11 +27,15 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readChangelogNotes } from "./changelog-notes.mjs";
-import { KEEP_VERSIONS, pruneOldReleaseTags } from "./cnb-release-utils.mjs";
+import {
+	KEEP_VERSIONS,
+	pruneOldReleaseTags,
+	resolveVerifyUrl,
+} from "./cnb-release-utils.mjs";
 
 const TOKEN = process.env.CNB_TOKEN;
 const REPO = process.env.CNB_REPO;
@@ -55,7 +59,10 @@ if (!REPO || !/^[^/]+\/[^/]+$/.test(REPO)) {
 if (!TAG) die("缺少环境变量 TAG_NAME（CI 中取 github.ref_name）");
 
 const conf = JSON.parse(
-	await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+	await readFile(
+		new URL("../src-tauri/tauri.conf.json", import.meta.url),
+		"utf8",
+	),
 );
 const VERSION = conf.version;
 if (!VERSION) die("tauri.conf.json 缺少 version 字段");
@@ -126,11 +133,28 @@ function maybePermissionHint(status, bodyText) {
 	return "";
 }
 
-async function cnbApi(pathname, { method = "GET", body, retry = 2, allowNotFound = false } = {}) {
+/** 提取 undici 网络错误的底层原因（error.cause，如 ENOTFOUND/ECONNRESET），便于定位 */
+function netErrDetail(error) {
+	const cause = error?.cause;
+	if (cause?.code) return `（${cause.code}）`;
+	if (typeof cause === "string") return `（${cause}）`;
+	if (cause?.message) return `（${String(cause.message).slice(0, 120)}）`;
+	return "";
+}
+
+async function cnbApi(
+	pathname,
+	{ method = "GET", body, retry = 2, allowNotFound = false } = {},
+) {
 	let lastErr;
 	for (let attempt = 0; attempt <= retry; attempt++) {
 		try {
-			const res = await fetch(`${API}${pathname}`, {
+			// verify_url 等响应会给出完整绝对地址（可能带内部路由前缀，经 resolveVerifyUrl 剥离）；
+			// 绝对地址直接请求，相对路径才补 API 前缀——重复拼接会产生坏 URL，DNS 直接失败
+			const url = /^https?:\/\//i.test(pathname)
+				? pathname
+				: `${API}${pathname}`;
+			const res = await fetch(url, {
 				method,
 				headers: {
 					Accept: "application/vnd.cnb.api+json",
@@ -155,13 +179,16 @@ async function cnbApi(pathname, { method = "GET", body, retry = 2, allowNotFound
 			if (attempt < retry) {
 				const wait = 10_000 * (attempt + 1);
 				console.warn(
-					`⚠ CNB API ${method} ${pathname} 网络异常（第 ${attempt + 1}/${retry + 1} 次）：${error.message}，${wait / 1000}s 后重试…`,
+					`⚠ CNB API ${method} ${pathname} 网络异常（第 ${attempt + 1}/${retry + 1} 次）：${error.message}${netErrDetail(error)}，${wait / 1000}s 后重试…`,
 				);
 				await new Promise((r) => setTimeout(r, wait));
 			}
 		}
 	}
-	die(`CNB API ${method} ${pathname} 失败（已重试）：${lastErr?.message}`);
+	die(
+		`CNB API ${method} ${pathname} 失败（已重试）：${lastErr?.message}${netErrDetail(lastErr)}` +
+			"\n  提示：网络异常若为 ENOTFOUND，多半是请求 URL 被拼坏（对照上方 pathname 检查）或代理/DNS 拦截",
+	);
 }
 
 /** Release 附件下载直链（匿名可访问，已实测；{tag} 为 Release 标签） */
@@ -181,7 +208,10 @@ async function findReleaseByTag(tag) {
 /**
  * 上传单个附件：拿预签名地址 → PUT 文件本体 → 确认入库（ttl=0 永久）。
  * 官方流程：POST asset-upload-url 返回 {upload_url, verify_url}；
- * verify_url 即确认端点完整形态（asset-upload-confirmation/<token>/<path>）。
+ * verify_url 为确认端点，实测可能带 CNB 内部路由前缀（"@share-html#<namespace>:"），
+ * 必须经 resolveVerifyUrl 剥离成绝对地址后再请求——2026-09-14 v0.0.1 首发时曾因
+ * 直接拼接 API 前缀产生 "https://api.cnb.coolhttps://..." 坏 URL（DNS 失败，
+ * 表现为重试 3 次全是 fetch failed）。
  */
 async function uploadAsset(releaseId, filePath, assetName, size) {
 	if (DRY_RUN) {
@@ -197,8 +227,18 @@ async function uploadAsset(releaseId, filePath, assetName, size) {
 	const uploadUrl = up?.upload_url;
 	const verifyUrl = up?.verify_url;
 	if (!uploadUrl || !verifyUrl) {
-		die(`asset-upload-url 响应缺少 upload_url/verify_url：${JSON.stringify(up).slice(0, 400)}`);
+		die(
+			`asset-upload-url 响应缺少 upload_url/verify_url：${JSON.stringify(up).slice(0, 400)}`,
+		);
 	}
+	let uploadHost = "?";
+	try {
+		uploadHost = new URL(uploadUrl).host;
+	} catch {}
+	// 把两个地址的原始形态打进日志：verify_url 格式再变时可立即从 CI 日志定位
+	console.log(
+		`→ asset-upload-url：upload_url 主机=${uploadHost}；verify_url 原始值=${String(verifyUrl).slice(0, 400)}`,
+	);
 
 	const content = await readFile(filePath);
 	for (let attempt = 1; ; attempt++) {
@@ -210,29 +250,48 @@ async function uploadAsset(releaseId, filePath, assetName, size) {
 			});
 			if (res.ok) break;
 			if (attempt >= 3) {
-				die(`附件 ${assetName} 上传失败（HTTP ${res.status}）：${(await res.text()).slice(0, 300)}`);
+				die(
+					`附件 ${assetName} 上传失败（HTTP ${res.status}）：${(await res.text()).slice(0, 300)}`,
+				);
 			}
-			console.warn(`⚠ 附件 ${assetName} 上传 HTTP ${res.status}，重试 ${attempt}/3…`);
+			console.warn(
+				`⚠ 附件 ${assetName} 上传 HTTP ${res.status}，重试 ${attempt}/3…`,
+			);
 		} catch (error) {
 			if (attempt >= 3) {
 				die(`附件 ${assetName} 上传网络异常（已重试）：${error.message}`);
 			}
-			console.warn(`⚠ 附件 ${assetName} 上传网络异常（${error.message}），重试 ${attempt}/3…`);
+			console.warn(
+				`⚠ 附件 ${assetName} 上传网络异常（${error.message}），重试 ${attempt}/3…`,
+			);
 		}
 		await new Promise((r) => setTimeout(r, 5000 * attempt));
 	}
 
-	// 确认上传；ttl=0 表示永久保留（官方上限 180 天，0 特指永久）
-	const confirmUrl = /([?&])ttl=/.test(verifyUrl) ? verifyUrl : `${verifyUrl}${verifyUrl.includes("?") ? "&" : "?"}ttl=0`;
+	// 确认上传：verify_url 可能带 "@share-html#<namespace>:" 内部路由前缀，须剥离后再请求
+	const confirmUrl = resolveVerifyUrl(verifyUrl, API);
+	if (!confirmUrl) {
+		die(
+			`verify_url 无法解析为可请求地址：${JSON.stringify(verifyUrl).slice(0, 200)}`,
+		);
+	}
+	if (confirmUrl !== verifyUrl) {
+		console.log(`→ verify_url 已规范化，确认端点：${confirmUrl}`);
+	}
 	await cnbApi(confirmUrl, { method: "POST" });
-	console.log(`✓ 附件已上传：${assetName}（${(size / 1024 / 1024).toFixed(1)} MB）`);
+	console.log(
+		`✓ 附件已上传：${assetName}（${(size / 1024 / 1024).toFixed(1)} MB）`,
+	);
 }
 
 async function listAllReleases() {
 	if (!readonlyOk) return [];
 	const all = [];
 	for (let page = 1; page <= 20; page++) {
-		const body = await cnbApi(`/${REPO}/-/releases?page=${page}&page_size=100`, { retry: 1 });
+		const body = await cnbApi(
+			`/${REPO}/-/releases?page=${page}&page_size=100`,
+			{ retry: 1 },
+		);
 		const list = Array.isArray(body) ? body : (body?.data ?? body?.list ?? []);
 		all.push(...list);
 		if (!Array.isArray(list) || list.length < 100) break;
@@ -240,15 +299,19 @@ async function listAllReleases() {
 	return all;
 }
 
-if (DRY_RUN) console.log("== DRY_RUN 演练模式：以下写操作仅打印，不会真实执行 ==\n");
+if (DRY_RUN)
+	console.log("== DRY_RUN 演练模式：以下写操作仅打印，不会真实执行 ==\n");
 
 // 1) 幂等清理：同 tag 的旧 Release（上次重跑残留）先删除，保证本次产物即最终状态
 const existing = readonlyOk ? await findReleaseByTag(TAG) : null;
 if (existing?.id != null) {
 	console.log(`→ 发现已存在的 Release ${TAG}（id=${existing.id}），删除重建…`);
-	DRY_RUN || (await cnbApi(`/${REPO}/-/releases/${existing.id}`, { method: "DELETE" }));
+	DRY_RUN ||
+		(await cnbApi(`/${REPO}/-/releases/${existing.id}`, { method: "DELETE" }));
 } else if (DRY_RUN) {
-	console.log(`→ [演练] 未发现已存在的 Release ${TAG}（或无 token 跳过探测），将直接创建`);
+	console.log(
+		`→ [演练] 未发现已存在的 Release ${TAG}（或无 token 跳过探测），将直接创建`,
+	);
 }
 
 // 2) 创建 Release（tag 不存在时由平台按 target_commitish 自动建 tag，与 GitHub 行为一致）
@@ -270,17 +333,30 @@ const release = DRY_RUN
 		});
 const releaseId = release?.id;
 if (releaseId == null) {
-	die(`创建 Release 失败：响应缺少 id：${JSON.stringify(release).slice(0, 400)}`);
+	die(
+		`创建 Release 失败：响应缺少 id：${JSON.stringify(release).slice(0, 400)}`,
+	);
 }
 console.log(
 	`✓ Release 就绪：${TAG}（id=${releaseId}）「WispMusic v${VERSION}」${DRY_RUN ? "（演练）" : ""}`,
 );
 
 // 3) 上传安装包 + 签名（附件名与既有产物命名保持一致）
+// 先传极小的 .sig 走通三步链路（确认端点若有问题立刻暴露，不必等 100MB 的安装包传完）
 const exePath = join(nsisDir, artifactName);
 const sigPath = join(nsisDir, sigName);
-await uploadAsset(releaseId, exePath, artifactName, (await readFile(exePath)).length);
-await uploadAsset(releaseId, sigPath, sigName, (await readFile(sigPath)).length);
+await uploadAsset(
+	releaseId,
+	sigPath,
+	sigName,
+	(await readFile(sigPath)).length,
+);
+await uploadAsset(
+	releaseId,
+	exePath,
+	artifactName,
+	(await readFile(exePath)).length,
+);
 
 // 4) 滚动保留：删除超出 KEEP_VERSIONS 的旧 Release（当前版本强制保留）
 const allReleases = await listAllReleases();
@@ -291,8 +367,12 @@ if (doomedTags.length > 0) {
 	const idOf = new Map(allReleases.map((r) => [tagOf(r), r?.id]));
 	for (const tag of doomedTags) {
 		const id = idOf.get(tag);
-		console.log(`→ 滚动清理旧 Release：${tag}（保留最近 ${KEEP_VERSIONS} 个版本）`);
-		if (id != null) DRY_RUN || (await cnbApi(`/${REPO}/-/releases/${id}`, { method: "DELETE" }));
+		console.log(
+			`→ 滚动清理旧 Release：${tag}（保留最近 ${KEEP_VERSIONS} 个版本）`,
+		);
+		if (id != null)
+			DRY_RUN ||
+				(await cnbApi(`/${REPO}/-/releases/${id}`, { method: "DELETE" }));
 	}
 } else {
 	console.log(`→ Release 数未超过 ${KEEP_VERSIONS} 个，无需清理`);
@@ -355,11 +435,9 @@ try {
 	console.log(`→ clone 更新仓库：cnb.cool/${REPO}`);
 	let cloned = false;
 	for (let attempt = 1; attempt <= 3 && !cloned; attempt++) {
-		const res = spawnSync(
-			"git",
-			["clone", "--depth", "1", authUrl, repoDir],
-			{ encoding: "utf8" },
-		);
+		const res = spawnSync("git", ["clone", "--depth", "1", authUrl, repoDir], {
+			encoding: "utf8",
+		});
 		if (res.status === 0) {
 			cloned = true;
 		} else if (attempt < 3) {
@@ -378,7 +456,11 @@ try {
 
 	// 提交身份（CI bot）
 	git(repoDir, ["config", "user.name", "wisp-updater-bot"]);
-	git(repoDir, ["config", "user.email", "wisp-updater-bot@users.noreply.cnb.cool"]);
+	git(repoDir, [
+		"config",
+		"user.email",
+		"wisp-updater-bot@users.noreply.cnb.cool",
+	]);
 
 	// update.json → 根目录（客户端固定读取）
 	writeFileSync(join(repoDir, "update.json"), manifestText, "utf8");
@@ -387,7 +469,9 @@ try {
 	// 历史安装包已由 Release 附件承载，git 仓库从此只保留 update.json 清单
 	const legacyDir = join(repoDir, "releases");
 	if (existsSync(legacyDir)) {
-		console.log("→ 清理仓库遗留的 releases/ 二进制目录（历史安装包已由 Release 附件承载）");
+		console.log(
+			"→ 清理仓库遗留的 releases/ 二进制目录（历史安装包已由 Release 附件承载）",
+		);
 		rmSync(legacyDir, { recursive: true, force: true });
 	}
 
@@ -407,7 +491,9 @@ try {
 	}
 
 	console.log(`✓ 完成。Release 页：https://cnb.cool/${REPO}/-/releases`);
-	console.log(`  客户端 endpoint = https://cnb.cool/${REPO}/-/git/raw/main/update.json（不变）`);
+	console.log(
+		`  客户端 endpoint = https://cnb.cool/${REPO}/-/git/raw/main/update.json（不变）`,
+	);
 } finally {
 	rmSync(workDir, { recursive: true, force: true });
 }

@@ -47,7 +47,33 @@ export function pruneOldReleaseTags(tags, keepCount, currentTag) {
 	const sorted = [...byVersion.keys()].sort(compareVersionDesc);
 	const keepSet = new Set(sorted.slice(0, keepCount));
 	if (currentVersion) keepSet.add(currentVersion);
-	return sorted
-		.filter((v) => !keepSet.has(v))
-		.map((v) => byVersion.get(v));
+	return sorted.filter((v) => !keepSet.has(v)).map((v) => byVersion.get(v));
+}
+
+/**
+ * 解析 CNB asset-upload-url 返回的 verify_url 为可直接请求的绝对地址。
+ * 实测（2026-09）CNB 的链接渲染层会给地址附加内部路由前缀，形如：
+ *   "@share-html#<namespace>:" + "https://..."
+ * （Release 附件页复制的下载直链同样带此前缀）；真正的请求地址是前缀之后的
+ * 完整 URL。处理规则：
+ *   1. 取最后一个 "https://" 起的尾部作为候选（无前缀时即原值）；
+ *   2. 缺少 ttl 参数时补 ?ttl=0（官方上限 180 天，0 特指永久保留）；
+ *   3. 仍非绝对地址时按相对路径补 apiBase。
+ * 若不剥离前缀直接拼接 API 基地址，会得到 "https://api.cnb.coolhttps://..."
+ * 之类的坏 URL —— WHATWG 解析后主机名为 "share-html"，DNS 必然失败，
+ * fetch 表现为与网络无关的 "fetch failed"（2026-09-14 v0.0.1 首发实锤）。
+ * @param {string} raw verify_url 原始值
+ * @param {string} [apiBase] API 基地址（默认 https://api.cnb.cool）
+ * @returns {string|null} 绝对 URL；入参非法返回 null
+ */
+export function resolveVerifyUrl(raw, apiBase = "https://api.cnb.cool") {
+	if (typeof raw !== "string" || !raw.trim()) return null;
+	const idx = raw.lastIndexOf("https://");
+	const candidate = (idx > 0 ? raw.slice(idx) : raw).trim();
+	const withTtl = /([?&])ttl=/.test(candidate)
+		? candidate
+		: `${candidate}${candidate.includes("?") ? "&" : "?"}ttl=0`;
+	if (/^https?:\/\//i.test(withTtl)) return withTtl;
+	const base = apiBase.replace(/\/+$/, "");
+	return `${base}${withTtl.startsWith("/") ? withTtl : `/${withTtl}`}`;
 }
