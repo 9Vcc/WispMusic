@@ -7,7 +7,7 @@ import {
 	DialogFooter,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import changelogRaw from "../../../CHANGELOG.md?raw";
+import changelogRaw from "../../../.github/workflows/CHANGELOG.md?raw";
 
 interface ChangelogSection {
 	/** 小节标题（### 新增功能）；无标题的散落文本为 null */

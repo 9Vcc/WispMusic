@@ -67,7 +67,7 @@ if (TAG !== `v${VERSION}`) {
 
 // ---- 解析更新说明：CHANGELOG.md 版本段落 → 未发布段落 → 占位文案 ----
 const changelogNotes = await readChangelogNotes(
-	new URL("../CHANGELOG.md", import.meta.url),
+	new URL("../.github/workflows/CHANGELOG.md", import.meta.url),
 	VERSION,
 );
 const notesText = changelogNotes || `WispMusic v${VERSION}`;

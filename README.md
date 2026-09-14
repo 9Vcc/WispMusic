@@ -58,7 +58,7 @@ pnpm test    # 运行单元测试（Vitest）
 pnpm build   # 仅构建前端（TypeScript 检查 + Vite 打包）
 ```
 
-版本变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+版本变更记录见 [CHANGELOG.md](./.github/workflows/CHANGELOG.md)。
 
 ## 🧰 技术栈
 

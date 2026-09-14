@@ -1,5 +1,5 @@
 // scripts/changelog-notes.mjs
-// 从仓库根的 CHANGELOG.md 提取指定版本的更新说明，供 publish-cnb.mjs
+// 从 .github/workflows/CHANGELOG.md 提取指定版本的更新说明，供 publish-cnb.mjs
 // 写入 update.json 的 notes 字段（Tauri updater 清单的官方可选字段）。
 //
 // 约定的段落格式（## 级标题）：
