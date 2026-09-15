@@ -4,6 +4,7 @@ import type { ComponentType } from "react";
 import { useEffect, useState } from "react";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import RootLayout from "./layouts/RootLayout";
+import { initDesktopLyricSync } from "./lib/store/playerStore/desktopLyricSync";
 import { initMediaSession } from "./lib/store/playerStore/mediaSessionSync";
 import ErrorPage from "./pages/ErrorPage";
 import HomePage from "./pages/HomePage";
@@ -96,6 +97,10 @@ const router = createBrowserRouter([
 		path: "/mini-player",
 		lazy: page(() => import("./pages/MiniPlayer")),
 	},
+	{
+		path: "/desktop-lyric",
+		lazy: page(() => import("./pages/DesktopLyric")),
+	},
 ]);
 
 export default function App() {
@@ -106,7 +111,12 @@ export default function App() {
 		// setup → cleanup → setup 双循环，cleanup 已注销全部监听，
 		// 标志位会导致第二次 setup 跳过、监听全灭（托盘/SMTC 全部失灵）
 		if (getCurrentWindow().label === "main") {
-			return initMediaSession();
+			const unlistenMedia = initMediaSession();
+			const unlistenDesktopLyric = initDesktopLyricSync();
+			return () => {
+				unlistenMedia();
+				unlistenDesktopLyric();
+			};
 		}
 	}, []);
 

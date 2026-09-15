@@ -63,6 +63,23 @@ export interface LyricSettings {
 	animationStyle: LyricAnimationStyle;
 }
 
+/** 桌面歌词显示方向：horizontal=横向单行；vertical=竖排（传统右起直书） */
+export type DesktopLyricDirection = "horizontal" | "vertical";
+
+export interface DesktopLyricSettings {
+	/** 桌面歌词悬浮控件是否启用（窗口可见性以此为准，主窗口是唯一写入方） */
+	enabled: boolean;
+	/** 显示方向：横向 / 竖向，可自由切换（窗口尺寸随方向变化） */
+	direction: DesktopLyricDirection;
+	/** 桌面歌词动效（独立于歌词页）：default=逐字填充；stroke=笔画飞入 */
+	animationStyle: LyricAnimationStyle;
+	/** 歌词字号（逻辑像素，横向单行/竖排单字共用） */
+	fontSize: number;
+}
+
+/** 桌面歌词字号可调范围（逻辑像素） */
+export const DESKTOP_LYRIC_FONT_LIMITS = { min: 24, max: 64 } as const;
+
 export interface OutputDeviceProfile {
 	id: string;
 	displayName?: string;
@@ -162,6 +179,13 @@ const defaultLyricSettings: LyricSettings = {
 	animationStyle: "default",
 };
 
+const defaultDesktopLyricSettings: DesktopLyricSettings = {
+	enabled: false,
+	direction: "horizontal",
+	animationStyle: "default",
+	fontSize: 40,
+};
+
 const defaultOutputDeviceProfiles: OutputDeviceProfiles = {
 	[DEFAULT_AUDIO_OUTPUT_DEVICE_ID]: {
 		id: DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
@@ -228,6 +252,7 @@ interface UpdateAudioEngineOptions {
 type SettingStore = {
 	appearance: AppearanceSettings;
 	lyric: LyricSettings;
+	desktopLyric: DesktopLyricSettings;
 	audio: AudioSettings;
 	network: NetworkSettings;
 	window: WindowSettings;
@@ -249,6 +274,10 @@ type SettingStore = {
 	setLyricBlurEnabled: (enabled: boolean) => Promise<void>;
 	setAutoLoadLocalLyric: (enabled: boolean) => Promise<void>;
 	setLyricAnimationStyle: (style: LyricAnimationStyle) => Promise<void>;
+	setDesktopLyricEnabled: (enabled: boolean) => Promise<void>;
+	setDesktopLyricDirection: (direction: DesktopLyricDirection) => Promise<void>;
+	setDesktopLyricAnimationStyle: (style: LyricAnimationStyle) => Promise<void>;
+	setDesktopLyricFontSize: (size: number) => Promise<void>;
 	setPreferQuality: (quality: QualityKey) => Promise<void>;
 	setMaxCacheSize: (size: number) => Promise<void>;
 	upsertOutputDeviceProfiles: (devices: AudioDeviceInfo[]) => Promise<void>;
@@ -286,6 +315,7 @@ type SettingStore = {
 export const useSettingStore = create<SettingStore>((set, get) => ({
 	appearance: defaultAppearanceSettings,
 	lyric: defaultLyricSettings,
+	desktopLyric: defaultDesktopLyricSettings,
 	audio: defaultAudioSettings,
 	network: defaultNetworkSettings,
 	window: defaultWindowSettings,
@@ -348,6 +378,8 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 		const store = await getSettingsStore();
 		const savedAppearance = await store.get<AppearanceSettings>("appearance");
 		const savedLyric = await store.get<Partial<LyricSettings>>("lyric");
+		const savedDesktopLyric =
+			await store.get<Partial<DesktopLyricSettings>>("desktopLyric");
 		const savedAudio = await store.get<Partial<AudioSettings>>("audio");
 		const savedNetwork = await store.get<Partial<NetworkSettings>>("network");
 		const savedWindow = await store.get<Partial<WindowSettings>>("window");
@@ -366,6 +398,7 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 					}
 				: defaultAppearanceSettings,
 			lyric: normalizeLyricSettings(savedLyric),
+			desktopLyric: normalizeDesktopLyricSettings(savedDesktopLyric),
 			audio: normalizeAudioSettings(savedAudio, get().audio),
 			network: normalizeNetworkSettings(savedNetwork),
 			window: normalizeWindowSettings(savedWindow),
@@ -380,6 +413,7 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 		const store = await getSettingsStore();
 		await store.set("appearance", get().appearance);
 		await store.set("lyric", get().lyric);
+		await store.set("desktopLyric", get().desktopLyric);
 		await store.set("audio", get().audio);
 		await store.set("network", get().network);
 		await store.set("window", get().window);
@@ -417,6 +451,42 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 		const store = await getSettingsStore();
 		set((state) => ({ lyric: { ...state.lyric, animationStyle: style } }));
 		await store.set("lyric", get().lyric);
+		await store.save();
+	},
+
+	setDesktopLyricEnabled: async (enabled) => {
+		const store = await getSettingsStore();
+		set((state) => ({ desktopLyric: { ...state.desktopLyric, enabled } }));
+		await store.set("desktopLyric", get().desktopLyric);
+		await store.save();
+	},
+
+	setDesktopLyricDirection: async (direction) => {
+		const store = await getSettingsStore();
+		set((state) => ({ desktopLyric: { ...state.desktopLyric, direction } }));
+		await store.set("desktopLyric", get().desktopLyric);
+		await store.save();
+	},
+
+	setDesktopLyricAnimationStyle: async (style) => {
+		const store = await getSettingsStore();
+		set((state) => ({
+			desktopLyric: { ...state.desktopLyric, animationStyle: style },
+		}));
+		await store.set("desktopLyric", get().desktopLyric);
+		await store.save();
+	},
+
+	setDesktopLyricFontSize: async (size) => {
+		const store = await getSettingsStore();
+		const fontSize = clampNumber(
+			size,
+			DESKTOP_LYRIC_FONT_LIMITS.min,
+			DESKTOP_LYRIC_FONT_LIMITS.max,
+			defaultDesktopLyricSettings.fontSize,
+		);
+		set((state) => ({ desktopLyric: { ...state.desktopLyric, fontSize } }));
+		await store.set("desktopLyric", get().desktopLyric);
 		await store.save();
 	},
 
@@ -700,6 +770,24 @@ function normalizeLyricSettings(saved?: Partial<LyricSettings>): LyricSettings {
 		autoLoadLocalLyric: saved?.autoLoadLocalLyric ?? true,
 		// 动效风格只认枚举值，未知取值（旧版残留/手改配置）回落默认动效
 		animationStyle: saved?.animationStyle === "stroke" ? "stroke" : "default",
+	};
+}
+
+function normalizeDesktopLyricSettings(
+	saved?: Partial<DesktopLyricSettings>,
+): DesktopLyricSettings {
+	return {
+		...defaultDesktopLyricSettings,
+		enabled: saved?.enabled ?? false,
+		// 方向/动效只认枚举值，未知取值（旧版残留/手改配置）回落默认
+		direction: saved?.direction === "vertical" ? "vertical" : "horizontal",
+		animationStyle: saved?.animationStyle === "stroke" ? "stroke" : "default",
+		fontSize: clampNumber(
+			saved?.fontSize,
+			DESKTOP_LYRIC_FONT_LIMITS.min,
+			DESKTOP_LYRIC_FONT_LIMITS.max,
+			defaultDesktopLyricSettings.fontSize,
+		),
 	};
 }
 

@@ -11,6 +11,7 @@ import { AudioEngineCard } from "@/components/settings/AudioSettings/AudioEngine
 import { AudioSettingCard } from "@/components/settings/AudioSettings/AudioSettingCard";
 import { DownloadSettingCard } from "@/components/settings/AudioSettings/DownloadSettignCard";
 import { MusicFolderSettingCard } from "@/components/settings/AudioSettings/MusicFolderSettingCard";
+import { DesktopLyricSettingCard } from "@/components/settings/LyricSettings/DesktopLyricSettingCard";
 import { LyricSettingCard } from "@/components/settings/LyricSettings/LyricSettingCard";
 import { ApiSettingCard } from "@/components/settings/NetworkSettings/ApiSettingCard";
 import { UnblockSettingCard } from "@/components/settings/NetworkSettings/UnblockSettingCard";
@@ -73,6 +74,7 @@ export default function SettingPage() {
 					<AccentColorSettingCard />
 					<FontSettingCard />
 					<LyricSettingCard />
+					<DesktopLyricSettingCard />
 					<SidebarSettingCard />
 					<WindowSettingCard />
 				</div>

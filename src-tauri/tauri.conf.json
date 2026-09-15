@@ -55,6 +55,20 @@
         "decorations": false,
         "transparent": true,
         "label": "mini-player"
+      },
+      {
+        "title": "WispMusic 桌面歌词",
+        "url": "/desktop-lyric",
+        "width": 1000,
+        "height": 112,
+        "visible": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "label": "desktop-lyric"
       }
     ],
     "security": {

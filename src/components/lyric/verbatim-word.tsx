@@ -162,10 +162,14 @@ function makeFloatFrames(): Keyframe[] {
 export const VerbatimWord = React.memo(function VerbatimWord({
 	word,
 	currentTimeMotion,
+	orientation = "horizontal",
 }: {
 	word: LyricWord;
 	currentTimeMotion: MotionValue<number>;
+	/** 排版方向：horizontal=横排（填充从左到右）；vertical=竖排直书（填充从上到下） */
+	orientation?: "horizontal" | "vertical";
 }) {
+	const vertical = orientation === "vertical";
 	const emphasisMetrics = React.useMemo(() => {
 		const { duration, char } = word;
 		return shouldEmphasizeWord(char, duration)
@@ -199,15 +203,21 @@ export const VerbatimWord = React.memo(function VerbatimWord({
 	const translateProgress = useSpring(rawTranslateProgress, {
 		...VERBATIM_TRANSLATE_SPRING,
 	});
+	// 上浮沿行内方向：横排向上（-y），竖排向左（-x，即朝读者方向挑起）
 	const translateY = useTransform(
 		translateProgress,
 		[0, 1],
-		["0em", "-0.05em"],
+		vertical ? ["0em", "0em"] : ["0em", "-0.05em"],
+	);
+	const translateX = useTransform(
+		translateProgress,
+		[0, 1],
+		vertical ? ["0em", "-0.05em"] : ["0em", "0em"],
 	);
 
 	// --lyric-alpha-scale（由歌词页根据背景亮度设置）统一压低遮罩 alpha，
 	// 避免亮色背景下 plus-lighter 加法混合把已播放段顶到裁切过曝
-	const wordMaskImage = useMotionTemplate`linear-gradient(90deg,
+	const wordMaskImage = useMotionTemplate`linear-gradient(${vertical ? "180deg" : "90deg"},
       rgba(0,0,0,calc(${brightAlpha} * var(--lyric-alpha-scale, 1))) 0%,
       rgba(0,0,0,calc(${brightAlpha} * var(--lyric-alpha-scale, 1))) ${brightStop},
       rgba(0,0,0,calc(${fadeAlpha} * var(--lyric-alpha-scale, 1))) ${fadeStop},
@@ -235,6 +245,7 @@ export const VerbatimWord = React.memo(function VerbatimWord({
 					whiteSpace: "pre",
 					margin: "-0.25em",
 					padding: "0.25em",
+					x: translateX,
 					y: translateY,
 					color: "rgba(255,255,255,1)",
 					WebkitMaskImage: wordMaskImage,
@@ -258,6 +269,7 @@ export const VerbatimWord = React.memo(function VerbatimWord({
 				whiteSpace: "pre",
 				margin: "-0.25em",
 				padding: "0.25em",
+				x: translateX,
 				y: translateY,
 				color: "rgba(255,255,255,1)",
 				WebkitMaskImage: wordMaskImage,

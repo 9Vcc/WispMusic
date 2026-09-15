@@ -133,21 +133,16 @@ fn mini_restore_main(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// mini 播放器展开/收起：一次系统调用内同时设置位置和尺寸。
-/// 分离的 set_size/set_position 两次 IPC 之间，窗口会以旧坐标渲染新尺寸
-/// （左上角锚点先向下扩展再上移），产生可见跳动；Win32 SetWindowPos 原子完成。
-#[tauri::command]
-fn mini_set_bounds(
-    app: tauri::AppHandle,
+/// 在一次系统调用内同时设置窗口位置与尺寸（物理像素）。
+/// 分离的 set_size/set_position 两次 IPC 之间，窗口会以旧坐标渲染新尺寸，
+/// 产生可见跳动；Win32 SetWindowPos 原子完成。mini 播放器与桌面歌词共用。
+fn set_window_bounds_atomic(
+    window: &tauri::WebviewWindow,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let window = app
-        .get_webview_window("mini-player")
-        .ok_or("mini-player window not found")?;
-
     #[cfg(target_os = "windows")]
     {
         use raw_window_handle::HasWindowHandle;
@@ -188,6 +183,156 @@ fn mini_set_bounds(
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// mini 播放器展开/收起：一次系统调用内同时设置位置和尺寸（原子 SetWindowPos）。
+#[tauri::command]
+fn mini_set_bounds(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("mini-player")
+        .ok_or("mini-player window not found")?;
+    set_window_bounds_atomic(&window, x, y, width, height)
+}
+
+// ===================== 桌面歌词悬浮控件 =====================
+// 独立置顶透明窗口：主窗口负责推状态（歌词/进度/控件设置），
+// 窗口几何（初始落位/横竖切换缩放）由这里的原子操作完成。
+
+/// 主窗口当前所在显示器的物理几何（桌面歌词落位/钳制的基准）。
+fn desktop_lyric_anchor_monitor(
+    app: &tauri::AppHandle,
+) -> Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>, f64)> {
+    let main = app.get_webview_window("main")?;
+    let monitor = main
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten())?;
+    Some((
+        *monitor.position(),
+        *monitor.size(),
+        monitor.scale_factor(),
+    ))
+}
+
+/// 显示桌面歌词窗口：落在主窗口所在显示器的底部居中（预留下方任务栏余量），
+/// 尺寸由前端按方向/字号计算后传入（逻辑像素）。不抢焦点——桌面歌词
+/// 必须在不打断用户当前工作的前提下出现。
+#[tauri::command]
+fn desktop_lyric_show(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("desktop-lyric")
+        .ok_or("desktop-lyric window not found")?;
+
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let w_phys = (width * scale).round().max(1.0) as i32;
+    let h_phys = (height * scale).round().max(1.0) as i32;
+
+    // 已在屏上（方向/字号变更触发的重显示）→ 原地缩放，不重新落位
+    if window.is_visible().unwrap_or(false) {
+        return desktop_lyric_resize(app.clone(), width, height);
+    }
+
+    let (x_phys, y_phys) = match desktop_lyric_anchor_monitor(&app) {
+        Some((mon_pos, mon_size, mon_scale)) => {
+            let margin_phys = (56.0 * mon_scale).round() as i32; // 任务栏上方余量
+            let x = mon_pos.x + ((mon_size.width as i32) - w_phys) / 2;
+            let y = mon_pos.y + (mon_size.height as i32) - h_phys - margin_phys;
+            (x.max(mon_pos.x), y.max(mon_pos.y))
+        }
+        None => (100, 100),
+    };
+
+    set_window_bounds_atomic(
+        &window,
+        x_phys as f64 / scale,
+        y_phys as f64 / scale,
+        width,
+        height,
+    )?;
+    window.show().map_err(|e| e.to_string())?;
+    let _ = app.emit_to("main", "desktop-lyric-shown", ());
+    Ok(())
+}
+
+/// 隐藏桌面歌词窗口（保持进程与窗口存活，可再次呼出）
+#[tauri::command]
+fn desktop_lyric_hide(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("desktop-lyric")
+        .ok_or("desktop-lyric window not found")?;
+    window.hide().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 横竖切换/字号变更时的窗口缩放：保持窗口中心点不动（物理坐标），
+/// 并钳制在当前显示器范围内，一次 SetWindowPos 原子完成。
+#[tauri::command]
+fn desktop_lyric_resize(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("desktop-lyric")
+        .ok_or("desktop-lyric window not found")?;
+
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+
+    let w_phys = (width * scale).round().max(1.0) as i32;
+    let h_phys = (height * scale).round().max(1.0) as i32;
+    let cx = pos.x + (size.width as i32) / 2;
+    let cy = pos.y + (size.height as i32) / 2;
+
+    let (mut x, mut y) = (cx - w_phys / 2, cy - h_phys / 2);
+    if let Some(mon) = window.current_monitor().ok().flatten() {
+        let mon_x = mon.position().x;
+        let mon_y = mon.position().y;
+        let mon_w = mon.size().width as i32;
+        let mon_h = mon.size().height as i32;
+        x = x.clamp(mon_x, (mon_x + mon_w - w_phys).max(mon_x));
+        y = y.clamp(mon_y, (mon_y + mon_h - h_phys).max(mon_y));
+    }
+
+    set_window_bounds_atomic(
+        &window,
+        x as f64 / scale,
+        y as f64 / scale,
+        width,
+        height,
+    )
+}
+
+/// 主窗口 → 桌面歌词窗口：推送快照（歌词全文/进度/控件设置）
+#[tauri::command]
+fn desktop_lyric_push_state(
+    app: tauri::AppHandle,
+    state: serde_json::Value,
+) -> Result<(), String> {
+    app.emit_to("desktop-lyric", "desktop-lyric-sync-state", state)
+        .map_err(|e| e.to_string())
+}
+
+/// 桌面歌词窗口 → 主窗口：转发控件操作（关闭/切换方向/切换动效/调字号/ready）
+#[tauri::command]
+fn desktop_lyric_command(
+    app: tauri::AppHandle,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    app.emit_to("main", "desktop-lyric-event", payload)
+        .map_err(|e| e.to_string())
 }
 
 /// 隐藏 mini 窗口但保持 mini 模式激活（主窗口仍隐藏，托盘左击可再次呼出）
@@ -369,6 +514,15 @@ pub fn run() {
                     let _ = window.hide();
                     return;
                 }
+                if window.label() == "desktop-lyric" {
+                    // 桌面歌词被关闭（Alt+F4 等）→ 仅隐藏，并通知主窗口把
+                    // 开关设置同步回 false（设置是唯一可信源）
+                    let _ = window.hide();
+                    let _ = window
+                        .app_handle()
+                        .emit_to("main", "desktop-lyric-hidden", ());
+                    return;
+                }
                 let _ = window.emit("app-background", ());
 
                 std::thread::spawn({
@@ -401,6 +555,11 @@ pub fn run() {
             mini_restore_main,
             mini_close,
             mini_set_bounds,
+            desktop_lyric_show,
+            desktop_lyric_hide,
+            desktop_lyric_resize,
+            desktop_lyric_push_state,
+            desktop_lyric_command,
             ncm::ncm_fetch,
             unm::unm_match,
             smtc::smtc_update_metadata,

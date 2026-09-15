@@ -315,6 +315,33 @@
   border-color: color-mix(in srgb, var(--foreground) 22%, transparent);
 }
 
+/* ===== 桌面歌词悬浮控件 =====
+   桌面歌词是纯文字透明窗口，浮在任意壁纸上，plus-lighter 叠加不可用，
+   可读性由独立的暗色描边背衬层保证（.desktop-lyric-glyph-backdrop 与
+   填充层同文本同布局完全重叠）。描边用 em 相对字号缩放，paint-order:
+   stroke 让描边垫在字形下方不吃掉笔画（WebView2/Chromium 对 HTML 文本
+   支持完整）；不用 backdrop-filter——它够不到窗口后面的桌面。 */
+.desktop-lyric-glyph-backdrop {
+  color: transparent;
+  -webkit-text-stroke: 0.1em rgb(8 10 14 / 0.52);
+  paint-order: stroke fill;
+  text-shadow:
+    0 1px 12px rgb(0 0 0 / 0.45),
+    0 0 2px rgb(0 0 0 / 0.55);
+}
+
+/* 填充层自身的浅投影（跟随逐字遮罩渐隐），强化已唱部分的立体感 */
+.desktop-lyric-glyph-halo {
+  text-shadow: 0 1px 6px rgb(0 0 0 / 0.32);
+}
+
+/* 笔画动效的 SVG 字格：drop-shadow 提供与文字背衬层同级的可读性兜底。
+   仅作用于桌面歌词窗口（无 plus-lighter 链路），不违反歌词页的
+   「混合祖先链禁 filter」约束 */
+.desktop-lyric-stroke-shadow {
+  filter: drop-shadow(0 1.5px 4px rgb(0 0 0 / 0.5));
+}
+
 /* ===== 材质 / 明暗切换的过渡 =====
    系统特效的重建（clearEffects → setEffects）是 DWM 侧的硬切，CSS 够不到；
    能平滑的是 CSS 侧这一层压暗：切明暗时 --main-background / --card 翻色、
