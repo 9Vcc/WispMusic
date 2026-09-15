@@ -21,11 +21,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { shallow } from "zustand/shallow";
+import {
+	computeDesktopLyricGeometry,
+	type DesktopLyricDirection,
+	type DesktopLyricGeometry,
+} from "@/lib/utils/desktop-lyric-geometry";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
 import { resolveLyricLines } from "@/lib/utils/lyric-source";
 import {
 	DESKTOP_LYRIC_FONT_LIMITS,
-	type DesktopLyricDirection,
 	type DesktopLyricSettings,
 	type LyricAnimationStyle,
 	useSettingStore,
@@ -36,29 +40,7 @@ import { selectCurrentLyricOffset } from "./playerStoreSlice/createLyricOffsetSl
 import { selectActiveLyricVersionLines } from "./playerStoreSlice/createLyricVersionSlice";
 import { useProgressStore } from "./progressStore";
 
-/** 桌面歌词窗口逻辑尺寸（随方向/字号计算，主窗口单点下发） */
-export interface DesktopLyricGeometry {
-	width: number;
-	height: number;
-}
-
-/** 横向窗口：宽度吃满合理上限、高度跟随字号；竖向窗口：高度吃满合理上限、宽度跟随字号（含多列） */
-export function computeDesktopLyricGeometry(
-	direction: DesktopLyricDirection,
-	fontSize: number,
-): DesktopLyricGeometry {
-	if (direction === "horizontal") {
-		return {
-			width: 1000,
-			height: Math.min(200, Math.max(96, Math.round(fontSize * 2.6))),
-		};
-	}
-	// 竖排：宽度容纳最多 3 列（笔画动效按句长拆列），高度是纵向卷轴的主轴
-	return {
-		width: Math.min(440, Math.max(220, Math.round(fontSize * 4.8))),
-		height: 620,
-	};
-}
+export type { DesktopLyricGeometry };
 
 const clampFontSize = (size: number) =>
 	Math.min(

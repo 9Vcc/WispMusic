@@ -5,6 +5,7 @@ import type { SongQualityDetail } from "@/lib/types/song";
 import { cn, formatFileSize } from "@/lib/utils";
 import { QualityTriggerIcon } from "./quality-trigger-icon";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 export function MusicLevelPopover({
 	open,
@@ -46,16 +47,33 @@ export function MusicLevelPopover({
 				{trigger ? (
 					trigger
 				) : (
-					<span
-						className={cn(
-							"inline-flex items-center gap-1.5 rounded-md border bg-card/50 px-2 py-1 font-bold text-foreground/60 text-xs hover:bg-card/30",
-							!shouldShowQualityText && "px-2.5",
-							className,
-						)}
-					>
-						<QualityTriggerIcon qualityKey={currentMusicLevelKey} />
-						{shouldShowQualityText && QUALITY_BY_KEY[currentMusicLevelKey].desc}
-					</span>
+					<Tooltip>
+						{/* 播放条右侧控件密集，窄窗口（<1200px，含最小尺寸
+						    1000x700）放不下文字标签——文字压缩即折行。默认只显示
+						    音质图标（与其余图标控件一致），宽窗口恢复文字；whitespace-
+						    nowrap 兜底保证任何情况下文字不折行 */}
+						<TooltipTrigger asChild>
+							<span
+								className={cn(
+									"inline-flex items-center gap-1.5 rounded-md border bg-card/50 px-2 py-1 font-bold text-foreground/60 text-xs whitespace-nowrap hover:bg-card/30",
+									!shouldShowQualityText && "px-2.5",
+									className,
+								)}
+							>
+								<QualityTriggerIcon qualityKey={currentMusicLevelKey} />
+								{shouldShowQualityText && (
+									<span className="hidden min-[1200px]:inline">
+										{QUALITY_BY_KEY[currentMusicLevelKey].desc}
+									</span>
+								)}
+							</span>
+						</TooltipTrigger>
+						<TooltipContent side="top" sideOffset={10}>
+							{shouldShowQualityText
+								? `音质：${QUALITY_BY_KEY[currentMusicLevelKey].desc}`
+								: "音质"}
+						</TooltipContent>
+					</Tooltip>
 				)}
 			</PopoverTrigger>
 			<PopoverContent

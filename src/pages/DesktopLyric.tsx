@@ -10,6 +10,7 @@ import type {
 	DesktopLyricDirection,
 	LyricAnimationStyle,
 } from "@/lib/store/settingStore/settingStore";
+import { computeDesktopLyricGeometry } from "@/lib/utils/desktop-lyric-geometry";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
 
 /**
@@ -159,6 +160,31 @@ export default function DesktopLyric() {
 	// 窗口句柄只取一次（与 mini 播放器同因：避免 effect 重跑窗口跳动）
 	const winRef = useRef(getCurrentWindow());
 
+	// 用户可拖拽窗口边缘自由缩放（resizable: true）；内容按"设计尺寸 →
+	// 实际尺寸"等比缩放，字号视觉随窗口大小变化，方向/字号设置变更时
+	// 主窗口会把窗口重置回标准几何，缩放比随之回到 1
+	const rootRef = useRef<HTMLDivElement>(null);
+	const [contentScale, setContentScale] = useState(1);
+	useEffect(() => {
+		const el = rootRef.current;
+		if (!el) return;
+		const design = computeDesktopLyricGeometry(
+			settings.direction,
+			settings.fontSize,
+		);
+		const update = () => {
+			const next = Math.min(
+				el.clientWidth / design.width,
+				el.clientHeight / design.height,
+			);
+			setContentScale(Number.isFinite(next) && next > 0 ? next : 1);
+		};
+		update();
+		const ro = new ResizeObserver(update);
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, [settings.direction, settings.fontSize]);
+
 	useEffect(() => {
 		const unlisten = listen<SyncPayload>("desktop-lyric-sync-state", (e) => {
 			const p = e.payload;
@@ -229,6 +255,7 @@ export default function DesktopLyric() {
 	);
 
 	const currentLine = currentIndex >= 0 ? lines[currentIndex] : undefined;
+	const nextLine = currentIndex >= 0 ? lines[currentIndex + 1] : undefined;
 	const lineKey = currentLine
 		? `${currentLine.lineStart}-${currentLine.lineText}`
 		: "none";
@@ -248,13 +275,28 @@ export default function DesktopLyric() {
 	const isVertical = settings.direction === "vertical";
 
 	return (
-		// 根层透明：桌面歌词没有窗口背板，文字直接浮在桌面上
-		<div className="group relative h-screen w-screen select-none overflow-hidden">
-			{/* 歌词舞台：按住拖动；字体走全局歌词字体变量（含用户自定义字体） */}
+		// 根层透明：桌面歌词没有窗口背板，文字直接浮在桌面上（不遮挡桌面）。
+		// 拖拽绑定在根层而非歌词舞台：舞台会被等比缩放，绑根层保证任何
+		// 缩放比下整个窗口都可按住拖动
+		<div
+			ref={rootRef}
+			className="group relative h-screen w-screen select-none overflow-hidden"
+			onPointerDown={handleDragPointerDown}
+		>
+			{/* 悬浮背景板：仅 hover 时浮现的半透明圆角底；非 hover 完全透明 */}
+			<div
+				aria-hidden
+				className="pointer-events-none absolute inset-1 rounded-2xl bg-black/30 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+			/>
+			{/* 歌词舞台：字体走全局歌词字体变量（含用户自定义字体），
+			    内容随窗口实际尺寸等比缩放 */}
 			<div
 				className="absolute inset-0 flex items-center justify-center"
-				style={{ fontFamily: "var(--app-lyric-font-family, inherit)" }}
-				onPointerDown={handleDragPointerDown}
+				style={{
+					fontFamily: "var(--app-lyric-font-family, inherit)",
+					transform: `scale(${contentScale})`,
+					transformOrigin: "center",
+				}}
 			>
 				{settings.animationStyle === "stroke" ? (
 					<DesktopStrokeView
@@ -266,6 +308,7 @@ export default function DesktopLyric() {
 				) : (
 					<DesktopDefaultView
 						line={currentLine}
+						nextLine={nextLine}
 						lineKey={lineKey}
 						direction={settings.direction}
 						fontSize={settings.fontSize}
@@ -274,10 +317,13 @@ export default function DesktopLyric() {
 				)}
 			</div>
 
-			{/* 悬浮工具条：hover 淡入居中，玻璃面语言与歌词页工具条一致 */}
-			<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:pointer-events-auto group-hover:opacity-100">
+			{/* 悬浮工具条：hover 淡入居中，玻璃面语言与歌词页工具条一致。
+			    pointer-events 只能在 hover 时下放到工具条胶囊本身——若整层
+			    启用（inset-0 覆盖全窗口），会把按住拖动整个拦掉（鼠标悬浮
+			    在窗口内是常态，之前拖不动即此因） */}
+			<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
 				<div
-					className="flex items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+					className="pointer-events-none flex items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto"
 					style={{ fontFamily: '"Microsoft Yahei"' }}
 				>
 					<ToolButton

@@ -5,8 +5,11 @@ import { cn } from "@/lib/utils";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
 
 /**
- * 桌面歌词「默认动效」视图：当前句整行展示，逐字填充与歌词页共用
- * VerbatimWord（横排从左到右、竖排直书从上到下），行间切换淡入上移。
+ * 桌面歌词「默认动效」视图。
+ *
+ * 横向布局为双行：上行是当前句（逐字填充动效，与歌词页共用
+ * VerbatimWord），下行是下一句静态预览（低亮度），KTV 双行结构；
+ * 竖向布局保持单列直书。
  *
  * 与歌词页的关键差异：桌面歌词浮在任意壁纸上，plus-lighter 叠加不可用，
  * 可读性由独立的暗色描边背衬层保证——背衬层与填充层同文本同布局完全
@@ -17,6 +20,8 @@ export type DesktopLyricOrientation = "horizontal" | "vertical";
 
 interface DesktopDefaultViewProps {
 	line?: ILyricLine;
+	/** 下一句（横向双行的预览行） */
+	nextLine?: ILyricLine;
 	/** 行唯一标识（驱动进出场过渡） */
 	lineKey: string;
 	direction: DesktopLyricOrientation;
@@ -24,8 +29,12 @@ interface DesktopDefaultViewProps {
 	currentTimeMotion: MotionValue<number>;
 }
 
+/** 单行槽位高度（与 lineHeight 1.35 一致，钳制超高字符防溢出对侧行） */
+const LINE_SLOT_RATIO = 1.35;
+
 export function DesktopDefaultView({
 	line,
+	nextLine,
 	lineKey,
 	direction,
 	fontSize,
@@ -40,31 +49,73 @@ export function DesktopDefaultView({
 	const enter = isVertical ? { opacity: 0, x: 14 } : { opacity: 0, y: 10 };
 	const exit = isVertical ? { opacity: 0, x: -12 } : { opacity: 0, y: -8 };
 
+	if (isVertical) {
+		return (
+			<div className="flex h-full w-full items-center justify-center overflow-hidden px-3 py-2">
+				<AnimatePresence mode="popLayout" initial={false}>
+					<motion.div
+						key={lineKey}
+						initial={enter}
+						animate={{ opacity: 1, x: 0, y: 0 }}
+						exit={exit}
+						transition={{ duration: 0.24, ease: "easeOut" }}
+						className="h-full max-w-full"
+						style={{ writingMode: "vertical-rl" }}
+					>
+						<DesktopLineText
+							line={line}
+							direction={direction}
+							fontSize={fontSize}
+							currentTimeMotion={currentTimeMotion}
+						/>
+					</motion.div>
+				</AnimatePresence>
+			</div>
+		);
+	}
+
+	// 横向双行：上行当前句（动效），下行下一句静态预览
 	return (
 		<div
-			className={cn(
-				"flex h-full w-full items-center justify-center overflow-hidden",
-				isVertical ? "px-3 py-2" : "px-8",
-			)}
+			className="flex h-full w-full flex-col items-center justify-center gap-1 overflow-hidden px-8"
+			style={{ fontFamily: "var(--app-lyric-font-family, inherit)" }}
 		>
-			<AnimatePresence mode="popLayout" initial={false}>
-				<motion.div
-					key={lineKey}
-					initial={enter}
-					animate={{ opacity: 1, x: 0, y: 0 }}
-					exit={exit}
-					transition={{ duration: 0.24, ease: "easeOut" }}
-					className={cn("max-w-full", isVertical && "h-full")}
-					style={isVertical ? { writingMode: "vertical-rl" } : undefined}
-				>
+			<div
+				className="flex w-full items-center justify-center overflow-hidden"
+				style={{ height: fontSize * LINE_SLOT_RATIO }}
+			>
+				<AnimatePresence mode="popLayout" initial={false}>
+					<motion.div
+						key={lineKey}
+						initial={enter}
+						animate={{ opacity: 1, x: 0, y: 0 }}
+						exit={exit}
+						transition={{ duration: 0.24, ease: "easeOut" }}
+						className="max-w-full"
+					>
+						<DesktopLineText
+							line={line}
+							direction={direction}
+							fontSize={fontSize}
+							currentTimeMotion={currentTimeMotion}
+						/>
+					</motion.div>
+				</AnimatePresence>
+			</div>
+			<div
+				className="flex w-full items-center justify-center overflow-hidden"
+				style={{ height: fontSize * LINE_SLOT_RATIO }}
+			>
+				{nextLine ? (
 					<DesktopLineText
-						line={line}
+						line={nextLine}
 						direction={direction}
 						fontSize={fontSize}
 						currentTimeMotion={currentTimeMotion}
+						preview
 					/>
-				</motion.div>
-			</AnimatePresence>
+				) : null}
+			</div>
 		</div>
 	);
 }
@@ -75,11 +126,14 @@ function DesktopLineText({
 	direction,
 	fontSize,
 	currentTimeMotion,
+	preview = false,
 }: {
 	line: ILyricLine;
 	direction: DesktopLyricOrientation;
 	fontSize: number;
 	currentTimeMotion: MotionValue<number>;
+	/** 下一句预览：静态低亮度文本，不带逐字动效 */
+	preview?: boolean;
 }) {
 	const isVertical = direction === "vertical";
 	// 横排单行不换行（窗口高度按字号给定，换行必然溢出）；
@@ -87,7 +141,7 @@ function DesktopLineText({
 	const textStyle: CSSProperties = {
 		fontSize,
 		fontWeight: 700,
-		lineHeight: 1.35,
+		lineHeight: LINE_SLOT_RATIO,
 		fontFamily: "var(--app-lyric-font-family, inherit)",
 		fontSynthesis: "none",
 		WebkitFontSmoothing: "antialiased",
@@ -107,7 +161,7 @@ function DesktopLineText({
 				{line.lineText}
 			</span>
 			<span className="desktop-lyric-glyph-halo relative">
-				{hasWords && line.words ? (
+				{!preview && hasWords && line.words ? (
 					line.words.map((word) => (
 						<VerbatimWord
 							key={`${word.startTime}-${word.duration}-${word.char}`}
@@ -117,7 +171,13 @@ function DesktopLineText({
 						/>
 					))
 				) : (
-					<span style={{ color: "rgb(255 255 255 / 0.88)" }}>
+					<span
+						style={{
+							color: preview
+								? "rgb(255 255 255 / 0.45)"
+								: "rgb(255 255 255 / 0.88)",
+						}}
+					>
 						{line.lineText}
 					</span>
 				)}
