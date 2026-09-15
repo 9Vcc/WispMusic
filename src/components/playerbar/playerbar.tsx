@@ -2,9 +2,12 @@ import { useSongLogic } from "@/hooks/use-song-logic";
 import type { RepeatType, ShuffleType } from "@/lib/constants/player";
 import { useContextMenuStore } from "@/lib/store/contextMenuStore/contextMenuStore";
 import { usePlayerStore } from "@/lib/store/playerStore/playerStore";
+import { useSettingStore } from "@/lib/store/settingStore/settingStore";
 import { GetThumbnail, cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import {
+	ClosedCaption20Filled,
+	ClosedCaption20Regular,
 	MoreHorizontal20Regular,
 	MusicNote224Filled,
 	PictureInPicture20Regular,
@@ -230,6 +233,37 @@ function PlayModeButton() {
 	);
 }
 
+/** 桌面歌词开关：与设置页共享 settingStore 唯一可信源，显隐由同步引擎驱动 */
+function DesktopLyricButton() {
+	const enabled = useSettingStore((s) => s.desktopLyric.enabled);
+	const setDesktopLyricEnabled = useSettingStore(
+		(s) => s.setDesktopLyricEnabled,
+	);
+	const CaptionIcon = enabled ? ClosedCaption20Filled : ClosedCaption20Regular;
+
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<WispButton
+					variant="ghost"
+					onClick={() => void setDesktopLyricEnabled(!enabled)}
+					icon={
+						<CaptionIcon
+							className={cn(
+								"size-5",
+								enabled ? "text-primary" : "text-foreground/70",
+							)}
+						/>
+					}
+				/>
+			</TooltipTrigger>
+			<TooltipContent side="top" sideOffset={10}>
+				桌面歌词
+			</TooltipContent>
+		</Tooltip>
+	);
+}
+
 function CenterButtonRegion() {
 	const togglePlay = usePlayerStore((s) => s.togglePlay);
 	const next = usePlayerStore((s) => s.next);
@@ -293,6 +327,7 @@ function RightButtonRegion() {
 			<PlayModeButton />
 			<MusicLevelPopover />
 			{!isFmMode && <PlaylistSheet />}
+			<DesktopLyricButton />
 			<Tooltip>
 				<TooltipTrigger asChild>
 					<WispButton
