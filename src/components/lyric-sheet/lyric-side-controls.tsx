@@ -2,6 +2,7 @@ import {
 	ArrowClockwise24Regular,
 	ArrowCounterclockwise24Regular,
 	ArrowReset24Regular,
+	DrawText24Regular,
 	List24Regular,
 } from "@fluentui/react-icons";
 import { motion, useReducedMotion } from "framer-motion";
@@ -17,6 +18,7 @@ import {
 	selectActiveLyricVersion,
 	selectActiveLyricVersionLines,
 } from "@/lib/store/playerStore/playerStoreSlice/createLyricVersionSlice";
+import { useSettingStore } from "@/lib/store/settingStore/settingStore";
 import { cn } from "@/lib/utils";
 import { resolveLyricLines } from "@/lib/utils/lyric-source";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -77,6 +79,13 @@ export function LyricSideControls({ visible }: { visible: boolean }) {
 	);
 
 	const isOffsetAdjusted = lyricOffsetMs !== DEFAULT_LYRIC_OFFSET_MS;
+	// 笔画歌词动效开关：默认动效 ↔ 笔画双列动效，持久化到设置
+	const isStrokeMode = useSettingStore(
+		(s) => s.lyric.animationStyle === "stroke",
+	);
+	const setLyricAnimationStyle = useSettingStore(
+		(s) => s.setLyricAnimationStyle,
+	);
 	const keepVisible = visible || versionDialogOpen;
 	const nudgeLabel = `${LYRIC_OFFSET_NUDGE_MS / 1000}s`;
 
@@ -97,6 +106,31 @@ export function LyricSideControls({ visible }: { visible: boolean }) {
 			style={{ pointerEvents: keepVisible ? "auto" : "none" }}
 		>
 			<div className="flex flex-col gap-2">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							type="button"
+							aria-label="笔画歌词动效"
+							aria-pressed={isStrokeMode}
+							className={cn(
+								"relative flex size-10 items-center justify-center rounded-full text-white transition-colors duration-300 ease-in-out",
+								TOOL_BUTTON_SURFACE,
+							)}
+							onClick={() =>
+								setLyricAnimationStyle(isStrokeMode ? "default" : "stroke")
+							}
+						>
+							<DrawText24Regular className="size-5 drop-shadow-md" />
+							{isStrokeMode && (
+								<span className="absolute right-1.5 bottom-1.5 size-1.5 rounded-full bg-emerald-400" />
+							)}
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="left" sideOffset={10}>
+						{isStrokeMode ? "笔画歌词动效（已开启）" : "笔画歌词动效"}
+					</TooltipContent>
+				</Tooltip>
+
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<button

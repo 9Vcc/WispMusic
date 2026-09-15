@@ -16,9 +16,11 @@ import { CLOSE_LYRIC_SHEET_EVENT } from "@/lib/events/lyric-sheet";
 import { usePlayerStore } from "@/lib/store/playerStore/playerStore";
 import { selectActiveLocalLyric } from "@/lib/store/playerStore/playerStoreSlice/createLocalLyricSlice";
 import { selectActiveLyricVersion } from "@/lib/store/playerStore/playerStoreSlice/createLyricVersionSlice";
+import { useSettingStore } from "@/lib/store/settingStore/settingStore";
 import { extractBackgroundColors } from "@/lib/utils/color-extractor";
 import { ParseLyric } from "@/lib/utils/lyric-parser";
 import { Lyric } from "../lyric/lyric";
+import { StrokeLyricView } from "../lyric/stroke/stroke-lyric-view";
 import {
 	DEFAULT_LYRIC_SHEET_COLORS,
 	LyricSheetBackground,
@@ -136,6 +138,8 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 	);
 	// 手动选择的歌词版本（酷狗候选）没有翻译/罗马音分轨，激活时下线这两个开关
 	const hasManualLyricVersion = usePlayerStore(selectActiveLyricVersion) !== null;
+	// 歌词动效风格：default=默认滚动逐字；stroke=笔画双列（用户可在工具条/设置切换）
+	const lyricAnimationStyle = useSettingStore((s) => s.lyric.animationStyle);
 	const [lastBackgroundColors, setLastBackgroundColors] = useState<
 		[number, number, number][]
 	>(DEFAULT_LYRIC_SHEET_COLORS);
@@ -312,11 +316,19 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 												onMouseLeave={handleLyricSideLeave}
 											>
 												<div className="pointer-events-auto absolute top-0 right-12 bottom-0 w-[calc(100%-48px)]">
-													<Lyric
-														className="flex h-full w-full"
-														showTrans={showTrans}
-														showRoma={showRoma}
-													/>
+													{lyricAnimationStyle === "stroke" ? (
+														<StrokeLyricView
+															className="flex h-full w-full"
+															showTrans={showTrans}
+															showRoma={showRoma}
+														/>
+													) : (
+														<Lyric
+															className="flex h-full w-full"
+															showTrans={showTrans}
+															showRoma={showRoma}
+														/>
+													)}
 												</div>
 												<LyricSideControls visible={isLyricSideHovered} />
 											</div>

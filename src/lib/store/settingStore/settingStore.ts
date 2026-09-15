@@ -51,11 +51,16 @@ export interface AppearanceSettings {
 	font: FontSettings;
 }
 
+/** 歌词页动效风格：default 为项目默认滚动逐字动效，stroke 为笔画双列动效 */
+export type LyricAnimationStyle = "default" | "stroke";
+
 export interface LyricSettings {
 	/** 歌词页：非当前行是否按距离做模糊处理（关闭则全部行保持清晰） */
 	blurEnabled: boolean;
 	/** 播放本地音乐时，是否自动加载音频同目录下的同名 .lrc 歌词文件 */
 	autoLoadLocalLyric: boolean;
+	/** 歌词页动效：default=默认滚动逐字；stroke=笔画双列（一列靠上一列靠下） */
+	animationStyle: LyricAnimationStyle;
 }
 
 export interface OutputDeviceProfile {
@@ -146,14 +151,15 @@ const defaultAppearanceSettings: AppearanceSettings = {
 	font: {
 		interfaceFontStr: "",
 		lyricFontStr: "",
-		lyricFontWeight: 800,
-		lyricFontSize: 36,
+		lyricFontWeight: 400,
+		lyricFontSize: 40,
 	},
 };
 
 const defaultLyricSettings: LyricSettings = {
 	blurEnabled: true,
 	autoLoadLocalLyric: true,
+	animationStyle: "default",
 };
 
 const defaultOutputDeviceProfiles: OutputDeviceProfiles = {
@@ -242,6 +248,7 @@ type SettingStore = {
 
 	setLyricBlurEnabled: (enabled: boolean) => Promise<void>;
 	setAutoLoadLocalLyric: (enabled: boolean) => Promise<void>;
+	setLyricAnimationStyle: (style: LyricAnimationStyle) => Promise<void>;
 	setPreferQuality: (quality: QualityKey) => Promise<void>;
 	setMaxCacheSize: (size: number) => Promise<void>;
 	upsertOutputDeviceProfiles: (devices: AudioDeviceInfo[]) => Promise<void>;
@@ -402,6 +409,13 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 		set((state) => ({
 			lyric: { ...state.lyric, autoLoadLocalLyric: enabled },
 		}));
+		await store.set("lyric", get().lyric);
+		await store.save();
+	},
+
+	setLyricAnimationStyle: async (style) => {
+		const store = await getSettingsStore();
+		set((state) => ({ lyric: { ...state.lyric, animationStyle: style } }));
 		await store.set("lyric", get().lyric);
 		await store.save();
 	},
@@ -684,6 +698,8 @@ function normalizeLyricSettings(saved?: Partial<LyricSettings>): LyricSettings {
 		...saved,
 		blurEnabled: saved?.blurEnabled ?? true,
 		autoLoadLocalLyric: saved?.autoLoadLocalLyric ?? true,
+		// 动效风格只认枚举值，未知取值（旧版残留/手改配置）回落默认动效
+		animationStyle: saved?.animationStyle === "stroke" ? "stroke" : "default",
 	};
 }
 
@@ -784,8 +800,8 @@ function normalizeFontSettings(font?: Partial<FontSettings>): FontSettings {
 	return {
 		...defaultAppearanceSettings.font,
 		...font,
-		lyricFontWeight: clampNumber(font?.lyricFontWeight, 100, 900, 800),
-		lyricFontSize: clampNumber(font?.lyricFontSize, 16, 72, 36),
+		lyricFontWeight: clampNumber(font?.lyricFontWeight, 100, 900, 400),
+		lyricFontSize: clampNumber(font?.lyricFontSize, 16, 72, 40),
 	};
 }
 
