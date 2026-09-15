@@ -121,10 +121,14 @@ export function AudioLevelItem({
 	return (
 		<div
 			data-active={selected ? "true" : undefined}
-			className="wisp-menu-item relative flex cursor-pointer items-center justify-between rounded-md px-4 py-2"
+			className="wisp-menu-item relative flex cursor-pointer items-center rounded-md px-4 py-2"
 			onClick={() => onClick(qualityKey)}
 		>
-			<span className="font-bold">{option.desc}</span>
+			{/* 固定宽度图标槽：所有音质行共用（含杜比宽标），desc 纵向对齐 */}
+			<span className="flex w-14 shrink-0 items-center text-foreground/75">
+				<QualityTriggerIcon qualityKey={qualityKey} />
+			</span>
+			<span className="flex-1 font-bold">{option.desc}</span>
 
 			<div className="flex items-center gap-2">
 				{size && (
