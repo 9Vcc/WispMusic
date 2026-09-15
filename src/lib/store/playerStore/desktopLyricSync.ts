@@ -21,6 +21,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { shallow } from "zustand/shallow";
+import { corePlayer } from "@/lib/player/corePlayer";
 import {
 	computeDesktopLyricGeometry,
 	type DesktopLyricDirection,
@@ -80,7 +81,6 @@ function pushState(state: SyncSnapshot) {
 }
 
 export function initDesktopLyricSync() {
-	const unlistenFns: Array<() => void> = [];
 	const unsubscribes: Array<() => void> = [];
 
 	// 桌面歌词窗口的可见性（近似记账：show 指令、shown/hidden 事件共同维护）
@@ -120,7 +120,9 @@ export function initDesktopLyricSync() {
 		pushState({ type: "settings", direction, animationStyle, fontSize });
 	}
 
-	// 进度推送节流：桌面歌词本地插值，300ms 锚点已远超逐字动效的精度需求
+	// 进度推送节流：桌面歌词本地插值，300ms 锚点已远超逐字动效的精度需求。
+	// 时间取 corePlayer.getPosition() 实时插值而非 progressStore——后者
+	// 200ms 才落一次盘，按它推锚点歌词会恒定滞后最多 200ms
 	const PROGRESS_PUSH_INTERVAL_MS = 300;
 	let lastProgressPush = 0;
 	function pushProgress(force = false) {
@@ -131,7 +133,7 @@ export function initDesktopLyricSync() {
 		const s = usePlayerStore.getState();
 		pushState({
 			type: "progress",
-			currentTime: useProgressStore.getState().currentTime,
+			currentTime: corePlayer.getPosition(),
 			isPlaying: s.isPlaying,
 			at: now,
 		});
@@ -216,76 +218,108 @@ export function initDesktopLyricSync() {
 	);
 	unsubscribes.push(unsubLyricSource);
 
-	// 进度订阅（progressStore 由 corePlayer 高频写入，这里只做节流推送）
-	const unsubProgress = useProgressStore.subscribe(() => pushProgress());
+	// 进度订阅（progressStore 由 corePlayer 高频写入，这里只做节流推送）。
+	// 进度回退（切歌 resetProgress / 回退 seek）必须立即重锚并跳过节流：
+	// 控件窗口若还拿着旧歌时间，落进新推来的歌词数组会闪出错误句，旧句
+	// 也要多滞留一拍才散开——切歌卡顿观感的主要来源
+	const unsubProgress = useProgressStore.subscribe((state, prev) => {
+		if (state.currentTime < prev.currentTime) {
+			pushProgress(true);
+			return;
+		}
+		pushProgress();
+	});
 	unsubscribes.push(unsubProgress);
 
+	// 播放态订阅：暂停/恢复的瞬间强制推锚点。暂停后 corePlayer 的 rAF 进度
+	// 循环停止、progressStore 不再更新，若只靠进度订阅，控件窗口会一直
+	// 拿着过期的 playing:true 锚点按墙钟继续走字——首页暂停后歌词仍在走、
+	// 控件播放/暂停按钮看似无效的共同根因
+	const unsubPlaying = usePlayerStore.subscribe(
+		(s) => s.isPlaying,
+		() => pushProgress(true),
+	);
+	unsubscribes.push(unsubPlaying);
+
 	// —— 桌面歌词窗口 → 主窗口的指令回传 ——
-	void listen<{
-		event: string;
-		direction?: string;
-		style?: string;
-		delta?: number;
-	}>("desktop-lyric-event", (e) => {
-		const { payload } = e;
-		const settings = useSettingStore.getState();
-		switch (payload.event) {
-			case "ready":
-				// 控件窗口挂载（含 HMR 重挂载）后主动要一次全量快照
-				if (windowActive) pushAll();
-				break;
-			case "close":
-				// 唯一可信源仍是 settingStore；显隐订阅会随之隐藏窗口
-				void settings.setDesktopLyricEnabled(false);
-				break;
-			case "setDirection":
-				if (
-					payload.direction === "horizontal" ||
-					payload.direction === "vertical"
-				) {
-					void settings.setDesktopLyricDirection(payload.direction);
+	// listen 的注册/注销是异步的：开发环境 StrictMode 会跑 setup →
+	// cleanup → setup 双循环，cleanup 先于 unlisten promise 解析执行，
+	// 同步遍历注销数组会漏掉尚未解析的监听器 → 指令监听器成对泄漏，
+	// togglePlayback/nextTrack 每次点击被处理两遍（暂停随即被恢复 =
+	// 点了没反应、切歌一次跳两首）。改为持有 promise 本体，cleanup 时
+	// 统一在其解析后补挂 unlisten（mediaSessionSync 同款兜底写法）。
+	const unlistenPromises: Array<Promise<() => void>> = [];
+	unlistenPromises.push(
+		listen<{
+			event: string;
+			direction?: string;
+			style?: string;
+			delta?: number;
+		}>("desktop-lyric-event", (e) => {
+			const { payload } = e;
+			const settings = useSettingStore.getState();
+			switch (payload.event) {
+				case "ready":
+					// 控件窗口挂载（含 HMR 重挂载）后主动要一次全量快照
+					if (windowActive) pushAll();
+					break;
+				case "close":
+					// 唯一可信源仍是 settingStore；显隐订阅会随之隐藏窗口
+					void settings.setDesktopLyricEnabled(false);
+					break;
+				case "setDirection":
+					if (
+						payload.direction === "horizontal" ||
+						payload.direction === "vertical"
+					) {
+						void settings.setDesktopLyricDirection(payload.direction);
+					}
+					break;
+				case "setAnimationStyle":
+					if (payload.style === "default" || payload.style === "stroke") {
+						void settings.setDesktopLyricAnimationStyle(payload.style);
+					}
+					break;
+				case "setFontDelta": {
+					if (typeof payload.delta === "number" && payload.delta !== 0) {
+						const fontSize = clampFontSize(
+							getDesktopLyricSettings().fontSize + payload.delta,
+						);
+						void settings.setDesktopLyricFontSize(fontSize);
+					}
+					break;
 				}
-				break;
-			case "setAnimationStyle":
-				if (payload.style === "default" || payload.style === "stroke") {
-					void settings.setDesktopLyricAnimationStyle(payload.style);
-				}
-				break;
-			case "setFontDelta": {
-				if (typeof payload.delta === "number" && payload.delta !== 0) {
-					const fontSize = clampFontSize(
-						getDesktopLyricSettings().fontSize + payload.delta,
-					);
-					void settings.setDesktopLyricFontSize(fontSize);
-				}
-				break;
+				case "togglePlayback":
+					// 桌面歌词工具栏的播放/暂停（与播放条同一动作入口）
+					void usePlayerStore.getState().togglePlay();
+					break;
+				case "nextTrack":
+					usePlayerStore.getState().next(true);
+					break;
+				case "previousTrack":
+					usePlayerStore.getState().prev(true);
+					break;
 			}
-			case "togglePlayback":
-				// 桌面歌词工具栏的播放/暂停（与播放条同一动作入口）
-				void usePlayerStore.getState().togglePlay();
-				break;
-			case "nextTrack":
-				usePlayerStore.getState().next(true);
-				break;
-			case "previousTrack":
-				usePlayerStore.getState().prev(true);
-				break;
-		}
-	}).then((unlisten) => unlistenFns.push(unlisten));
+		}),
+	);
 
 	// 窗口被 Alt+F4 等系统途径关闭：Rust 侧通知这里，把开关同步回 false
-	void listen("desktop-lyric-hidden", () => {
-		windowActive = false;
-		if (getDesktopLyricSettings().enabled) {
-			void useSettingStore.getState().setDesktopLyricEnabled(false);
-		}
-	}).then((unlisten) => unlistenFns.push(unlisten));
+	unlistenPromises.push(
+		listen("desktop-lyric-hidden", () => {
+			windowActive = false;
+			if (getDesktopLyricSettings().enabled) {
+				void useSettingStore.getState().setDesktopLyricEnabled(false);
+			}
+		}),
+	);
 
 	// 窗口已显示（本模块发起 or 兜底）：记账并全量补给
-	void listen("desktop-lyric-shown", () => {
-		windowActive = true;
-		pushAll();
-	}).then((unlisten) => unlistenFns.push(unlisten));
+	unlistenPromises.push(
+		listen("desktop-lyric-shown", () => {
+			windowActive = true;
+			pushAll();
+		}),
+	);
 
 	// 设置水合完成后再应用初始状态：上一次会话开着桌面歌词 → 本次启动恢复
 	void (async () => {
@@ -308,8 +342,10 @@ export function initDesktopLyricSync() {
 		unsubscribes.forEach((unsub) => {
 			unsub();
 		});
-		unlistenFns.forEach((unlisten) => {
-			unlisten();
+		// listen 的 unlisten 在 promise 解析后才可用：无论 cleanup 发生在
+		// 解析前（StrictMode 双循环）还是解析后，都在解析时统一注销
+		unlistenPromises.forEach((p) => {
+			p.then((unlisten) => unlisten()).catch(() => {});
 		});
 	};
 }
