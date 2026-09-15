@@ -63,12 +63,14 @@ const sheetRootExit = {
 };
 
 // 歌词页按设计基准尺寸（1440×900）随窗口整体缩放：
-// 小窗口（用户可将最小尺寸调到 800×480）下歌词/封面等比缩小避免溢出，
+// 小窗口（用户可将最小尺寸调到 1000×700）下歌词/封面等比缩小避免溢出，
 // 大窗口下适度放大。缩放通过 --app-lyric-scale 注入，各元素以 calc() 消费，
 // 不使用 transform/zoom，避免破坏 plus-lighter 混合与滚动居中计算。
 const LYRIC_SHEET_BASE_W = 1440;
 const LYRIC_SHEET_BASE_H = 900;
-const LYRIC_SCALE_MIN = 0.55;
+// 下限 0.5：默认歌词字号调大后，最小窗口（1000×700，scale≈0.694）与
+// 更极端的视口都保有更大的缩小余量，避免长句换行后溢出或被截断
+const LYRIC_SCALE_MIN = 0.5;
 const LYRIC_SCALE_MAX = 1.15;
 
 function computeLyricScale() {
@@ -123,7 +125,8 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 		setIsLyricSideHovered(true);
 	}, []);
 	const handleLyricSideLeave = useCallback(() => {
-		if (sideHoverHideTimerRef.current) clearTimeout(sideHoverHideTimerRef.current);
+		if (sideHoverHideTimerRef.current)
+			clearTimeout(sideHoverHideTimerRef.current);
 		sideHoverHideTimerRef.current = setTimeout(() => {
 			sideHoverHideTimerRef.current = null;
 			setIsLyricSideHovered(false);
@@ -137,7 +140,8 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 		[],
 	);
 	// 手动选择的歌词版本（酷狗候选）没有翻译/罗马音分轨，激活时下线这两个开关
-	const hasManualLyricVersion = usePlayerStore(selectActiveLyricVersion) !== null;
+	const hasManualLyricVersion =
+		usePlayerStore(selectActiveLyricVersion) !== null;
 	// 歌词动效风格：default=默认滚动逐字；stroke=笔画双列（用户可在工具条/设置切换）
 	const lyricAnimationStyle = useSettingStore((s) => s.lyric.animationStyle);
 	const [lastBackgroundColors, setLastBackgroundColors] = useState<
@@ -239,6 +243,7 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 			{triggerElement}
 			{isMounted &&
 				createPortal(
+					// biome-ignore lint/a11y/noStaticElementInteractions: 歌词页全屏根层，onContextMenu 仅用于统一禁用右键菜单，非交互控件
 					<div
 						className={`fixed inset-0 z-50 h-screen w-screen overflow-hidden text-sm ${
 							isOpen ? "pointer-events-auto" : "pointer-events-none"
@@ -252,109 +257,109 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 						}
 					>
 						<h2 className="sr-only">Lyrics</h2>
-					<AnimatePresence onExitComplete={() => setIsMounted(false)}>
-						{isOpen && (
-							<motion.div
-								key="lyric-sheet-root"
-								className="absolute inset-0"
-								initial={false}
-								animate={{ opacity: 1, scale: 1, y: "0%" }}
-								exit={
-									reduceMotion
-										? { opacity: 0, transition: { duration: 0.2 } }
-										: sheetRootExit
-								}
-							>
-								<LyricSheetBackground
-									onColorsChange={handleBackgroundColorsChange}
-								/>
+						<AnimatePresence onExitComplete={() => setIsMounted(false)}>
+							{isOpen && (
 								<motion.div
-									{...sheetStageMotion}
-									className="relative flex h-full w-full flex-col"
-									onMouseDown={(e) => {
-										e.preventDefault();
-									}}
+									key="lyric-sheet-root"
+									className="absolute inset-0"
+									initial={false}
+									animate={{ opacity: 1, scale: 1, y: "0%" }}
+									exit={
+										reduceMotion
+											? { opacity: 0, transition: { duration: 0.2 } }
+											: sheetRootExit
+									}
 								>
-									<LyricSheetTitlebar setIsOpen={setIsOpen} />
-
-									<div className="relative flex min-h-0 w-full flex-1 justify-between">
-										<motion.div
-											layout
-											initial={false}
-											animate={{
-												x: "0%",
-												width: isPlaylistOpen || isLyricOpen ? "50%" : "100%",
-											}}
-											transition={
-												reduceMotion
-													? { duration: 0 }
-													: { duration: 0.48, ease: lyricSheetEase }
-											}
-											className="relative flex h-full shrink-0 flex-col items-center justify-center pt-16 text-white"
-										>
-											<LyricSheetSonginfo setIsOpen={setIsOpen} />
-										</motion.div>
-										<AnimatePresence>
-											{isPlaylistOpen && (
-												<motion.div
-													{...sidePanelMotion}
-													className="absolute top-24 right-24 bottom-12 w-[calc(50%-48px)]"
-												>
-													<LyricSheetSonglist
-														className="flex h-full w-full"
-														setOpen={setIsOpen}
-													/>
-												</motion.div>
-											)}
-										</AnimatePresence>
-									<AnimatePresence>
-										{isLyricOpen && (
-											// biome-ignore lint/a11y/noStaticElementInteractions: 这是右侧工具条的 hover 热区（纯显隐检测层，pointer-events 交给歌词面板与工具条）
-											<div
-												className="pointer-events-none absolute top-18 right-0 bottom-0 w-[50%]"
-												onMouseEnter={handleLyricSideEnter}
-												onMouseLeave={handleLyricSideLeave}
-											>
-												<div className="pointer-events-auto absolute top-0 right-12 bottom-0 w-[calc(100%-48px)]">
-													{lyricAnimationStyle === "stroke" ? (
-														<StrokeLyricView
-															className="flex h-full w-full"
-															showTrans={showTrans}
-															showRoma={showRoma}
-														/>
-													) : (
-														<Lyric
-															className="flex h-full w-full"
-															showTrans={showTrans}
-															showRoma={showRoma}
-														/>
-													)}
-												</div>
-												<LyricSideControls visible={isLyricSideHovered} />
-											</div>
-										)}
-									</AnimatePresence>
-									</div>
-
-									<LyricSheetBottomBar
-										isLyricOpen={isLyricOpen}
-										isPlaylistOpen={isPlaylistOpen}
-										hasTransLyric={hasTransLyric}
-										hasRomaLyric={hasRomaLyric}
-										showTrans={showTrans}
-										showRoma={showRoma}
-										onLyricOpenChangeAction={setIsLyricOpen}
-										onPlaylistOpenChangeAction={setIsPlaylistOpen}
-										onShowTransChangeAction={setShowTrans}
-										onShowRomaChangeAction={setShowRoma}
+									<LyricSheetBackground
+										onColorsChange={handleBackgroundColorsChange}
 									/>
+									<motion.div
+										{...sheetStageMotion}
+										className="relative flex h-full w-full flex-col"
+										onMouseDown={(e) => {
+											e.preventDefault();
+										}}
+									>
+										<LyricSheetTitlebar setIsOpen={setIsOpen} />
+
+										<div className="relative flex min-h-0 w-full flex-1 justify-between">
+											<motion.div
+												layout
+												initial={false}
+												animate={{
+													x: "0%",
+													width: isPlaylistOpen || isLyricOpen ? "50%" : "100%",
+												}}
+												transition={
+													reduceMotion
+														? { duration: 0 }
+														: { duration: 0.48, ease: lyricSheetEase }
+												}
+												className="relative flex h-full shrink-0 flex-col items-center justify-center pt-16 text-white"
+											>
+												<LyricSheetSonginfo setIsOpen={setIsOpen} />
+											</motion.div>
+											<AnimatePresence>
+												{isPlaylistOpen && (
+													<motion.div
+														{...sidePanelMotion}
+														className="absolute top-24 right-24 bottom-12 w-[calc(50%-48px)]"
+													>
+														<LyricSheetSonglist
+															className="flex h-full w-full"
+															setOpen={setIsOpen}
+														/>
+													</motion.div>
+												)}
+											</AnimatePresence>
+											<AnimatePresence>
+												{isLyricOpen && (
+													// biome-ignore lint/a11y/noStaticElementInteractions: 这是右侧工具条的 hover 热区（纯显隐检测层，pointer-events 交给歌词面板与工具条）
+													<div
+														className="pointer-events-none absolute top-18 right-0 bottom-0 w-[50%]"
+														onMouseEnter={handleLyricSideEnter}
+														onMouseLeave={handleLyricSideLeave}
+													>
+														<div className="pointer-events-auto absolute top-0 right-12 bottom-0 w-[calc(100%-48px)]">
+															{lyricAnimationStyle === "stroke" ? (
+																<StrokeLyricView
+																	className="flex h-full w-full"
+																	showTrans={showTrans}
+																	showRoma={showRoma}
+																/>
+															) : (
+																<Lyric
+																	className="flex h-full w-full"
+																	showTrans={showTrans}
+																	showRoma={showRoma}
+																/>
+															)}
+														</div>
+														<LyricSideControls visible={isLyricSideHovered} />
+													</div>
+												)}
+											</AnimatePresence>
+										</div>
+
+										<LyricSheetBottomBar
+											isLyricOpen={isLyricOpen}
+											isPlaylistOpen={isPlaylistOpen}
+											hasTransLyric={hasTransLyric}
+											hasRomaLyric={hasRomaLyric}
+											showTrans={showTrans}
+											showRoma={showRoma}
+											onLyricOpenChangeAction={setIsLyricOpen}
+											onPlaylistOpenChangeAction={setIsPlaylistOpen}
+											onShowTransChangeAction={setShowTrans}
+											onShowRomaChangeAction={setShowRoma}
+										/>
+									</motion.div>
 								</motion.div>
-							</motion.div>
-						)}
-					</AnimatePresence>
-				</div>,
+							)}
+						</AnimatePresence>
+					</div>,
 					document.body,
 				)}
-	</>
+		</>
 	);
 }

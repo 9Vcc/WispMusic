@@ -152,7 +152,7 @@ const defaultAppearanceSettings: AppearanceSettings = {
 		interfaceFontStr: "",
 		lyricFontStr: "",
 		lyricFontWeight: 400,
-		lyricFontSize: 40,
+		lyricFontSize: 46,
 	},
 };
 
@@ -801,7 +801,7 @@ function normalizeFontSettings(font?: Partial<FontSettings>): FontSettings {
 		...defaultAppearanceSettings.font,
 		...font,
 		lyricFontWeight: clampNumber(font?.lyricFontWeight, 100, 900, 400),
-		lyricFontSize: clampNumber(font?.lyricFontSize, 16, 72, 40),
+		lyricFontSize: clampNumber(font?.lyricFontSize, 16, 72, 46),
 	};
 }
 
