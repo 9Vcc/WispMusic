@@ -11,9 +11,9 @@ import type { ILyricLine } from "@/lib/utils/lyric-parser";
 /** 句尾散开动画时长（ms）：整句笔画四散飞开并渐隐，结束后切下一句 */
 export const STROKE_LINE_SCATTER_MS = 320;
 
-/** 双列单元格尺寸（px）上下限（上限收敛到 56，长句多列后整体更协调） */
-export const STROKE_CELL_MIN_PX = 32;
-export const STROKE_CELL_MAX_PX = 56;
+/** 双列单元格尺寸（px）上下限（上限收敛到 46，字号更细腻柔和；下限兜底长句可读） */
+export const STROKE_CELL_MIN_PX = 26;
+export const STROKE_CELL_MAX_PX = 46;
 
 /** 两列合计可占舞台高度的比例（留出副行与呼吸空间） */
 export const STROKE_COLUMN_HEIGHT_RATIO = 0.68;

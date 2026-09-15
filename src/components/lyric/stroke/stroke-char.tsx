@@ -18,9 +18,15 @@ import {
 /**
  * 笔画样式：默认完全透明，数据就绪与定妆前不露形；显示以 opacity 内联
  * 定妆（按深度分层），散开动画以 transform + opacity 全程接管。
+ * 同色细描边适当增粗笔画（viewBox 1024 坐标系，30 单位 ≈ 字高 3.3%，
+ * 屏幕上随字号等比），round join/cap 避免笔画尖端出现毛刺。
  */
 const PATH_STYLE: CSSProperties = {
 	fill: "rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1)))",
+	stroke: "rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1)))",
+	strokeWidth: 30,
+	strokeLinejoin: "round",
+	strokeLinecap: "round",
 	opacity: 0,
 	transformBox: "fill-box",
 	transformOrigin: "center",

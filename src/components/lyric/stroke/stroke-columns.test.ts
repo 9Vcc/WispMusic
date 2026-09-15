@@ -290,7 +290,7 @@ describe("computeStrokeCellSize", () => {
 	});
 
 	it("中间态超过上限时收敛到上限（字号整体缩小后更常触顶）", () => {
-		// 700 * 0.68 = 476；476 / 7 = 68 > 上限 56 → 收敛到上限
+		// 700 * 0.68 = 476；476 / 7 = 68 > 上限 46 → 收敛到上限
 		expect(computeStrokeCellSize(700, 7)).toBe(STROKE_CELL_MAX_PX);
 	});
 
