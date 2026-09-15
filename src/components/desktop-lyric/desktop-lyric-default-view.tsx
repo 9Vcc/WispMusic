@@ -63,11 +63,12 @@ export function DesktopDefaultView({
 		if (!line || line.isLeadDots) {
 			return <DesktopLeadDots vertical />;
 		}
-		// 竖排的进出场沿水平轴（整列从右侧推入），与书写方向一致
+		// 竖排的进出场沿水平轴（整列从右侧推入），与书写方向一致；
+		// 右侧预留工具栏安全边距（pr-12），歌词列不与竖排控件重叠
 		const columnSlide = fontSize * 1.35;
 		return (
 			<div
-				className="flex h-full w-full items-center justify-center overflow-hidden px-3 py-2"
+				className="flex h-full w-full items-center justify-center overflow-hidden py-2 pl-3 pr-12"
 				style={{
 					fontFamily: "var(--app-lyric-font-family, inherit)",
 					color: CURRENT_COLOR,
@@ -98,11 +99,12 @@ export function DesktopDefaultView({
 		);
 	}
 
-	// 横向双行：行槽块整体居中，当前句在上槽、下一句在下槽。
-	// 行元素按索引作 key：下一句晋级当前句时 key 不变，framer 平滑
-	// 过渡 y/缩放/颜色，配合旧句上滑退出、新下一句从底部滑入。
-	// 行槽块恒定挂载（含呼吸圆点兜底），行↔圆点切换同样有过渡；
-	// 块自身 overflow-hidden，进出场滑动在块边缘裁切，视觉干净。
+	// 横向双行：行槽块整体居中，当前句在上槽、下一句在下槽，按歌词行
+	// 索引奇偶一左一右交替排列（EchoMusic alignment=both：偶数行靠左、
+	// 奇数行靠右；相邻行天然一奇一偶）。行元素按索引作 key：下一句晋级
+	// 当前句时 key 不变，framer 平滑过渡 y/缩放/颜色，配合旧句上滑退出、
+	// 新下一句从底部滑入。行槽块恒定挂载（含呼吸圆点兜底），行↔圆点
+	// 切换同样有过渡；块自身 overflow-hidden，进出场滑动在块边缘裁切。
 	const slotH = fontSize * LINE_SLOT_RATIO;
 	const items: Array<{ line: ILyricLine; index: number; isCurrent: boolean }> =
 		line && !line.isLeadDots && currentIndex >= 0
@@ -144,8 +146,17 @@ export function DesktopDefaultView({
 								...SLOT_SLIDE,
 								opacity: { duration: 0.18, ease: "easeOut" },
 							}}
-							className="absolute inset-x-0 top-0 flex items-center justify-center overflow-hidden"
-							style={{ height: slotH }}
+						className={cn(
+							"absolute inset-x-0 top-0 flex items-center overflow-hidden",
+							index % 2 === 0 ? "justify-start" : "justify-end",
+						)}
+						style={{
+							height: slotH,
+							// 缩放原点贴对齐侧（EchoMusic 同款）：左右交替布局下
+							// 下一句 0.8 缩放向对齐侧收紧，不产生反向缩进
+							transformOrigin:
+								index % 2 === 0 ? "left center" : "right center",
+						}}
 						>
 							<DesktopLineText
 								line={itemLine}
@@ -236,7 +247,15 @@ function DesktopLineText({
 	);
 
 	return (
-		<span ref={outerRef} className="relative inline-block" style={textStyle}>
+		// max-w-full：外层被约束到行槽宽后，内层溢出量才能测出来
+		//（nowrap 的 flex 子项 min-width:auto 不可收缩，没有这条约束
+		// inner.offsetWidth − outer.offsetWidth 恒 0，滚动永不启动）；
+		// 左右交替布局下靠左行的滚动起点（文本开头）也贴齐槽左缘
+		<span
+			ref={outerRef}
+			className="relative inline-block max-w-full"
+			style={textStyle}
+		>
 			<motion.span
 				ref={innerRef}
 				className="relative inline-block"

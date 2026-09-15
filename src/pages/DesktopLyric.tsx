@@ -10,7 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useMotionValue } from "framer-motion";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DesktopDefaultView } from "@/components/desktop-lyric/desktop-lyric-default-view";
 import { DesktopStrokeView } from "@/components/desktop-lyric/desktop-lyric-stroke-view";
 import type {
@@ -36,10 +36,11 @@ import type { ILyricLine } from "@/lib/utils/lyric-parser";
  * 窗口几何（显隐/横竖切换缩放/落位钳制）由主窗口统一驱动，本页面只做
  * 内容自适应布局。
  *
- * 布局对齐 EchoMusic：窗口恒定全透明（背景材质与主题/设置解耦，
- * 仅歌词文字浮在桌面）；横向为三区头部（歌名 / 上一首·播放·下一首 /
- * 显示工具）+ 双行歌词舞台，头部 hover 淡入；竖向头部收纳为居中
- * 悬浮胶囊，歌词占满全窗。
+ * 布局对齐 EchoMusic：非 hover 恒定全透明（背景材质与主题/设置解耦，
+ * 仅歌词文字浮在桌面），hover 淡入半透明深灰圆角背板；横向为三区头部
+ * （歌名 / 上一首·播放·下一首 / 显示工具）+ 双行歌词舞台（按行索引
+ * 奇偶一左一右交替排列），头部 hover 淡入；竖向头部镜像为右侧竖排
+ * 工具栏（按钮组与横向一致），歌词占满全窗并向左避让工具栏。
  */
 
 interface FullState {
@@ -179,21 +180,23 @@ export default function DesktopLyric() {
 	// 窗口句柄只取一次（与 mini 播放器同因：避免 effect 重跑窗口跳动）
 	const winRef = useRef(getCurrentWindow());
 
-	// 用户可拖拽窗口边缘自由缩放（resizable: true）；歌词舞台按"设计尺寸 →
-	// 实际尺寸"等比缩放（横向扣除头部保留高度），字号视觉随窗口大小变化，
-	// 方向/字号设置变更时主窗口会把窗口重置回标准几何，缩放比随之回到 1
+	// 用户可拖拽窗口边缘自由缩放（resizable: true）；歌词舞台内容固定按
+	// 设计尺寸布局、整体等比缩放居中（横向扣除头部保留高度）——缩放比
+	// 大于 1（窗口大于设计几何）时布局盒不会被放大，只是整体视觉放大，
+	// 保证任何窗口尺寸下内容都不溢出裁切。方向/字号设置变更时主窗口会
+	// 把窗口重置回标准几何，缩放比随之回到 1
+	const isVertical = settings.direction === "vertical";
+	const design = useMemo(
+		() => computeDesktopLyricGeometry(settings.direction, settings.fontSize),
+		[settings.direction, settings.fontSize],
+	);
+	const stageDesignHeight =
+		design.height - (isVertical ? 0 : DESKTOP_LYRIC_HEADER_RESERVE);
 	const stageRef = useRef<HTMLDivElement>(null);
 	const [contentScale, setContentScale] = useState(1);
 	useEffect(() => {
 		const el = stageRef.current;
 		if (!el) return;
-		const design = computeDesktopLyricGeometry(
-			settings.direction,
-			settings.fontSize,
-		);
-		const stageDesignHeight =
-			design.height -
-			(settings.direction === "horizontal" ? DESKTOP_LYRIC_HEADER_RESERVE : 0);
 		const update = () => {
 			const next = Math.min(
 				el.clientWidth / design.width,
@@ -205,7 +208,7 @@ export default function DesktopLyric() {
 		const ro = new ResizeObserver(update);
 		ro.observe(el);
 		return () => ro.disconnect();
-	}, [settings.direction, settings.fontSize]);
+	}, [design, stageDesignHeight]);
 
 	useEffect(() => {
 		const unlisten = listen<SyncPayload>("desktop-lyric-sync-state", (e) => {
@@ -297,7 +300,29 @@ export default function DesktopLyric() {
 		winRef.current.startDragging().catch(console.error);
 	}, []);
 
-	const isVertical = settings.direction === "vertical";
+	// 传输控制组：上一首 / 播放暂停 / 下一首（横竖两种头部共用）
+	const transportTools = (
+		<>
+			<ToolButton
+				label="上一首"
+				onClick={() => send({ event: "previousTrack" })}
+			>
+				<SFIcon icon={sfBackwardFill} className="size-4" />
+			</ToolButton>
+			<ToolButton
+				label={isPlaying ? "暂停" : "播放"}
+				onClick={() => send({ event: "togglePlayback" })}
+			>
+				<SFIcon
+					icon={isPlaying ? sfPauseFill : sfPlayFill}
+					className="size-4"
+				/>
+			</ToolButton>
+			<ToolButton label="下一首" onClick={() => send({ event: "nextTrack" })}>
+				<SFIcon icon={sfForwardFill} className="size-4" />
+			</ToolButton>
+		</>
+	);
 
 	// 显示工具组：方向 / 动效 / 字号 / 关闭（横竖两种头部共用）
 	const displayTools = (
@@ -347,20 +372,29 @@ export default function DesktopLyric() {
 	);
 
 	return (
-		// 根层恒定全透明：桌面歌词没有任何窗口背板（非 hover 与 hover 均
-		// 如此，不随主题/材质设置变化），只有歌词文字与其描边背衬层浮在
-		// 桌面上；可读性由 glyph-backdrop 保证。拖拽绑定在根层而非歌词
-		// 舞台：舞台会被等比缩放，绑根层保证任何缩放比下整个窗口都可
-		// 按住拖动
+		// 根层非 hover 恒定全透明（不随主题/材质设置变化），只有歌词文字
+		// 与其描边背衬层浮在桌面上，可读性由 glyph-backdrop 保证；hover
+		// 时淡入半透明深灰圆角背板（EchoMusic 同款，衬托悬浮控件与歌词）。
+		// 拖拽绑定在根层而非歌词舞台：舞台会被等比缩放，绑根层保证任何
+		// 缩放比下整个窗口都可按住拖动
 		<div
-			className="group relative flex h-full w-full select-none flex-col overflow-hidden"
+			className="group relative flex h-full w-full select-none flex-col overflow-hidden rounded-xl bg-transparent transition-[background-color] duration-300 hover:bg-black/60"
 			onPointerDown={handleDragPointerDown}
 		>
 			{isVertical ? (
-				// 竖向：头部收纳为居中悬浮胶囊（hover 淡入），歌词占满全窗
-				<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+				// 竖向：右侧竖排工具栏——按钮组与横向完全一致（传输控制 +
+				// 显示工具），布局随方向镜像为纵向排列（EchoMusic 同款）；
+				// 歌名胶囊在窄窗隐藏。hover 淡入，pointer-events 只在
+				// hover 时下放到胶囊本体
+				<div className="pointer-events-none absolute inset-y-0 right-2 z-10 flex flex-col items-center justify-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
 					<div
-						className="pointer-events-none flex items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto"
+						className="pointer-events-none flex flex-col items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto"
+						style={{ fontFamily: '"Microsoft Yahei"' }}
+					>
+						{transportTools}
+					</div>
+					<div
+						className="pointer-events-none flex flex-col items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto"
 						style={{ fontFamily: '"Microsoft Yahei"' }}
 					>
 						{displayTools}
@@ -384,27 +418,7 @@ export default function DesktopLyric() {
 							</div>
 						</div>
 						<div className="pointer-events-none flex shrink-0 items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto">
-							<ToolButton
-								label="上一首"
-								onClick={() => send({ event: "previousTrack" })}
-							>
-								<SFIcon icon={sfBackwardFill} className="size-4" />
-							</ToolButton>
-							<ToolButton
-								label={isPlaying ? "暂停" : "播放"}
-								onClick={() => send({ event: "togglePlayback" })}
-							>
-								<SFIcon
-									icon={isPlaying ? sfPauseFill : sfPlayFill}
-									className="size-4"
-								/>
-							</ToolButton>
-							<ToolButton
-								label="下一首"
-								onClick={() => send({ event: "nextTrack" })}
-							>
-								<SFIcon icon={sfForwardFill} className="size-4" />
-							</ToolButton>
+							{transportTools}
 						</div>
 						<div className="pointer-events-none flex shrink-0 items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto">
 							{displayTools}
@@ -413,34 +427,43 @@ export default function DesktopLyric() {
 				</header>
 			)}
 
-			{/* 歌词舞台：字体走全局歌词字体变量（含用户自定义字体），
-			    内容随舞台实际尺寸等比缩放 */}
+			{/* 歌词舞台：内容固定按设计尺寸布局、整体等比缩放居中（缩放比
+			    大于 1 时布局盒不变，只是视觉放大，不会溢出裁切）；字体走
+			    全局歌词字体变量（含用户自定义字体） */}
 			<div
 				ref={stageRef}
-				className="relative flex min-h-0 flex-1 items-center justify-center"
-				style={{
-					fontFamily: "var(--app-lyric-font-family, inherit)",
-					transform: `scale(${contentScale})`,
-					transformOrigin: "center",
-				}}
+				className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden"
 			>
-				{settings.animationStyle === "stroke" ? (
-					<DesktopStrokeView
-						lines={lines}
-						currentIndex={currentIndex}
-						direction={settings.direction}
-						getNowMs={getNowMs}
-					/>
-				) : (
-					<DesktopDefaultView
-						line={currentLine}
-						nextLine={nextLine}
-						currentIndex={currentIndex}
-						direction={settings.direction}
-						fontSize={settings.fontSize}
-						currentTimeMotion={currentTimeMotion}
-					/>
-				)}
+				<div
+					className="relative flex items-center justify-center"
+					style={{
+						width: design.width,
+						height: stageDesignHeight,
+						fontFamily: "var(--app-lyric-font-family, inherit)",
+						transform: `scale(${contentScale})`,
+						transformOrigin: "center",
+					}}
+				>
+					{settings.animationStyle === "stroke" ? (
+						<DesktopStrokeView
+							lines={lines}
+							currentIndex={currentIndex}
+							nextLine={nextLine}
+							direction={settings.direction}
+							fontSize={settings.fontSize}
+							getNowMs={getNowMs}
+						/>
+					) : (
+						<DesktopDefaultView
+							line={currentLine}
+							nextLine={nextLine}
+							currentIndex={currentIndex}
+							direction={settings.direction}
+							fontSize={settings.fontSize}
+							currentTimeMotion={currentTimeMotion}
+						/>
+					)}
+				</div>
 			</div>
 		</div>
 	);
