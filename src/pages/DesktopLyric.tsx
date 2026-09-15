@@ -463,10 +463,11 @@ export default function DesktopLyric() {
 
 			{/* 歌词舞台：内容固定按设计尺寸布局、整体等比缩放居中（缩放比
 			    大于 1 时布局盒不变，只是视觉放大，不会溢出裁切）；字体走
-			    全局歌词字体变量（含用户自定义字体） */}
+			    全局歌词字体变量（含用户自定义字体）。舞台本身不裁切——笔画
+			    动效要从窗口外飞入，只在根层按窗口边界裁 */}
 			<div
 				ref={stageRef}
-				className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden"
+				className="relative flex min-h-0 flex-1 items-center justify-center"
 			>
 				<div
 					className="relative flex items-center justify-center"
@@ -482,7 +483,6 @@ export default function DesktopLyric() {
 						<DesktopStrokeView
 							lines={lines}
 							currentIndex={currentIndex}
-							nextLine={nextLine}
 							direction={settings.direction}
 							fontSize={effectiveFontSize}
 							getNowMs={getNowMs}

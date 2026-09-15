@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StrokeCharCell } from "@/components/lyric/stroke/stroke-char";
 import {
-	fitFlyTimeline,
 	flattenLineChars,
 	STROKE_LINE_SCATTER_MS,
+	type StrokeCharTiming,
 	shouldUseInstantDisplay,
 	splitStrokeColumns,
 } from "@/components/lyric/stroke/stroke-columns";
@@ -19,14 +19,16 @@ import { DesktopLeadDots } from "./desktop-lyric-default-view";
 /**
  * 桌面歌词「笔画动效」视图：与歌词页 StrokeLyricView 同一套进入+散开
  * 两段式（逐字按笔画飞入拼合、句尾四散散开），复用 StrokeCharCell 与
- * stroke-columns 的纯逻辑，句切换状态机（先等动画播完再散开）也保持
- * 一致。差异只在舞台形态——桌面歌词窗口小、无翻译副行：
+ * stroke-columns 的纯逻辑。差异只在舞台形态——桌面歌词窗口小、无翻译副行：
  *
- * - 横向：双行布局（按行索引奇偶一左一右交替）——左行当前句跟播笔画
- *   飞入；左行动画播完后，右行**提前演示**下一句的飞入（时间轴平移
- *   复用同一套飞入逻辑，无静态预览）；两行动画全部上报完成后才轮换；
- * - 竖向：按句长拆 1~3 列右起直书（列序与书写方向一致，先唱的在最右），
- *   右侧预留工具栏安全边距。
+ * - 横向：配对双行（左上首行、右下次行）。配对 = 连续两句歌词
+ *   (first, first+1)，两行都是**正常播放**（非预览、同亮度）：各自在自己
+ *   的演唱窗口内字到演唱点起飞、铺满整句。第一行（当前句）先播，播完
+ *   第二行接播（此时它成为当前句）；两句都播完、当前句推进到配对之外
+ *   时轮换——整对散开、换进下两句歌词（换的是下两行，不是两行互换）。
+ *   末句无次行时右下留空占位；
+ * - 竖向：单句展示、逐句散开换句，按句长拆 1~3 列右起直书（列序与书写
+ *   方向一致，先唱的在最右），右侧预留工具栏安全边距。
  */
 
 /** 切句等待动画的上限（ms）：兜底防失控（与歌词页一致） */
@@ -36,71 +38,143 @@ const SWITCH_WAIT_MAX_MS = 2000;
 const CELL_MIN_PX = 20;
 const CELL_MAX_PX = 56;
 
-/** 右行演示的启动间隙（ms）：左行动画估算完成后稍作停顿再开始演示 */
-const DEMO_START_GAP_MS = 150;
-
 interface DesktopStrokeViewProps {
 	lines: ILyricLine[];
 	currentIndex: number;
-	/** 下一句（横向双行的演示行，与默认动效视图同源跳过过门圆点行） */
-	nextLine?: ILyricLine;
 	direction: "horizontal" | "vertical";
 	/** 字号设置（推导设计几何，字格尺寸按设计坐标计算） */
 	fontSize: number;
 	getNowMs: () => number;
 }
 
-/** 整句展示状态：index=展示中的句子，phase=in 进入（飞入/直接显示）/ out 句尾散开 */
-interface DisplayState {
-	index: number;
+/** 配对展示状态：first=配对首行索引（横向次行为 first+1；竖向 first 即当前句），phase=in 进入（飞入/直接显示）/ out 句尾散开 */
+interface PairState {
+	first: number;
 	phase: "in" | "out";
+}
+
+/** 配对行（横向）：一行歌词的笔画字格行——正常跟播（非预览），与歌词页同式预算 */
+function PairStrokeRow({
+	line,
+	timings,
+	windowMs,
+	cellSize,
+	cellGap,
+	phase,
+	align,
+	getNowMs,
+	onFlyEndAt,
+}: {
+	line: ILyricLine | undefined;
+	timings: StrokeCharTiming[];
+	/** 本行演唱窗口（下一行 lineStart − 本行 lineStart，末行兜底） */
+	windowMs: number;
+	cellSize: number;
+	cellGap: number;
+	phase: "in" | "out";
+	align: "start" | "end";
+	getNowMs: () => number;
+	onFlyEndAt: (endAtMs: number) => void;
+}) {
+	const instantLine = useMemo(
+		() => shouldUseInstantDisplay(timings),
+		[timings],
+	);
+	// 行级飞入预算：本行窗口 − 120ms 尾部余量 − 末字触发偏移（与歌词页同式）
+	const lastCharOffsetMs =
+		timings.length > 0
+			? timings[timings.length - 1].triggerAt - (line?.lineStart ?? 0)
+			: 0;
+	const flyBudgetMs = Math.max(0, windowMs - 120 - lastCharOffsetMs);
+	// 末句无次行：右下占位，保持双行槽位稳定
+	if (!line) return <div className="flex min-h-0 flex-1" />;
+	return (
+		<div
+			className={cn(
+				"flex min-h-0 flex-1 items-center px-6",
+				align === "start" ? "justify-start" : "justify-end",
+			)}
+		>
+			{/* 不加 overflow-hidden——笔画要从窗口外飞入，裁切会让动画只覆盖
+			    半窗（字格尺寸已按宽度钳制，内容本就不溢出） */}
+			{line.isLeadDots ? (
+				<DesktopLeadDots vertical={false} />
+			) : (
+				<div className="flex items-center" style={{ gap: cellGap }}>
+					{timings.map((t, i) => (
+						<div
+							// biome-ignore lint/suspicious/noArrayIndexKey: 句内字符列表静态不重排，索引即稳定标识
+							key={`cell-${line.lineStart}-${i}-${t.char}`}
+							className="desktop-lyric-stroke-shadow shrink-0"
+							style={{ width: cellSize, height: cellSize }}
+						>
+							<StrokeCharCell
+								char={t.char}
+								cellSize={cellSize}
+								phase={phase}
+								enter={instantLine ? "instant" : "fly"}
+								triggerAt={t.triggerAt}
+								flyBudgetMs={flyBudgetMs}
+								onFlyEndAt={onFlyEndAt}
+								getNowMs={getNowMs}
+							/>
+						</div>
+					))}
+				</div>
+			)}
+		</div>
+	);
 }
 
 export function DesktopStrokeView({
 	lines,
 	currentIndex,
-	nextLine,
 	direction,
 	fontSize,
 	getNowMs,
 }: DesktopStrokeViewProps) {
-	// 整句展示状态机：句切换时先散开旧句，散开结束后再直接显示新句
-	const [display, setDisplay] = useState<DisplayState>({
-		index: -1,
-		phase: "in",
-	});
+	// 配对展示状态机：当前句在配对内不动；推进到配对外（横向：第二行也唱
+	// 完；竖向：换句）时轮换——先等两行动画播完（封顶防失控），整对散开
+	// 后换进以新当前句为首的下两句
+	const [display, setDisplay] = useState<PairState>({ first: -1, phase: "in" });
 	const displayRef = useRef(display);
 	displayRef.current = display;
-	const pendingIndexRef = useRef(-1);
+	const pendingFirstRef = useRef(-1);
 	const swapTimerRef = useRef<number | null>(null);
-	// 旧句飞入动画的最晚完成时刻（performance.now 时钟）：切句散开前等它到期
+	// 旧行飞入动画的最晚完成时刻（performance.now 时钟）：轮换散开前等它到期
 	const flyEndAtRef = useRef(0);
 	const handleFlyEndAt = useCallback((endAtMs: number) => {
 		flyEndAtRef.current = Math.max(flyEndAtRef.current, endAtMs);
 	}, []);
 
+	const isVertical = direction === "vertical";
+
 	useEffect(() => {
 		const cur = displayRef.current;
-		if (currentIndex === cur.index) {
-			// 跳回同一句（seek 回）：取消待切定时器；已散开则复位重进本句
-			if (cur.index !== -1 && swapTimerRef.current !== null) {
+		// 当前句仍在配对内（横向：首行或次行；竖向：首行即当前句）——不轮换
+		const inPair = isVertical
+			? currentIndex === cur.first
+			: currentIndex === cur.first || currentIndex === cur.first + 1;
+		if (inPair) {
+			// 跳回配对内（seek 回）：取消待轮换定时器；已散开则复位重进本配对
+			if (cur.first !== -1 && swapTimerRef.current !== null) {
 				clearTimeout(swapTimerRef.current);
 				swapTimerRef.current = null;
 				if (cur.phase === "out") {
-					setDisplay({ index: cur.index, phase: "in" });
+					setDisplay({ first: cur.first, phase: "in" });
 				}
 			}
 			return;
 		}
-		if (cur.index === -1) {
-			setDisplay({ index: currentIndex, phase: "in" });
+		if (cur.first === -1) {
+			setDisplay({ first: currentIndex, phase: "in" });
 			return;
 		}
 		if (cur.phase === "out") {
-			pendingIndexRef.current = currentIndex;
+			pendingFirstRef.current = currentIndex;
 			return;
 		}
-		pendingIndexRef.current = currentIndex;
+		pendingFirstRef.current = currentIndex;
 		const waitMs = Math.min(
 			Math.max(0, flyEndAtRef.current - performance.now()),
 			SWITCH_WAIT_MAX_MS,
@@ -108,14 +182,14 @@ export function DesktopStrokeView({
 		if (swapTimerRef.current !== null) clearTimeout(swapTimerRef.current);
 		swapTimerRef.current = window.setTimeout(() => {
 			swapTimerRef.current = null;
-			setDisplay({ index: displayRef.current.index, phase: "out" });
+			setDisplay({ first: displayRef.current.first, phase: "out" });
 			swapTimerRef.current = window.setTimeout(() => {
 				swapTimerRef.current = null;
 				flyEndAtRef.current = 0;
-				setDisplay({ index: pendingIndexRef.current, phase: "in" });
+				setDisplay({ first: pendingFirstRef.current, phase: "in" });
 			}, STROKE_LINE_SCATTER_MS);
 		}, waitMs);
-	}, [currentIndex]);
+	}, [currentIndex, isVertical]);
 
 	// 卸载时清理散开→换句的定时器
 	useEffect(() => {
@@ -124,60 +198,79 @@ export function DesktopStrokeView({
 		};
 	}, []);
 
-	// 预取下一句笔画数据（切句时数据大概率已在缓存；预取跟随播放索引，
-	// 与 props.nextLine（跳过圆点后的预览行）职责不同）
-	const prefetchLine =
-		currentIndex >= 0 && currentIndex + 1 < lines.length
-			? lines[currentIndex + 1]
-			: undefined;
+	// 预取笔画数据：横向预取下一配对两句（当前对的次行随本对挂载自取）；
+	// 竖向预取下一句。轮换 / 切句时数据大概率已在缓存
+	const prefetchTexts = useMemo(() => {
+		const texts: string[] = [];
+		if (isVertical) {
+			if (currentIndex >= 0 && currentIndex + 1 < lines.length)
+				texts.push(lines[currentIndex + 1].lineText);
+		} else if (display.first >= 0) {
+			for (const idx of [display.first + 2, display.first + 3]) {
+				if (idx < lines.length) texts.push(lines[idx].lineText);
+			}
+		}
+		return texts;
+	}, [isVertical, currentIndex, display.first, lines]);
 	useEffect(() => {
-		if (prefetchLine && !prefetchLine.isLeadDots)
-			prefetchHanziChars(prefetchLine.lineText);
-	}, [prefetchLine]);
+		for (const text of prefetchTexts) prefetchHanziChars(text);
+	}, [prefetchTexts]);
 
-	// 展示中的句子（散开期间仍保持旧句直到散开结束）
-	const displayLine = display.index >= 0 ? lines[display.index] : undefined;
-	const displayNextLine =
-		display.index + 1 < lines.length ? lines[display.index + 1] : undefined;
-	// 展示句的时间窗口（ms）：到下一句切句点为止（末行/倒挂数据给兜底窗口）
-	const lineWindowMs =
-		displayLine && displayNextLine
-			? Math.max(600, displayNextLine.lineStart - displayLine.lineStart)
-			: 5000;
+	// 配对两行（散开期间仍保持旧对直到散开结束）
+	const firstLine =
+		display.first >= 0 && display.first < lines.length
+			? lines[display.first]
+			: undefined;
+	const secondLine =
+		display.first >= 0 && display.first + 1 < lines.length
+			? lines[display.first + 1]
+			: undefined;
+	const thirdLine =
+		display.first >= 0 && display.first + 2 < lines.length
+			? lines[display.first + 2]
+			: undefined;
+	// 各行演唱窗口（ms）：到各自下一行切句点为止（末行给兜底窗口）
+	const firstWindowMs = firstLine
+		? secondLine
+			? Math.max(600, secondLine.lineStart - firstLine.lineStart)
+			: 5000
+		: 5000;
+	const secondWindowMs = secondLine
+		? thirdLine
+			? Math.max(600, thirdLine.lineStart - secondLine.lineStart)
+			: 5000
+		: 5000;
 
 	// 逐字时序摊平 + 急促连唱免飞入判定
-	const timings = useMemo(
+	const firstTimings = useMemo(
 		() =>
-			displayLine && !displayLine.isLeadDots
-				? flattenLineChars(displayLine)
-				: [],
-		[displayLine],
+			firstLine && !firstLine.isLeadDots ? flattenLineChars(firstLine) : [],
+		[firstLine],
+	);
+	const secondTimings = useMemo(
+		() =>
+			secondLine && !secondLine.isLeadDots ? flattenLineChars(secondLine) : [],
+		[secondLine],
 	);
 	const instantLine = useMemo(
-		() => shouldUseInstantDisplay(timings),
-		[timings],
+		() => shouldUseInstantDisplay(firstTimings),
+		[firstTimings],
 	);
-	// 句级飞入预算：句窗口 − 120ms 尾部余量 − 末字触发偏移
-	const lastCharOffsetMs =
-		timings.length > 0
-			? timings[timings.length - 1].triggerAt - (displayLine?.lineStart ?? 0)
-			: 0;
-	const flyBudgetMs = Math.max(0, lineWindowMs - 120 - lastCharOffsetMs);
 
 	// 设计几何（与 DesktopLyric 舞台的缩放基准一致）：字格尺寸按设计坐
 	// 标计算，缩放比放大/缩小时视觉尺寸随之等比变化，永不溢出裁切
-	const isVertical = direction === "vertical";
 	const design = computeDesktopLyricGeometry(direction, fontSize);
 	const stageDesignHeight =
 		design.height - (isVertical ? 0 : DESKTOP_LYRIC_HEADER_RESERVE);
 
-	// 竖排按句长拆列（右起），横排单行
+	// 竖排按句长拆列（右起），横排不拆
 	const columns = useMemo(
-		() => (isVertical ? splitStrokeColumns(timings) : []),
-		[isVertical, timings],
+		() => (isVertical ? splitStrokeColumns(firstTimings) : []),
+		[isVertical, firstTimings],
 	);
 
-	// 字格尺寸：横向双行按半高与宽度均钳；竖向按列长与列数钳
+	// 字格尺寸：横向两行共享同一尺寸（同字号观感，按较长行钳宽）；竖向按
+	// 列长与列数钳
 	const cellSize = useMemo(() => {
 		const clamp = (v: number) =>
 			Math.min(CELL_MAX_PX, Math.max(CELL_MIN_PX, Math.floor(v)));
@@ -188,62 +281,40 @@ export function DesktopStrokeView({
 				(design.width * 0.86) / (Math.max(columns.length, 1) * 1.45);
 			return clamp(Math.min(byHeight, byWidth));
 		}
-		// 双行布局：每行槽占设计舞台高一半，字格占行槽的 ~84%
 		const byHeight = stageDesignHeight * 0.42;
-		const byWidth = (design.width * 0.92) / Math.max(timings.length, 1);
+		const byWidth =
+			(design.width * 0.92) /
+			Math.max(firstTimings.length, secondTimings.length, 1);
 		return clamp(Math.min(byHeight, byWidth));
-	}, [columns, design, isVertical, stageDesignHeight, timings.length]);
+	}, [
+		columns,
+		design,
+		isVertical,
+		stageDesignHeight,
+		firstTimings.length,
+		secondTimings.length,
+	]);
 
 	const cellGap = Math.max(4, Math.round(cellSize * 0.14));
 	const columnGap = Math.max(14, Math.round(cellSize * 0.4));
 
-	// —— 右行演示时序（横向双行）：左行动画完成后提前演示下一句飞入 ——
-	// 启动时刻（歌词时间轴）= 左行末字触发 + 其飞入总时长（fitFlyTimeline
-	// 渲染期估算：fastMs+tailMs，稳定无抖动）+ 间隙；已过点（seek 深入
-	// 句中）则立即启动。右行 cell 的时钟 = 真实歌词时间 − (演示启动时刻
-	// − 下一句 lineStart)（负偏移，演示时钟超前于歌词时钟），下一句首字
-	// triggerAt 恰好在演示启动时刻到期——飞入/追赶/预算压缩逻辑完全复用，
-	// 无静态预览。
-	const demoTimings = useMemo(
-		() => (nextLine && !nextLine.isLeadDots ? flattenLineChars(nextLine) : []),
-		[nextLine],
-	);
-	const demoStartLyricMs = useMemo(() => {
-		const last = timings[timings.length - 1];
-		if (!last || demoTimings.length === 0) return Number.NaN;
-		const timeline = fitFlyTimeline(flyBudgetMs);
-		const leftDone = last.triggerAt + timeline.fastMs + timeline.tailMs;
-		return Math.max(leftDone, getNowMs()) + DEMO_START_GAP_MS;
-		// getNowMs 为稳定回调：启动时刻钉在歌词时间轴，仅随句数据/预算重估
-	}, [timings, flyBudgetMs, demoTimings.length, getNowMs]);
-	const hasDemo = demoTimings.length > 0 && !Number.isNaN(demoStartLyricMs);
-	const demoOffsetMs =
-		hasDemo && nextLine
-			? demoStartLyricMs - nextLine.lineStart
-			: Number.POSITIVE_INFINITY;
-	const demoWindowMs =
-		hasDemo && nextLine
-			? Math.max(600, nextLine.lineStart - demoStartLyricMs)
+	// 竖向单句预算（横向预算在 PairStrokeRow 内按各自窗口计算）
+	const lastCharOffsetMs =
+		firstTimings.length > 0
+			? firstTimings[firstTimings.length - 1].triggerAt -
+				(firstLine?.lineStart ?? 0)
 			: 0;
-	const demoNowMs = useCallback(
-		() => getNowMs() - demoOffsetMs,
-		[getNowMs, demoOffsetMs],
-	);
-
-	const showCells =
-		displayLine !== undefined &&
-		!displayLine.isLeadDots &&
-		(isVertical ? columns.length > 0 : timings.length > 0);
+	const flyBudgetMs = Math.max(0, firstWindowMs - 120 - lastCharOffsetMs);
 
 	return (
 		<div
 			className={cn(
 				"flex h-full w-full select-none",
-				isVertical ? "items-center justify-center overflow-hidden" : "flex-col",
+				isVertical ? "items-center justify-center" : "flex-col",
 			)}
 		>
 			{isVertical ? (
-				showCells && displayLine ? (
+				firstLine && !firstLine.isLeadDots && columns.length > 0 ? (
 					// 竖排右起多列，右侧预留工具栏安全边距（pr-12）
 					<div
 						className="flex h-full w-full flex-row-reverse items-center justify-center pr-12"
@@ -252,14 +323,14 @@ export function DesktopStrokeView({
 						{columns.map((c, ci) => (
 							<div
 								// biome-ignore lint/suspicious/noArrayIndexKey: 列布局句内静态不重排，索引即稳定标识
-								key={`col-${displayLine.lineStart}-${ci}`}
+								key={`col-${firstLine.lineStart}-${ci}`}
 								className="flex flex-col items-center justify-center"
 								style={{ gap: cellGap }}
 							>
 								{c.items.map((t, i) => (
 									<div
 										// biome-ignore lint/suspicious/noArrayIndexKey: 列内字符列表静态不重排，索引即稳定标识
-										key={`cell-${displayLine.lineStart}-${ci}-${i}-${t.char}`}
+										key={`cell-${firstLine.lineStart}-${ci}-${i}-${t.char}`}
 										className="desktop-lyric-stroke-shadow shrink-0"
 										style={{ width: cellSize, height: cellSize }}
 									>
@@ -281,59 +352,34 @@ export function DesktopStrokeView({
 				) : (
 					<DesktopLeadDots vertical />
 				)
-			) : showCells && displayLine ? (
+			) : firstLine ? (
 				<>
-					{/* 左行：当前句跟播笔画飞入（完成时刻上报驱动轮换等待与右行演示） */}
-					<div className="flex min-h-0 flex-1 items-center justify-start overflow-hidden px-6">
-						<div className="flex items-center" style={{ gap: cellGap }}>
-							{timings.map((t, i) => (
-								<div
-									// biome-ignore lint/suspicious/noArrayIndexKey: 句内字符列表静态不重排，索引即稳定标识
-									key={`cell-${displayLine.lineStart}-${i}-${t.char}`}
-									className="desktop-lyric-stroke-shadow shrink-0"
-									style={{ width: cellSize, height: cellSize }}
-								>
-									<StrokeCharCell
-										char={t.char}
-										cellSize={cellSize}
-										phase={display.phase}
-										enter={instantLine ? "instant" : "fly"}
-										triggerAt={t.triggerAt}
-										flyBudgetMs={flyBudgetMs}
-										onFlyEndAt={handleFlyEndAt}
-										getNowMs={getNowMs}
-									/>
-								</div>
-							))}
-						</div>
-					</div>
-					{/* 右行：下一句飞入提前演示（左行完成后启动，时钟平移复用
-					    同一套飞入逻辑）；完成时刻同样上报，两行都播完才轮换 */}
-					<div className="flex min-h-0 flex-1 items-center justify-end overflow-hidden px-6">
-						{hasDemo && (
-							<div className="flex items-center" style={{ gap: cellGap }}>
-								{demoTimings.map((t, i) => (
-									<div
-										// biome-ignore lint/suspicious/noArrayIndexKey: 演示字符列表静态不重排，索引即稳定标识
-										key={`demo-${nextLine?.lineStart ?? 0}-${i}-${t.char}`}
-										className="desktop-lyric-stroke-shadow shrink-0"
-										style={{ width: cellSize, height: cellSize }}
-									>
-										<StrokeCharCell
-											char={t.char}
-											cellSize={cellSize}
-											phase="in"
-											enter="fly"
-											triggerAt={t.triggerAt}
-											flyBudgetMs={demoWindowMs}
-											onFlyEndAt={handleFlyEndAt}
-											getNowMs={demoNowMs}
-										/>
-									</div>
-								))}
-							</div>
-						)}
-					</div>
+					{/* 左上：配对首行——当前句，先播（字到演唱点起飞、铺满整句） */}
+					<PairStrokeRow
+						line={firstLine}
+						timings={firstTimings}
+						windowMs={firstWindowMs}
+						cellSize={cellSize}
+						cellGap={cellGap}
+						phase={display.phase}
+						align="start"
+						getNowMs={getNowMs}
+						onFlyEndAt={handleFlyEndAt}
+					/>
+					{/* 右下：配对次行——首行播完接播（成为当前句后正常跟播）。
+					    两行同亮度、同为正常播放（非预览）；不加 overflow-hidden，
+					    动画覆盖整个窗口 */}
+					<PairStrokeRow
+						line={secondLine}
+						timings={secondTimings}
+						windowMs={secondWindowMs}
+						cellSize={cellSize}
+						cellGap={cellGap}
+						phase={display.phase}
+						align="end"
+						getNowMs={getNowMs}
+						onFlyEndAt={handleFlyEndAt}
+					/>
 				</>
 			) : (
 				<div className="flex h-full w-full items-center justify-center">
