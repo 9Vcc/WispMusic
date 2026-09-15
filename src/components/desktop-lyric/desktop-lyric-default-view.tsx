@@ -60,41 +60,110 @@ export function DesktopDefaultView({
 	const isVertical = direction === "vertical";
 
 	if (isVertical) {
-		if (!line || line.isLeadDots) {
-			return <DesktopLeadDots vertical />;
-		}
-		// 竖排的进出场沿水平轴（整列从右侧推入），与书写方向一致；
-		// 右侧预留工具栏安全边距（pr-12），歌词列不与竖排控件重叠
+		// 竖向双列（与横向双行的奇偶交替同构）：偶数行列在左上（列靠左、
+		// 内容贴顶），奇数行列在右下（列靠右、内容贴底），当前句与下一句
+		// 天然错位成对角。各槽独立进出场（整列沿水平轴滑动，与书写方向
+		// 一致；左槽从左缘、右槽从右缘）；当前句整字号、下一句 0.8 灰。
+		// 右侧预留工具栏安全边距（pr-12）。
 		const columnSlide = fontSize * 1.35;
+		const slots: Array<{
+			item: { line: ILyricLine; index: number; isCurrent: boolean } | undefined;
+			side: "left" | "right";
+		}> = [
+			{
+				item:
+					line &&
+					!line.isLeadDots &&
+					currentIndex >= 0 &&
+					currentIndex % 2 === 0
+						? { line, index: currentIndex, isCurrent: true }
+						: nextLine && !nextLine.isLeadDots && (currentIndex + 1) % 2 === 0
+							? { line: nextLine, index: currentIndex + 1, isCurrent: false }
+							: undefined,
+				side: "left",
+			},
+			{
+				item:
+					line &&
+					!line.isLeadDots &&
+					currentIndex >= 0 &&
+					currentIndex % 2 !== 0
+						? { line, index: currentIndex, isCurrent: true }
+						: nextLine && !nextLine.isLeadDots && (currentIndex + 1) % 2 !== 0
+							? { line: nextLine, index: currentIndex + 1, isCurrent: false }
+							: undefined,
+				side: "right",
+			},
+		];
+		const hasAny = slots.some((s) => s.item);
 		return (
 			<div
-				className="flex h-full w-full items-center justify-center overflow-hidden py-2 pl-3 pr-12"
+				className="flex h-full w-full items-stretch overflow-hidden py-2 pl-3 pr-12"
 				style={{
 					fontFamily: "var(--app-lyric-font-family, inherit)",
 					color: CURRENT_COLOR,
 				}}
 			>
-				<AnimatePresence mode="popLayout" initial={false}>
-					<motion.div
-						key={`line-${currentIndex}`}
-						initial={{ opacity: 0, x: columnSlide }}
-						animate={{ opacity: 1, x: 0 }}
-						exit={{ opacity: 0, x: -columnSlide }}
-						transition={SLOT_SLIDE}
-						className="h-full max-w-full"
-						style={{ writingMode: "vertical-rl" }}
-					>
-						<DesktopLineText
-							line={line}
-							direction={direction}
-							fontSize={fontSize}
-							currentTimeMotion={currentTimeMotion}
-							lineWindowMs={
-								nextLine ? nextLine.lineStart - line.lineStart : 10000
-							}
-						/>
-					</motion.div>
-				</AnimatePresence>
+				{!hasAny ? (
+					<div className="flex h-full w-full items-center justify-center">
+						<DesktopLeadDots vertical />
+					</div>
+				) : (
+					slots.map(({ item, side }) => {
+						const isLeft = side === "left";
+						return (
+							<div
+								key={side}
+								className={cn(
+									"relative flex min-w-0 flex-1 overflow-hidden",
+									isLeft
+										? "items-start justify-center"
+										: "items-end justify-center",
+								)}
+							>
+								<AnimatePresence mode="popLayout" initial={false}>
+									{item && (
+										<motion.div
+											key={`col-${item.index}`}
+											initial={{
+												opacity: 0,
+												x: isLeft ? -columnSlide : columnSlide,
+											}}
+											animate={{ opacity: 1, x: 0 }}
+											exit={{
+												opacity: 0,
+												x: isLeft ? -columnSlide : columnSlide,
+											}}
+											transition={SLOT_SLIDE}
+											className="max-h-full max-w-full"
+											style={{
+												writingMode: "vertical-rl",
+												color: item.isCurrent ? CURRENT_COLOR : PREVIEW_COLOR,
+											}}
+										>
+											<DesktopLineText
+												line={item.line}
+												direction={direction}
+												fontSize={
+													item.isCurrent
+														? fontSize
+														: Math.round(fontSize * NEXT_LINE_SCALE)
+												}
+												currentTimeMotion={currentTimeMotion}
+												isCurrent={item.isCurrent}
+												lineWindowMs={
+													nextLine
+														? nextLine.lineStart - item.line.lineStart
+														: 10000
+												}
+											/>
+										</motion.div>
+									)}
+								</AnimatePresence>
+							</div>
+						);
+					})
+				)}
 			</div>
 		);
 	}
@@ -146,17 +215,17 @@ export function DesktopDefaultView({
 								...SLOT_SLIDE,
 								opacity: { duration: 0.18, ease: "easeOut" },
 							}}
-						className={cn(
-							"absolute inset-x-0 top-0 flex items-center overflow-hidden",
-							index % 2 === 0 ? "justify-start" : "justify-end",
-						)}
-						style={{
-							height: slotH,
-							// 缩放原点贴对齐侧（EchoMusic 同款）：左右交替布局下
-							// 下一句 0.8 缩放向对齐侧收紧，不产生反向缩进
-							transformOrigin:
-								index % 2 === 0 ? "left center" : "right center",
-						}}
+							className={cn(
+								"absolute inset-x-0 top-0 flex items-center overflow-hidden",
+								index % 2 === 0 ? "justify-start" : "justify-end",
+							)}
+							style={{
+								height: slotH,
+								// 缩放原点贴对齐侧（EchoMusic 同款）：左右交替布局下
+								// 下一句 0.8 缩放向对齐侧收紧，不产生反向缩进
+								transformOrigin:
+									index % 2 === 0 ? "left center" : "right center",
+							}}
 						>
 							<DesktopLineText
 								line={itemLine}

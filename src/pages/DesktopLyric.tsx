@@ -180,15 +180,48 @@ export default function DesktopLyric() {
 	// 窗口句柄只取一次（与 mini 播放器同因：避免 effect 重跑窗口跳动）
 	const winRef = useRef(getCurrentWindow());
 
-	// 用户可拖拽窗口边缘自由缩放（resizable: true）；歌词舞台内容固定按
-	// 设计尺寸布局、整体等比缩放居中（横向扣除头部保留高度）——缩放比
-	// 大于 1（窗口大于设计几何）时布局盒不会被放大，只是整体视觉放大，
-	// 保证任何窗口尺寸下内容都不溢出裁切。方向/字号设置变更时主窗口会
-	// 把窗口重置回标准几何，缩放比随之回到 1
+	// 用户可拖拽窗口边缘自由缩放（resizable: true）。字体适配参考
+	// EchoMusic：窗口尺寸单向决定有效字号——横向按窗口高、竖向按窗口宽
+	// 相对设计几何的比值作为因子，有效字号 = 设置字号 × 因子（绝对钳
+	// 16~96），视图按有效字号真实重排（行槽 / 滚动窗口 / 字格全部跟随）。
+	// 有效字号只影响渲染、不回写设置与窗口几何，不存在反馈环；缩放比
+	// 在此基础上兜底贴合窗口（宽度向），任何窗口尺寸下内容都不溢出裁切
 	const isVertical = settings.direction === "vertical";
+	const rootRef = useRef<HTMLDivElement>(null);
+	const [viewport, setViewport] = useState({ width: 0, height: 0 });
+	useEffect(() => {
+		const el = rootRef.current;
+		if (!el) return;
+		const update = () =>
+			setViewport((prev) => {
+				const next = { width: el.clientWidth, height: el.clientHeight };
+				return prev.width === next.width && prev.height === next.height
+					? prev
+					: next;
+			});
+		update();
+		const ro = new ResizeObserver(update);
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, []);
+	const effectiveFontSize = useMemo(() => {
+		const design0 = computeDesktopLyricGeometry(
+			settings.direction,
+			settings.fontSize,
+		);
+		const baseDim = isVertical
+			? design0.width
+			: design0.height - DESKTOP_LYRIC_HEADER_RESERVE;
+		const actualDim = isVertical
+			? viewport.width
+			: viewport.height - DESKTOP_LYRIC_HEADER_RESERVE;
+		if (!baseDim || actualDim <= 0) return settings.fontSize;
+		const factor = actualDim / baseDim;
+		return Math.min(96, Math.max(16, Math.round(settings.fontSize * factor)));
+	}, [settings.direction, settings.fontSize, isVertical, viewport]);
 	const design = useMemo(
-		() => computeDesktopLyricGeometry(settings.direction, settings.fontSize),
-		[settings.direction, settings.fontSize],
+		() => computeDesktopLyricGeometry(settings.direction, effectiveFontSize),
+		[settings.direction, effectiveFontSize],
 	);
 	const stageDesignHeight =
 		design.height - (isVertical ? 0 : DESKTOP_LYRIC_HEADER_RESERVE);
@@ -378,6 +411,7 @@ export default function DesktopLyric() {
 		// 拖拽绑定在根层而非歌词舞台：舞台会被等比缩放，绑根层保证任何
 		// 缩放比下整个窗口都可按住拖动
 		<div
+			ref={rootRef}
 			className="group relative flex h-full w-full select-none flex-col overflow-hidden rounded-xl bg-transparent transition-[background-color] duration-300 hover:bg-black/60"
 			onPointerDown={handleDragPointerDown}
 		>
@@ -450,7 +484,7 @@ export default function DesktopLyric() {
 							currentIndex={currentIndex}
 							nextLine={nextLine}
 							direction={settings.direction}
-							fontSize={settings.fontSize}
+							fontSize={effectiveFontSize}
 							getNowMs={getNowMs}
 						/>
 					) : (
@@ -459,7 +493,7 @@ export default function DesktopLyric() {
 							nextLine={nextLine}
 							currentIndex={currentIndex}
 							direction={settings.direction}
-							fontSize={settings.fontSize}
+							fontSize={effectiveFontSize}
 							currentTimeMotion={currentTimeMotion}
 						/>
 					)}

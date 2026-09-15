@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StrokeCharCell } from "@/components/lyric/stroke/stroke-char";
 import {
+	fitFlyTimeline,
 	flattenLineChars,
 	STROKE_LINE_SCATTER_MS,
 	shouldUseInstantDisplay,
@@ -18,29 +19,30 @@ import { DesktopLeadDots } from "./desktop-lyric-default-view";
 /**
  * 桌面歌词「笔画动效」视图：与歌词页 StrokeLyricView 同一套进入+散开
  * 两段式（逐字按笔画飞入拼合、句尾四散散开），复用 StrokeCharCell 与
- * stroke-columns 的纯逻辑，句切换状态机（先等旧句动画播完再散开）也
- * 保持一致。差异只在舞台形态——桌面歌词窗口小、无翻译副行：
+ * stroke-columns 的纯逻辑，句切换状态机（先等动画播完再散开）也保持
+ * 一致。差异只在舞台形态——桌面歌词窗口小、无翻译副行：
  *
- * - 横向：双行布局与默认动效一致（按行索引奇偶一左一右交替）——当前句
- *   在上槽靠左播笔画动效，下一句在下槽靠右以定妆形态低亮度预览；
+ * - 横向：双行布局（按行索引奇偶一左一右交替）——左行当前句跟播笔画
+ *   飞入；左行动画播完后，右行**提前演示**下一句的飞入（时间轴平移
+ *   复用同一套飞入逻辑，无静态预览）；两行动画全部上报完成后才轮换；
  * - 竖向：按句长拆 1~3 列右起直书（列序与书写方向一致，先唱的在最右），
  *   右侧预留工具栏安全边距。
  */
 
-/** 切句等待旧句动画的上限（ms）：兜底防失控（与歌词页一致） */
+/** 切句等待动画的上限（ms）：兜底防失控（与歌词页一致） */
 const SWITCH_WAIT_MAX_MS = 2000;
 
 /** 桌面歌词笔画字格尺寸上下限（px）：窗口小于歌词页舞台，整体略收 */
 const CELL_MIN_PX = 20;
 const CELL_MAX_PX = 56;
 
-/** 下一句预览字格相对当前句的缩放（与默认动效视图 0.8em 层级一致） */
-const NEXT_LINE_CELL_RATIO = 0.8;
+/** 右行演示的启动间隙（ms）：左行动画估算完成后稍作停顿再开始演示 */
+const DEMO_START_GAP_MS = 150;
 
 interface DesktopStrokeViewProps {
 	lines: ILyricLine[];
 	currentIndex: number;
-	/** 下一句（横向双行的预览行，与默认动效视图同源跳过过门圆点行） */
+	/** 下一句（横向双行的演示行，与默认动效视图同源跳过过门圆点行） */
 	nextLine?: ILyricLine;
 	direction: "horizontal" | "vertical";
 	/** 字号设置（推导设计几何，字格尺寸按设计坐标计算） */
@@ -195,18 +197,37 @@ export function DesktopStrokeView({
 	const cellGap = Math.max(4, Math.round(cellSize * 0.14));
 	const columnGap = Math.max(14, Math.round(cellSize * 0.4));
 
-	// 下一句预览（横向双行的下槽）：静态定妆字格、低亮度、0.8× 缩放，
-	// 与默认动效视图的预览行同一层级关系
-	const previewChars = useMemo(
-		() =>
-			nextLine && !nextLine.isLeadDots
-				? Array.from(nextLine.lineText).filter((c) => c.trim().length > 0)
-				: [],
+	// —— 右行演示时序（横向双行）：左行动画完成后提前演示下一句飞入 ——
+	// 启动时刻（歌词时间轴）= 左行末字触发 + 其飞入总时长（fitFlyTimeline
+	// 渲染期估算：fastMs+tailMs，稳定无抖动）+ 间隙；已过点（seek 深入
+	// 句中）则立即启动。右行 cell 的时钟 = 真实歌词时间 − (演示启动时刻
+	// − 下一句 lineStart)（负偏移，演示时钟超前于歌词时钟），下一句首字
+	// triggerAt 恰好在演示启动时刻到期——飞入/追赶/预算压缩逻辑完全复用，
+	// 无静态预览。
+	const demoTimings = useMemo(
+		() => (nextLine && !nextLine.isLeadDots ? flattenLineChars(nextLine) : []),
 		[nextLine],
 	);
-	const previewCellSize = Math.max(
-		CELL_MIN_PX - 4,
-		Math.round(cellSize * NEXT_LINE_CELL_RATIO),
+	const demoStartLyricMs = useMemo(() => {
+		const last = timings[timings.length - 1];
+		if (!last || demoTimings.length === 0) return Number.NaN;
+		const timeline = fitFlyTimeline(flyBudgetMs);
+		const leftDone = last.triggerAt + timeline.fastMs + timeline.tailMs;
+		return Math.max(leftDone, getNowMs()) + DEMO_START_GAP_MS;
+		// getNowMs 为稳定回调：启动时刻钉在歌词时间轴，仅随句数据/预算重估
+	}, [timings, flyBudgetMs, demoTimings.length, getNowMs]);
+	const hasDemo = demoTimings.length > 0 && !Number.isNaN(demoStartLyricMs);
+	const demoOffsetMs =
+		hasDemo && nextLine
+			? demoStartLyricMs - nextLine.lineStart
+			: Number.POSITIVE_INFINITY;
+	const demoWindowMs =
+		hasDemo && nextLine
+			? Math.max(600, nextLine.lineStart - demoStartLyricMs)
+			: 0;
+	const demoNowMs = useCallback(
+		() => getNowMs() - demoOffsetMs,
+		[getNowMs, demoOffsetMs],
 	);
 
 	const showCells =
@@ -262,7 +283,7 @@ export function DesktopStrokeView({
 				)
 			) : showCells && displayLine ? (
 				<>
-					{/* 上槽：当前句靠左（行索引偶数侧），笔画进入+散开动效 */}
+					{/* 左行：当前句跟播笔画飞入（完成时刻上报驱动轮换等待与右行演示） */}
 					<div className="flex min-h-0 flex-1 items-center justify-start overflow-hidden px-6">
 						<div className="flex items-center" style={{ gap: cellGap }}>
 							{timings.map((t, i) => (
@@ -286,31 +307,27 @@ export function DesktopStrokeView({
 							))}
 						</div>
 					</div>
-					{/* 下槽：下一句预览靠右（行索引奇数侧），定妆字格低亮度静态展示 */}
-					<div
-						className="flex min-h-0 flex-1 items-center justify-end overflow-hidden px-6"
-						style={{ opacity: 0.45 }}
-					>
-						{previewChars.length > 0 && (
-							<div
-								className="flex items-center"
-								style={{ gap: Math.max(3, Math.round(previewCellSize * 0.14)) }}
-							>
-								{previewChars.map((ch, i) => (
+					{/* 右行：下一句飞入提前演示（左行完成后启动，时钟平移复用
+					    同一套飞入逻辑）；完成时刻同样上报，两行都播完才轮换 */}
+					<div className="flex min-h-0 flex-1 items-center justify-end overflow-hidden px-6">
+						{hasDemo && (
+							<div className="flex items-center" style={{ gap: cellGap }}>
+								{demoTimings.map((t, i) => (
 									<div
-										// biome-ignore lint/suspicious/noArrayIndexKey: 预览字符列表静态不重排，索引即稳定标识
-										key={`pv-${nextLine?.lineStart ?? 0}-${i}-${ch}`}
+										// biome-ignore lint/suspicious/noArrayIndexKey: 演示字符列表静态不重排，索引即稳定标识
+										key={`demo-${nextLine?.lineStart ?? 0}-${i}-${t.char}`}
 										className="desktop-lyric-stroke-shadow shrink-0"
-										style={{ width: previewCellSize, height: previewCellSize }}
+										style={{ width: cellSize, height: cellSize }}
 									>
 										<StrokeCharCell
-											char={ch}
-											cellSize={previewCellSize}
+											char={t.char}
+											cellSize={cellSize}
 											phase="in"
-											enter="instant"
-											triggerAt={0}
-											flyBudgetMs={0}
-											getNowMs={getNowMs}
+											enter="fly"
+											triggerAt={t.triggerAt}
+											flyBudgetMs={demoWindowMs}
+											onFlyEndAt={handleFlyEndAt}
+											getNowMs={demoNowMs}
 										/>
 									</div>
 								))}

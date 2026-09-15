@@ -36,9 +36,10 @@ export function computeDesktopLyricGeometry(
 				DESKTOP_LYRIC_HEADER_RESERVE,
 		};
 	}
-	// 竖排：宽度容纳最多 3 列（笔画动效按句长拆列），高度是纵向卷轴的主轴
+	// 竖排：宽度容纳双列歌词布局（当前句 / 下一句各一列，左上 / 右下
+	// 错位）与笔画动效多列拆分，高度是纵向卷轴的主轴
 	return {
-		width: Math.min(440, Math.max(220, Math.round(fontSize * 4.8))),
+		width: Math.min(600, Math.max(300, Math.round(fontSize * 6.5))),
 		height: 620,
 	};
 }
