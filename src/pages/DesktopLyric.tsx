@@ -1,3 +1,10 @@
+import {
+	sfBackwardFill,
+	sfForwardFill,
+	sfPauseFill,
+	sfPlayFill,
+} from "@bradleyhodges/sfsymbols";
+import SFIcon from "@bradleyhodges/sfsymbols-react";
 import { Dismiss20Regular } from "@fluentui/react-icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -10,26 +17,35 @@ import type {
 	DesktopLyricDirection,
 	LyricAnimationStyle,
 } from "@/lib/store/settingStore/settingStore";
-import { computeDesktopLyricGeometry } from "@/lib/utils/desktop-lyric-geometry";
+import {
+	computeDesktopLyricGeometry,
+	DESKTOP_LYRIC_HEADER_RESERVE,
+} from "@/lib/utils/desktop-lyric-geometry";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
 
 /**
  * 桌面歌词悬浮控件窗口（/desktop-lyric，独立置顶透明 webview）。
  *
  * 状态全部来自主窗口经 Rust 定向转发的 desktop-lyric-sync-state 推送
- * （full=歌词全文 / progress=进度锚点 / settings=方向·动效·字号），
- * 自身不持有权威状态；工具条操作经 desktop_lyric_command 回传主窗口
- * 落库后随 settings 推送回流。
+ * （full=歌词全文快照+offsetMs / progress=进度锚点 / settings=方向·动效·
+ * 字号），自身不持有权威状态；工具条操作经 desktop_lyric_command 回传
+ * 主窗口落库/驱动播放后随推送回流。
  *
  * 播放进度本地插值：主窗口按 300ms 推锚点（currentTime + 墙钟 + 播放态），
  * 本窗口 rAF 逐帧推进并叠加歌词偏移，驱动行切换与逐字/笔画动效。
  * 窗口几何（显隐/横竖切换缩放/落位钳制）由主窗口统一驱动，本页面只做
  * 内容自适应布局。
+ *
+ * 布局对齐 EchoMusic：窗口恒定全透明（背景材质与主题/设置解耦，
+ * 仅歌词文字浮在桌面）；横向为三区头部（歌名 / 上一首·播放·下一首 /
+ * 显示工具）+ 双行歌词舞台，头部 hover 淡入；竖向头部收纳为居中
+ * 悬浮胶囊，歌词占满全窗。
  */
 
 interface FullState {
 	songKey: string;
 	title: string;
+	artist: string;
 	lines: ILyricLine[];
 	offsetMs: number;
 }
@@ -54,6 +70,7 @@ type SyncPayload =
 const INITIAL_FULL: FullState = {
 	songKey: "none",
 	title: "",
+	artist: "",
 	lines: [],
 	offsetMs: 0,
 };
@@ -152,6 +169,8 @@ function TargetStyleIcon({ targetStroke }: { targetStroke: boolean }) {
 export default function DesktopLyric() {
 	const [full, setFull] = useState<FullState>(INITIAL_FULL);
 	const [settings, setSettings] = useState<SettingsState>(INITIAL_SETTINGS);
+	// 播放态只驱动传输按钮图标，随 progress 锚点回流（值不变时 setState 无副作用）
+	const [isPlaying, setIsPlaying] = useState(false);
 
 	// 进度锚点（主窗口推送）→ 本地 rAF 插值，写入 currentTimeMotion
 	const anchorRef = useRef({ time: 0, at: 0, playing: false });
@@ -160,22 +179,25 @@ export default function DesktopLyric() {
 	// 窗口句柄只取一次（与 mini 播放器同因：避免 effect 重跑窗口跳动）
 	const winRef = useRef(getCurrentWindow());
 
-	// 用户可拖拽窗口边缘自由缩放（resizable: true）；内容按"设计尺寸 →
-	// 实际尺寸"等比缩放，字号视觉随窗口大小变化，方向/字号设置变更时
-	// 主窗口会把窗口重置回标准几何，缩放比随之回到 1
-	const rootRef = useRef<HTMLDivElement>(null);
+	// 用户可拖拽窗口边缘自由缩放（resizable: true）；歌词舞台按"设计尺寸 →
+	// 实际尺寸"等比缩放（横向扣除头部保留高度），字号视觉随窗口大小变化，
+	// 方向/字号设置变更时主窗口会把窗口重置回标准几何，缩放比随之回到 1
+	const stageRef = useRef<HTMLDivElement>(null);
 	const [contentScale, setContentScale] = useState(1);
 	useEffect(() => {
-		const el = rootRef.current;
+		const el = stageRef.current;
 		if (!el) return;
 		const design = computeDesktopLyricGeometry(
 			settings.direction,
 			settings.fontSize,
 		);
+		const stageDesignHeight =
+			design.height -
+			(settings.direction === "horizontal" ? DESKTOP_LYRIC_HEADER_RESERVE : 0);
 		const update = () => {
 			const next = Math.min(
 				el.clientWidth / design.width,
-				el.clientHeight / design.height,
+				el.clientHeight / stageDesignHeight,
 			);
 			setContentScale(Number.isFinite(next) && next > 0 ? next : 1);
 		};
@@ -192,6 +214,7 @@ export default function DesktopLyric() {
 				setFull({
 					songKey: p.songKey,
 					title: p.title,
+					artist: p.artist,
 					lines: p.lines,
 					offsetMs: p.offsetMs,
 				});
@@ -207,6 +230,7 @@ export default function DesktopLyric() {
 					at: p.at,
 					playing: p.isPlaying,
 				};
+				setIsPlaying(p.isPlaying);
 			}
 		});
 		// 挂载完成（含 HMR 重挂载）后主动要一次全量快照
@@ -255,12 +279,13 @@ export default function DesktopLyric() {
 	);
 
 	const currentLine = currentIndex >= 0 ? lines[currentIndex] : undefined;
-	const nextLine = currentIndex >= 0 ? lines[currentIndex + 1] : undefined;
-	const lineKey = currentLine
-		? `${currentLine.lineStart}-${currentLine.lineText}`
-		: "none";
+	// 下一句预览跳过过门圆点行（圆点行自己晋级时由呼吸圆点兜底接管）
+	let nextLine = currentIndex >= 0 ? lines[currentIndex + 1] : undefined;
+	if (nextLine?.isLeadDots) {
+		nextLine = lines[currentIndex + 2];
+	}
 
-	// 工具条指令：一律回传主窗口（settingStore 是唯一可信源）
+	// 工具条指令：一律回传主窗口（settingStore / playerStore 是唯一可信源）
 	const send = useCallback((payload: Record<string, unknown>) => {
 		invoke("desktop_lyric_command", { payload }).catch(console.error);
 	}, []);
@@ -274,24 +299,125 @@ export default function DesktopLyric() {
 
 	const isVertical = settings.direction === "vertical";
 
+	// 显示工具组：方向 / 动效 / 字号 / 关闭（横竖两种头部共用）
+	const displayTools = (
+		<>
+			<ToolButton
+				label={isVertical ? "切换为横向显示" : "切换为竖向显示"}
+				onClick={() =>
+					send({
+						event: "setDirection",
+						direction: isVertical ? "horizontal" : "vertical",
+					})
+				}
+			>
+				<DirectionIcon targetVertical={!isVertical} />
+			</ToolButton>
+			<ToolButton
+				label={
+					settings.animationStyle === "default"
+						? "切换为笔画动效"
+						: "切换为默认动效"
+				}
+				onClick={() =>
+					send({
+						event: "setAnimationStyle",
+						style: settings.animationStyle === "default" ? "stroke" : "default",
+					})
+				}
+			>
+				<TargetStyleIcon targetStroke={settings.animationStyle === "default"} />
+			</ToolButton>
+			<ToolButton
+				label="减小字号"
+				onClick={() => send({ event: "setFontDelta", delta: -2 })}
+			>
+				<span className="text-[11px] font-semibold leading-none">A</span>
+			</ToolButton>
+			<ToolButton
+				label="增大字号"
+				onClick={() => send({ event: "setFontDelta", delta: 2 })}
+			>
+				<span className="text-[15px] font-semibold leading-none">A</span>
+			</ToolButton>
+			<ToolButton label="关闭桌面歌词" onClick={() => send({ event: "close" })}>
+				<Dismiss20Regular className="size-4" />
+			</ToolButton>
+		</>
+	);
+
 	return (
-		// 根层透明：桌面歌词没有窗口背板，文字直接浮在桌面上（不遮挡桌面）。
-		// 拖拽绑定在根层而非歌词舞台：舞台会被等比缩放，绑根层保证任何
-		// 缩放比下整个窗口都可按住拖动
+		// 根层恒定全透明：桌面歌词没有任何窗口背板（非 hover 与 hover 均
+		// 如此，不随主题/材质设置变化），只有歌词文字与其描边背衬层浮在
+		// 桌面上；可读性由 glyph-backdrop 保证。拖拽绑定在根层而非歌词
+		// 舞台：舞台会被等比缩放，绑根层保证任何缩放比下整个窗口都可
+		// 按住拖动
 		<div
-			ref={rootRef}
-			className="group relative h-screen w-screen select-none overflow-hidden"
+			className="group relative flex h-full w-full select-none flex-col overflow-hidden"
 			onPointerDown={handleDragPointerDown}
 		>
-			{/* 悬浮背景板：仅 hover 时浮现的半透明圆角底；非 hover 完全透明 */}
-			<div
-				aria-hidden
-				className="pointer-events-none absolute inset-1 rounded-2xl bg-black/30 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-			/>
+			{isVertical ? (
+				// 竖向：头部收纳为居中悬浮胶囊（hover 淡入），歌词占满全窗
+				<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+					<div
+						className="pointer-events-none flex items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto"
+						style={{ fontFamily: '"Microsoft Yahei"' }}
+					>
+						{displayTools}
+					</div>
+				</div>
+			) : (
+				// 横向：EchoMusic 式三区头部（歌名 / 传输控制 / 显示工具），
+				// 常驻占位（歌词舞台高度随之扣减），hover 才淡入。pointer-
+				// events 只在 hover 时下放到各胶囊——若整层启用会拦掉拖动
+				<header className="relative z-10 h-12 shrink-0 px-3 pt-2">
+					<div
+						className="pointer-events-none flex h-full items-center justify-between gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+						style={{ fontFamily: '"Microsoft Yahei"' }}
+					>
+						<div className="pointer-events-none min-w-0 flex-1 group-hover:pointer-events-auto">
+							<div className="flex items-center rounded-full border border-white/10 bg-black/45 px-3 py-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+								<span className="truncate text-[13px] font-medium text-white/75">
+									{full.title || "WispMusic"}
+									{full.artist ? ` - ${full.artist}` : ""}
+								</span>
+							</div>
+						</div>
+						<div className="pointer-events-none flex shrink-0 items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto">
+							<ToolButton
+								label="上一首"
+								onClick={() => send({ event: "previousTrack" })}
+							>
+								<SFIcon icon={sfBackwardFill} className="size-4" />
+							</ToolButton>
+							<ToolButton
+								label={isPlaying ? "暂停" : "播放"}
+								onClick={() => send({ event: "togglePlayback" })}
+							>
+								<SFIcon
+									icon={isPlaying ? sfPauseFill : sfPlayFill}
+									className="size-4"
+								/>
+							</ToolButton>
+							<ToolButton
+								label="下一首"
+								onClick={() => send({ event: "nextTrack" })}
+							>
+								<SFIcon icon={sfForwardFill} className="size-4" />
+							</ToolButton>
+						</div>
+						<div className="pointer-events-none flex shrink-0 items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto">
+							{displayTools}
+						</div>
+					</div>
+				</header>
+			)}
+
 			{/* 歌词舞台：字体走全局歌词字体变量（含用户自定义字体），
-			    内容随窗口实际尺寸等比缩放 */}
+			    内容随舞台实际尺寸等比缩放 */}
 			<div
-				className="absolute inset-0 flex items-center justify-center"
+				ref={stageRef}
+				className="relative flex min-h-0 flex-1 items-center justify-center"
 				style={{
 					fontFamily: "var(--app-lyric-font-family, inherit)",
 					transform: `scale(${contentScale})`,
@@ -309,71 +435,12 @@ export default function DesktopLyric() {
 					<DesktopDefaultView
 						line={currentLine}
 						nextLine={nextLine}
-						lineKey={lineKey}
+						currentIndex={currentIndex}
 						direction={settings.direction}
 						fontSize={settings.fontSize}
 						currentTimeMotion={currentTimeMotion}
 					/>
 				)}
-			</div>
-
-			{/* 悬浮工具条：hover 淡入居中，玻璃面语言与歌词页工具条一致。
-			    pointer-events 只能在 hover 时下放到工具条胶囊本身——若整层
-			    启用（inset-0 覆盖全窗口），会把按住拖动整个拦掉（鼠标悬浮
-			    在窗口内是常态，之前拖不动即此因） */}
-			<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-				<div
-					className="pointer-events-none flex items-center gap-0.5 rounded-full border border-white/15 bg-black/45 p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] group-hover:pointer-events-auto"
-					style={{ fontFamily: '"Microsoft Yahei"' }}
-				>
-					<ToolButton
-						label={isVertical ? "切换为横向显示" : "切换为竖向显示"}
-						onClick={() =>
-							send({
-								event: "setDirection",
-								direction: isVertical ? "horizontal" : "vertical",
-							})
-						}
-					>
-						<DirectionIcon targetVertical={!isVertical} />
-					</ToolButton>
-					<ToolButton
-						label={
-							settings.animationStyle === "default"
-								? "切换为笔画动效"
-								: "切换为默认动效"
-						}
-						onClick={() =>
-							send({
-								event: "setAnimationStyle",
-								style:
-									settings.animationStyle === "default" ? "stroke" : "default",
-							})
-						}
-					>
-						<TargetStyleIcon
-							targetStroke={settings.animationStyle === "default"}
-						/>
-					</ToolButton>
-					<ToolButton
-						label="减小字号"
-						onClick={() => send({ event: "setFontDelta", delta: -2 })}
-					>
-						<span className="text-[11px] font-semibold leading-none">A</span>
-					</ToolButton>
-					<ToolButton
-						label="增大字号"
-						onClick={() => send({ event: "setFontDelta", delta: 2 })}
-					>
-						<span className="text-[15px] font-semibold leading-none">A</span>
-					</ToolButton>
-					<ToolButton
-						label="关闭桌面歌词"
-						onClick={() => send({ event: "close" })}
-					>
-						<Dismiss20Regular className="size-4" />
-					</ToolButton>
-				</div>
 			</div>
 		</div>
 	);

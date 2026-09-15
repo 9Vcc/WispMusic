@@ -1059,6 +1059,12 @@ function applyMaterial(
 
 async function applyMaterialToWindow(material: AppearanceSettings["material"]) {
 	if (!isTauri()) return;
+	// 桌面歌词窗口：浮在任意壁纸上的纯文字层，背景材质必须与主题/用户
+	// 材质设置完全解耦——既不下系统特效（mica/acrylic 会整窗着色且随
+	// 主题翻转变体），也不写 data-material（避免 :root[data-material]
+	// 分支的变量侧染色）。窗口本身 transparent + 无特效，恒定全透明，
+	// 可读性由歌词文字的暗色描边背衬层保证。
+	if (getCurrentWindow().label === "desktop-lyric") return;
 	// 按窗口收窄后再应用：效果与 data-material 必须用同一个解析结果，
 	// 否则样式分支会与实际系统特效不一致
 	let resolved = resolveWindowMaterial(material);

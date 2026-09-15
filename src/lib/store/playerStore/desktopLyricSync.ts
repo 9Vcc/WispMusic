@@ -53,6 +53,7 @@ interface FullSnapshot {
 	type: "full";
 	songKey: string;
 	title: string;
+	artist: string;
 	lines: ILyricLine[];
 	offsetMs: number;
 }
@@ -102,6 +103,7 @@ export function initDesktopLyricSync() {
 			type: "full",
 			songKey: s.currentSong ? String(s.currentSong.id) : "none",
 			title: s.currentSong?.name || "",
+			artist: (s.currentSong?.ar ?? []).map((a) => a.name).join("/"),
 			lines: resolution.lines,
 			offsetMs: selectCurrentLyricOffset(s),
 		};
@@ -258,6 +260,16 @@ export function initDesktopLyricSync() {
 				}
 				break;
 			}
+			case "togglePlayback":
+				// 桌面歌词工具栏的播放/暂停（与播放条同一动作入口）
+				void usePlayerStore.getState().togglePlay();
+				break;
+			case "nextTrack":
+				usePlayerStore.getState().next(true);
+				break;
+			case "previousTrack":
+				usePlayerStore.getState().prev(true);
+				break;
 		}
 	}).then((unlisten) => unlistenFns.push(unlisten));
 
