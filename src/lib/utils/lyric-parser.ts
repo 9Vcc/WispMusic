@@ -251,15 +251,13 @@ export function ParseVerbatimLyric(rawString: string | undefined) {
 
 		const lineMatch = lineRegex.exec(trimmedLine);
 		if (lineMatch) {
-			const lineStart = parseInt(lineMatch[1]);
+			const lineStart = parseInt(lineMatch[1], 10);
 			const words: LyricWord[] = [];
 			let lineText = "";
 
-			let wordMatch;
-
-			while ((wordMatch = wordRegex.exec(trimmedLine)) !== null) {
-				const startTime = parseInt(wordMatch[1]);
-				const duration = parseInt(wordMatch[2]);
+			for (const wordMatch of trimmedLine.matchAll(wordRegex)) {
+				const startTime = parseInt(wordMatch[1], 10);
+				const duration = parseInt(wordMatch[2], 10);
 				const char = wordMatch[3];
 
 				words.push({ startTime, duration, char });
@@ -318,7 +316,8 @@ export function hasWordTiming(lines: readonly ILyricLine[]): boolean {
 }
 
 /** 是否属于「逐字单位」字符：CJK 汉字与全角标点逐字扫过，拉丁/数字整词扫过 */
-const WIDE_GLYPH_REGEX = /[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u3000-\u303F]/;
+const WIDE_GLYPH_REGEX =
+	/[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u3000-\u303F]/;
 
 /**
  * 把一整行歌词切成逐字动效的词元。
@@ -439,10 +438,13 @@ export function applyFallbackWordTiming(
 			: nextStart != null && nextStart > line.lineStart
 				? nextStart - line.lineStart
 				: fallbackLineDurationMs;
-		const span = hasEnd || spanCap === null ? rawSpan : Math.min(rawSpan, spanCap);
+		const span =
+			hasEnd || spanCap === null ? rawSpan : Math.min(rawSpan, spanCap);
 		const end = line.lineStart + span;
 
-		const weights = tokens.map((token) => Math.max(1, Array.from(token).length));
+		const weights = tokens.map((token) =>
+			Math.max(1, Array.from(token).length),
+		);
 		const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
 
 		let cursor = line.lineStart;
@@ -506,7 +508,11 @@ export function mergeWordTiming(
 		const joined = matched.words.map((word) => word.char).join("");
 		if (joined.trim() !== line.lineText.trim()) return line;
 
-		return { ...line, lineEnd: line.lineEnd ?? matched.lineEnd, words: matched.words };
+		return {
+			...line,
+			lineEnd: line.lineEnd ?? matched.lineEnd,
+			words: matched.words,
+		};
 	});
 }
 
