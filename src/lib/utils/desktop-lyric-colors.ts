@@ -54,7 +54,8 @@ export const DESKTOP_LYRIC_HOVER_BACKGROUND_OPACITY = 60;
 /**
  * 各状态的相对透明度——取值与改造前的硬编码一一对应，是外观基线的一部分，
  * 不要为了「更亮/更透」随手调：它们共同承担「当前行 > 预览行 > 描边阴影」
- * 的层级表达。
+ * 的层级表达。例外：笔画字格两项（strokeGlyph/strokeGlyphSoft）按需求定为
+ * 纯色不透明——笔画合并为整字后不保留任何透明成分（歌词页同步）。
  */
 export const DESKTOP_LYRIC_ALPHA = {
 	/** 当前行正文（无逐字数据时整行用它） */
@@ -71,10 +72,10 @@ export const DESKTOP_LYRIC_ALPHA = {
 	shadowStrong: 0.55,
 	/** 填充层自身投影 */
 	halo: 0.32,
-	/** 笔画字格填充 */
-	strokeGlyph: 0.88,
-	/** 笔画无数据兜底字（宋体/楷体静态字） */
-	strokeGlyphSoft: 0.62,
+	/** 笔画字格填充（合并为整字后纯色不透明，不保留透明度） */
+	strokeGlyph: 1,
+	/** 笔画无数据兜底字（宋体/楷体静态字，与整字同为纯色不透明） */
+	strokeGlyphSoft: 1,
 	/** 笔画字格外投影 */
 	strokeDrop: 0.5,
 } as const;

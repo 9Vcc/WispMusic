@@ -17,14 +17,15 @@ import {
 
 /**
  * 笔画样式：默认完全透明，数据就绪与定妆前不露形；显示以 opacity 内联
- * 定妆（按深度分层），散开动画以 transform + opacity 全程接管。
+ * 定妆（定妆即纯色不透明），散开动画以 transform + opacity 全程接管。
+ * 填充/描边一律纯色无 alpha——合并为整字后不保留任何透明成分，歌词页
+ * （无 --dl-* 变量，走回退值）与桌面歌词（变量本身已不透明）观感一致。
  * 同色细描边适当增粗笔画（viewBox 1024 坐标系，30 单位 ≈ 字高 3.3%，
  * 屏幕上随字号等比），round join/cap 避免笔画尖端出现毛刺。
  */
 const PATH_STYLE: CSSProperties = {
-	fill: "var(--dl-glyph-fill-color, rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1))))",
-	stroke:
-		"var(--dl-glyph-fill-color, rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1))))",
+	fill: "var(--dl-glyph-fill-color, rgb(255 255 255))",
+	stroke: "var(--dl-glyph-fill-color, rgb(255 255 255))",
 	strokeWidth: 30,
 	strokeLinejoin: "round",
 	strokeLinecap: "round",
@@ -34,10 +35,9 @@ const PATH_STYLE: CSSProperties = {
 	willChange: "transform, opacity",
 };
 
-/** 无笔画数据（字母/标点/生僻字）的静态字兜底 */
+/** 无笔画数据（字母/标点/生僻字）的静态字兜底：与合并整字同为纯色不透明 */
 const FALLBACK_STYLE: CSSProperties = {
-	color:
-		"var(--dl-glyph-fill-soft, rgb(255 255 255 / calc(62% * var(--lyric-alpha-scale, 1))))",
+	color: "var(--dl-glyph-fill-soft, rgb(255 255 255))",
 	fontFamily: '"Kaiti SC", "KaiTi", "STKaiti", serif',
 	userSelect: "none",
 };
@@ -53,12 +53,6 @@ const SCATTER_SCALE_NEAR = 1.14;
 const SCATTER_SCALE_FAR = 0.78;
 const SCATTER_ROTATE_BASE_DEG = 24;
 const SCATTER_ROTATE_DEPTH_DEG = 48;
-
-/**
- * 定妆不透明度的深度衰减量：显示时近层全实（1）、远层保留 1-0.3=0.7
- * 的半透——笔画重叠处透出下层，呈现半透明的层次感。
- */
-const SCATTER_LAND_FADE = 0.3;
 
 /** 散开缓动：ease-in——起步蓄力加速飞出，配合短时长提升节奏感 */
 const SCATTER_EASING = "cubic-bezier(.4, 0, 1, 1)";
@@ -141,7 +135,7 @@ interface StrokeCharCellProps {
  * 成字（观感与句尾散开互为镜像，时长按句级预算自适应，追赶时再压已
  * 流逝量并上报完成时刻），字的时机跟播放进度（triggerAt）走，已过点
  * 超出容差的字追赶直接定妆；instant——整句一次性以完成态呈现。定妆
- * 统一按深度保留部分透明度（重叠笔画呈半透明层次）；句尾由父级等
+ * 统一为纯色不透明（合并为整字后不保留任何透明成分）；句尾由父级等
  * 动画播完后切到 out 相位，笔画四散飞开并渐隐至完全消失。无笔画数据
  * 的字符以静态楷体直接显示、散开时同步渐隐。
  */
@@ -201,14 +195,14 @@ export function StrokeCharCell({
 		[],
 	);
 
-	/** 整句直接显示：全部笔画立即以完成态定妆（保留分层透明度） */
+	/** 整句直接显示：全部笔画立即以完成态纯色定妆（不保留任何透明度） */
 	const assembleInstantly = useCallback(() => {
 		if (playedRef.current) return;
 		playedRef.current = true;
 		cancelAnims();
 		for (const p of pathRefs.current) {
 			if (!p) continue;
-			p.style.opacity = String(1 - SCATTER_LAND_FADE * Math.random());
+			p.style.opacity = "1";
 			p.style.transform = "none";
 		}
 	}, [cancelAnims]);
@@ -219,8 +213,8 @@ export function StrokeCharCell({
 	 * 句级 FlyTimeline 统一压缩：飞行份额承担提速、tailMs 保障减速长尾
 	 * 的时间余量——减速由 easeOutCubic 单段曲线全程连续承担，速度渐近
 	 * 归零、无中途拼接跳变，落定丝滑无顿挫。起飞顺序乱序、方向/角度/
-	 * 速度随机，不呈现统一规律。定妆透明度与整句直接显示一致（分层
-	 * 透明），散开可从飞行中途平滑接续。
+	 * 速度随机，不呈现统一规律。定妆与整句直接显示一致（纯色不透明），
+	 * 散开可从飞行中途平滑接续。
 	 */
 	const flyIn = useCallback(
 		(startDelayMs: number, timeline: FlyTimeline) => {
@@ -292,7 +286,8 @@ export function StrokeCharCell({
 				const flyMs =
 					flyShareMs *
 					(FLY_SPEED_JITTER_MIN + Math.random() * FLY_SPEED_JITTER_RANGE);
-				const landOpacity = 1 - SCATTER_LAND_FADE * Math.random();
+				// 定妆即纯色不透明：飞入只承担进场过渡，落位后不留透明成分
+				const landOpacity = 1;
 				// 单段连续减速：两帧 + easeOutCubic 长尾——速度全程连续递减、
 				// 渐近落定，无中途帧拼接的速度跳变；tailMs 已并入总时长，
 				// 为压缩场景保障减速长尾的时间余量

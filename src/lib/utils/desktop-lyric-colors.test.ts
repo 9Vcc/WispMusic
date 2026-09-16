@@ -115,8 +115,8 @@ describe("buildDesktopLyricColorVars", () => {
 		expect(vars["--dl-halo-shadow"]).toBe("rgb(8 10 14 / 0.32)");
 		expect(vars["--dl-stroke-drop-shadow"]).toBe("rgb(8 10 14 / 0.5)");
 		expect(vars["--dl-word-fill-color"]).toBe("rgb(255 255 255 / 1)");
-		expect(vars["--dl-glyph-fill-color"]).toBe("rgb(255 255 255 / 0.88)");
-		expect(vars["--dl-glyph-fill-soft"]).toBe("rgb(255 255 255 / 0.62)");
+		expect(vars["--dl-glyph-fill-color"]).toBe("rgb(255 255 255 / 1)");
+		expect(vars["--dl-glyph-fill-soft"]).toBe("rgb(255 255 255 / 1)");
 		expect(vars["--dl-bg-alpha"]).toBe("0");
 		expect(vars["--dl-bg-alpha-hover"]).toBe("0.6");
 	});
@@ -132,7 +132,7 @@ describe("buildDesktopLyricColorVars", () => {
 		expect(vars["--dl-current-color"]).toBe("rgb(84 200 255 / 0.88)");
 		expect(vars["--dl-word-fill-color"]).toBe("rgb(84 200 255 / 1)");
 		expect(vars["--dl-stroke-color"]).toBe("rgb(4 24 43 / 0.52)");
-		expect(vars["--dl-glyph-fill-color"]).toBe("rgb(84 200 255 / 0.88)");
+		expect(vars["--dl-glyph-fill-color"]).toBe("rgb(84 200 255 / 1)");
 		expect(vars["--dl-bg-alpha"]).toBe("0.42");
 	});
 
@@ -147,7 +147,7 @@ describe("buildDesktopLyricColorVars", () => {
 });
 
 describe("buildStrokeRowColorVars", () => {
-	it("当前句用高亮色，其余行用普通文字色", () => {
+	it("当前句用高亮色，其余行用普通文字色（笔画字格均为纯色不透明）", () => {
 		const colors = {
 			textColor: "#cfe6ff",
 			highlightColor: "#54c8ff",
@@ -155,11 +155,11 @@ describe("buildStrokeRowColorVars", () => {
 			backgroundOpacity: 0,
 		};
 		expect(buildStrokeRowColorVars(colors, true)["--dl-glyph-fill-color"]).toBe(
-			"rgb(84 200 255 / 0.88)",
+			"rgb(84 200 255 / 1)",
 		);
 		expect(
 			buildStrokeRowColorVars(colors, false)["--dl-glyph-fill-color"],
-		).toBe("rgb(207 230 255 / 0.88)");
+		).toBe("rgb(207 230 255 / 1)");
 	});
 });
 
