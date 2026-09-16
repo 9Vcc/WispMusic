@@ -16,6 +16,7 @@ import {
 	type DownloadProgress,
 	downloadAndInstallUpdate,
 } from "@/lib/services/appUpdate";
+import { MarkdownView } from "./markdown-view";
 
 export type UpdatePhase = "idle" | "downloading" | "restarting";
 
@@ -173,8 +174,15 @@ export function UpdateDialog({
 				<DialogTitle>发现新版本 v{info.version}</DialogTitle>
 				<DialogBody>
 					<div className="flex flex-col gap-3">
-						<div className="no-scrollbar max-h-56 overflow-y-auto rounded-md bg-fill-subtle p-3 text-muted-foreground text-sm leading-relaxed whitespace-pre-line">
-							{info.notes || "本次更新没有提供更新说明。"}
+						{/* notes 是 Markdown（发布脚本从 CHANGELOG 提取的版本段落）：
+						    走结构化渲染展示标题/列表/加粗/代码/链接；容器沿用原有的
+						    高度上限与滚动（长内容内部滚动），文字基线由 MarkdownView 继承 */}
+						<div className="no-scrollbar max-h-56 overflow-y-auto rounded-md bg-fill-subtle p-3 text-muted-foreground text-sm">
+							{info.notes ? (
+								<MarkdownView source={info.notes} />
+							) : (
+								"本次更新没有提供更新说明。"
+							)}
 						</div>
 						{phase === "restarting" && (
 							<div className="text-muted-foreground text-xs">

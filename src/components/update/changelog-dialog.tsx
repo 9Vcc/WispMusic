@@ -7,7 +7,9 @@ import {
 	DialogFooter,
 	DialogTitle,
 } from "@/components/ui/dialog";
+import { parseInline } from "@/lib/utils/markdown";
 import changelogRaw from "../../../.github/workflows/CHANGELOG.md?raw";
+import { InlineSpans } from "./markdown-view";
 
 interface ChangelogSection {
 	/** 小节标题（### 新增功能）；无标题的散落文本为 null */
@@ -100,7 +102,7 @@ export function ChangelogDialog({ open, onOpenChange }: ChangelogDialogProps) {
 									>
 										{section.heading && (
 											<div className="text-muted-foreground text-xs">
-												{section.heading}
+												<InlineSpans spans={parseInline(section.heading)} />
 											</div>
 										)}
 										{section.items.map((item, ii) => (
@@ -109,7 +111,9 @@ export function ChangelogDialog({ open, onOpenChange }: ChangelogDialogProps) {
 												className="flex items-start gap-2 text-muted-foreground text-sm"
 											>
 												<span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/60" />
-												<span>{item}</span>
+												<span>
+													<InlineSpans spans={parseInline(item)} />
+												</span>
 											</div>
 										))}
 									</div>
