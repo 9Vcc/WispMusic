@@ -18,6 +18,12 @@ import type {
 	LyricAnimationStyle,
 } from "@/lib/store/settingStore/settingStore";
 import {
+	buildDesktopLyricColorVars,
+	DESKTOP_LYRIC_DEFAULT_COLORS,
+	type DesktopLyricColors,
+	normalizeDesktopLyricColors,
+} from "@/lib/utils/desktop-lyric-colors";
+import {
 	computeDesktopLyricGeometry,
 	DESKTOP_LYRIC_HEADER_RESERVE,
 } from "@/lib/utils/desktop-lyric-geometry";
@@ -55,6 +61,7 @@ interface SettingsState {
 	direction: DesktopLyricDirection;
 	animationStyle: LyricAnimationStyle;
 	fontSize: number;
+	colors: DesktopLyricColors;
 }
 
 type SyncPayload =
@@ -79,6 +86,7 @@ const INITIAL_SETTINGS: SettingsState = {
 	direction: "horizontal",
 	animationStyle: "default",
 	fontSize: 40,
+	colors: { ...DESKTOP_LYRIC_DEFAULT_COLORS },
 };
 
 /** 工具条玻璃按钮：与歌词页玻璃控件同一语言（rounded-full + 白色图标） */
@@ -187,6 +195,12 @@ export default function DesktopLyric() {
 	// 有效字号只影响渲染、不回写设置与窗口几何，不存在反馈环；缩放比
 	// 在此基础上兜底贴合窗口（宽度向），任何窗口尺寸下内容都不溢出裁切
 	const isVertical = settings.direction === "vertical";
+	// 配色 → CSS 变量（挂在根层，整窗继承）。换色只改变量值：不重建歌词行、
+	// 不碰 currentTimeMotion 与 rAF 插值，因此滚动与进度同步完全不受影响
+	const colorVars = useMemo(
+		() => buildDesktopLyricColorVars(settings.colors),
+		[settings.colors],
+	);
 	const rootRef = useRef<HTMLDivElement>(null);
 	const [viewport, setViewport] = useState({ width: 0, height: 0 });
 	useEffect(() => {
@@ -259,6 +273,9 @@ export default function DesktopLyric() {
 					direction: p.direction,
 					animationStyle: p.animationStyle,
 					fontSize: p.fontSize,
+					// 兜底规范化：主窗口已被钳制/校验，这里防旧版主窗口或
+					// 手改 payload 推来脏值把窗口刷成全透明
+					colors: normalizeDesktopLyricColors(p.colors),
 				});
 			} else {
 				anchorRef.current = {
@@ -405,14 +422,17 @@ export default function DesktopLyric() {
 	);
 
 	return (
-		// 根层非 hover 恒定全透明（不随主题/材质设置变化），只有歌词文字
+		// 根层默认恒定全透明（不随主题/材质设置变化），只有歌词文字
 		// 与其描边背衬层浮在桌面上，可读性由 glyph-backdrop 保证；hover
-		// 时淡入半透明深灰圆角背板（EchoMusic 同款，衬托悬浮控件与歌词）。
+		// 时淡入半透明深灰背板（EchoMusic 同款，衬托悬浮控件与歌词）。
+		// 背景不透明度可由用户自定义（.desktop-lyric-root 消费
+		// --dl-bg-alpha / --dl-bg-alpha-hover，0 = 上述内置观感）。
 		// 拖拽绑定在根层而非歌词舞台：舞台会被等比缩放，绑根层保证任何
 		// 缩放比下整个窗口都可按住拖动
 		<div
 			ref={rootRef}
-			className="group relative flex h-full w-full select-none flex-col overflow-hidden rounded-xl bg-transparent transition-[background-color] duration-300 hover:bg-black/60"
+			className="desktop-lyric-root group relative flex h-full w-full select-none flex-col overflow-hidden rounded-xl"
+			style={colorVars as React.CSSProperties}
 			onPointerDown={handleDragPointerDown}
 		>
 			{isVertical ? (
@@ -485,6 +505,7 @@ export default function DesktopLyric() {
 							currentIndex={currentIndex}
 							direction={settings.direction}
 							fontSize={effectiveFontSize}
+							colors={settings.colors}
 							getNowMs={getNowMs}
 						/>
 					) : (
@@ -494,6 +515,7 @@ export default function DesktopLyric() {
 							currentIndex={currentIndex}
 							direction={settings.direction}
 							fontSize={effectiveFontSize}
+							colors={settings.colors}
 							currentTimeMotion={currentTimeMotion}
 						/>
 					)}

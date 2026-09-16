@@ -21,6 +21,11 @@ import {
 	normalizeAccentColor,
 } from "@/lib/utils/accent-color";
 import {
+	DESKTOP_LYRIC_DEFAULT_COLORS,
+	type DesktopLyricColors,
+	normalizeDesktopLyricColors,
+} from "@/lib/utils/desktop-lyric-colors";
+import {
 	applyMinWindowSize,
 	captureCurrentBounds,
 	initMainWindowState,
@@ -75,6 +80,8 @@ export interface DesktopLyricSettings {
 	animationStyle: LyricAnimationStyle;
 	/** 歌词字号（逻辑像素，横向单行/竖排单字共用） */
 	fontSize: number;
+	/** 配色方案：文字 / 高亮 / 描边阴影颜色 + 背景不透明度 */
+	colors: DesktopLyricColors;
 }
 
 /** 桌面歌词字号可调范围（逻辑像素） */
@@ -184,6 +191,7 @@ const defaultDesktopLyricSettings: DesktopLyricSettings = {
 	direction: "horizontal",
 	animationStyle: "default",
 	fontSize: 40,
+	colors: { ...DESKTOP_LYRIC_DEFAULT_COLORS },
 };
 
 const defaultOutputDeviceProfiles: OutputDeviceProfiles = {
@@ -278,6 +286,10 @@ type SettingStore = {
 	setDesktopLyricDirection: (direction: DesktopLyricDirection) => Promise<void>;
 	setDesktopLyricAnimationStyle: (style: LyricAnimationStyle) => Promise<void>;
 	setDesktopLyricFontSize: (size: number) => Promise<void>;
+	/** 局部更新配色（保存并即时推送），颜色走 hex 规范化、透明度钳制 */
+	setDesktopLyricColors: (colors: Partial<DesktopLyricColors>) => Promise<void>;
+	/** 恢复出厂配色（白字 + 深色描边 + 全透明底） */
+	resetDesktopLyricColors: () => Promise<void>;
 	setPreferQuality: (quality: QualityKey) => Promise<void>;
 	setMaxCacheSize: (size: number) => Promise<void>;
 	upsertOutputDeviceProfiles: (devices: AudioDeviceInfo[]) => Promise<void>;
@@ -486,6 +498,35 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 			defaultDesktopLyricSettings.fontSize,
 		);
 		set((state) => ({ desktopLyric: { ...state.desktopLyric, fontSize } }));
+		await store.set("desktopLyric", get().desktopLyric);
+		await store.save();
+	},
+
+	setDesktopLyricColors: async (colors) => {
+		const store = await getSettingsStore();
+		// 局部合并 + 逐字段规范化：调用方只传要改的那一项，
+		// 非法值（手改配置 / 取色器异常）在这里就被挡回默认色
+		set((state) => ({
+			desktopLyric: {
+				...state.desktopLyric,
+				colors: normalizeDesktopLyricColors({
+					...state.desktopLyric.colors,
+					...colors,
+				}),
+			},
+		}));
+		await store.set("desktopLyric", get().desktopLyric);
+		await store.save();
+	},
+
+	resetDesktopLyricColors: async () => {
+		const store = await getSettingsStore();
+		set((state) => ({
+			desktopLyric: {
+				...state.desktopLyric,
+				colors: { ...DESKTOP_LYRIC_DEFAULT_COLORS },
+			},
+		}));
 		await store.set("desktopLyric", get().desktopLyric);
 		await store.save();
 	},
@@ -788,6 +829,8 @@ function normalizeDesktopLyricSettings(
 			DESKTOP_LYRIC_FONT_LIMITS.max,
 			defaultDesktopLyricSettings.fontSize,
 		),
+		// 旧版本没有 colors 字段：规范化后即出厂配色，外观与升级前一致
+		colors: normalizeDesktopLyricColors(saved?.colors),
 	};
 }
 

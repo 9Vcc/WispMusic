@@ -9,6 +9,10 @@ import {
 } from "@/components/lyric/stroke/stroke-columns";
 import { cn } from "@/lib/utils";
 import {
+	buildStrokeRowColorVars,
+	type DesktopLyricColors,
+} from "@/lib/utils/desktop-lyric-colors";
+import {
 	computeDesktopLyricGeometry,
 	DESKTOP_LYRIC_HEADER_RESERVE,
 } from "@/lib/utils/desktop-lyric-geometry";
@@ -44,6 +48,8 @@ interface DesktopStrokeViewProps {
 	direction: "horizontal" | "vertical";
 	/** 字号设置（推导设计几何，字格尺寸按设计坐标计算） */
 	fontSize: number;
+	/** 用户配色：当前句字格走高亮色，同屏的另一句走普通文字色 */
+	colors: DesktopLyricColors;
 	getNowMs: () => number;
 }
 
@@ -62,6 +68,7 @@ function PairStrokeRow({
 	cellGap,
 	phase,
 	align,
+	colorVars,
 	getNowMs,
 	onFlyEndAt,
 }: {
@@ -73,6 +80,8 @@ function PairStrokeRow({
 	cellGap: number;
 	phase: "in" | "out";
 	align: "start" | "end";
+	/** 本行字格填充色变量（当前句=高亮色 / 其余=文字色），覆盖根层默认值 */
+	colorVars: Record<string, string>;
 	getNowMs: () => number;
 	onFlyEndAt: (endAtMs: number) => void;
 }) {
@@ -94,6 +103,7 @@ function PairStrokeRow({
 				"flex min-h-0 flex-1 items-center px-6",
 				align === "start" ? "justify-start" : "justify-end",
 			)}
+			style={colorVars as React.CSSProperties}
 		>
 			{/* 不加 overflow-hidden——笔画要从窗口外飞入，裁切会让动画只覆盖
 			    半窗（字格尺寸已按宽度钳制，内容本就不溢出） */}
@@ -131,6 +141,7 @@ export function DesktopStrokeView({
 	currentIndex,
 	direction,
 	fontSize,
+	colors,
 	getNowMs,
 }: DesktopStrokeViewProps) {
 	// 配对展示状态机：当前句在配对内不动；推进到配对外（横向：第二行也唱
@@ -229,6 +240,17 @@ export function DesktopStrokeView({
 		display.first >= 0 && display.first + 2 < lines.length
 			? lines[display.first + 2]
 			: undefined;
+	// 字格颜色变量：横向配对里**正在演唱的那一行**用高亮色，另一行用普通
+	// 文字色（随 currentIndex 在配对内推进而实时互换，与默认动效的
+	// 「当前句高亮」语义一致）；竖向只展示当前句，恒用高亮色
+	const firstRowColorVars = useMemo(
+		() => buildStrokeRowColorVars(colors, currentIndex === display.first),
+		[colors, currentIndex, display.first],
+	);
+	const secondRowColorVars = useMemo(
+		() => buildStrokeRowColorVars(colors, currentIndex === display.first + 1),
+		[colors, currentIndex, display.first],
+	);
 	// 各行演唱窗口（ms）：到各自下一行切句点为止（末行给兜底窗口）
 	const firstWindowMs = firstLine
 		? secondLine
@@ -318,7 +340,12 @@ export function DesktopStrokeView({
 					// 竖排右起多列，右侧预留工具栏安全边距（pr-12）
 					<div
 						className="flex h-full w-full flex-row-reverse items-center justify-center pr-12"
-						style={{ gap: columnGap }}
+						style={
+							{
+								gap: columnGap,
+								...buildStrokeRowColorVars(colors, true),
+							} as React.CSSProperties
+						}
 					>
 						{columns.map((c, ci) => (
 							<div
@@ -363,6 +390,7 @@ export function DesktopStrokeView({
 						cellGap={cellGap}
 						phase={display.phase}
 						align="start"
+						colorVars={firstRowColorVars}
 						getNowMs={getNowMs}
 						onFlyEndAt={handleFlyEndAt}
 					/>
@@ -377,6 +405,7 @@ export function DesktopStrokeView({
 						cellGap={cellGap}
 						phase={display.phase}
 						align="end"
+						colorVars={secondRowColorVars}
 						getNowMs={getNowMs}
 						onFlyEndAt={handleFlyEndAt}
 					/>

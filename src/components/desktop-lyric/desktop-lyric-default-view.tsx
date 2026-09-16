@@ -9,6 +9,11 @@ import type { CSSProperties } from "react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { VerbatimWord } from "@/components/lyric/verbatim-word";
 import { cn } from "@/lib/utils";
+import {
+	DESKTOP_LYRIC_ALPHA,
+	type DesktopLyricColors,
+	withAlpha,
+} from "@/lib/utils/desktop-lyric-colors";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
 
 /**
@@ -37,6 +42,8 @@ interface DesktopDefaultViewProps {
 	currentIndex: number;
 	direction: DesktopLyricOrientation;
 	fontSize: number;
+	/** 用户配色：当前句用高亮色、预览行用文字色，逐字填充走 --dl-word-fill-color */
+	colors: DesktopLyricColors;
 	currentTimeMotion: MotionValue<number>;
 }
 
@@ -46,8 +53,6 @@ const LINE_SLOT_RATIO = 1.35;
 const NEXT_LINE_SCALE = 0.8;
 /** 行槽切换的滑动时长与缓动（EchoMusic lyric-slide 同参数） */
 const SLOT_SLIDE: Transition = { duration: 0.22, ease: [0.22, 1, 0.36, 1] };
-const CURRENT_COLOR = "rgb(255 255 255 / 0.88)";
-const PREVIEW_COLOR = "rgb(255 255 255 / 0.45)";
 
 export function DesktopDefaultView({
 	line,
@@ -55,9 +60,19 @@ export function DesktopDefaultView({
 	currentIndex,
 	direction,
 	fontSize,
+	colors,
 	currentTimeMotion,
 }: DesktopDefaultViewProps) {
 	const isVertical = direction === "vertical";
+	// 行色由配色推导（默认白 = 改造前的 rgb(255 255 255 / 0.88) 与 / 0.45）
+	const activeLineColor = withAlpha(
+		colors.highlightColor,
+		DESKTOP_LYRIC_ALPHA.current,
+	);
+	const previewLineColor = withAlpha(
+		colors.textColor,
+		DESKTOP_LYRIC_ALPHA.preview,
+	);
 
 	if (isVertical) {
 		// 竖向双列（与横向双行的奇偶交替同构）：偶数行列在左上（列靠左、
@@ -101,7 +116,7 @@ export function DesktopDefaultView({
 				className="flex h-full w-full items-stretch overflow-hidden py-2 pl-3 pr-12"
 				style={{
 					fontFamily: "var(--app-lyric-font-family, inherit)",
-					color: CURRENT_COLOR,
+					color: activeLineColor,
 				}}
 			>
 				{!hasAny ? (
@@ -138,7 +153,9 @@ export function DesktopDefaultView({
 											className="max-h-full max-w-full"
 											style={{
 												writingMode: "vertical-rl",
-												color: item.isCurrent ? CURRENT_COLOR : PREVIEW_COLOR,
+												color: item.isCurrent
+													? activeLineColor
+													: previewLineColor,
 											}}
 										>
 											<DesktopLineText
@@ -208,7 +225,7 @@ export function DesktopDefaultView({
 								opacity: 1,
 								y: isCurrent ? 0 : slotH,
 								scale: isCurrent ? 1 : NEXT_LINE_SCALE,
-								color: isCurrent ? CURRENT_COLOR : PREVIEW_COLOR,
+								color: isCurrent ? activeLineColor : previewLineColor,
 							}}
 							exit={{ opacity: 0, y: -slotH }}
 							transition={{

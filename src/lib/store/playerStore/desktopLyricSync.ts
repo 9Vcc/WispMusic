@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { shallow } from "zustand/shallow";
 import { corePlayer } from "@/lib/player/corePlayer";
+import type { DesktopLyricColors } from "@/lib/utils/desktop-lyric-colors";
 import {
 	computeDesktopLyricGeometry,
 	type DesktopLyricDirection,
@@ -64,6 +65,8 @@ interface SettingsSnapshot {
 	direction: DesktopLyricDirection;
 	animationStyle: LyricAnimationStyle;
 	fontSize: number;
+	/** 配色方案（文字 / 高亮 / 描边阴影色 + 背景不透明度），随设置变化即时推送 */
+	colors: DesktopLyricColors;
 }
 
 interface ProgressSnapshot {
@@ -116,8 +119,15 @@ export function initDesktopLyricSync() {
 
 	function pushSettings() {
 		if (!windowActive) return;
-		const { direction, animationStyle, fontSize } = getDesktopLyricSettings();
-		pushState({ type: "settings", direction, animationStyle, fontSize });
+		const { direction, animationStyle, fontSize, colors } =
+			getDesktopLyricSettings();
+		pushState({
+			type: "settings",
+			direction,
+			animationStyle,
+			fontSize,
+			colors,
+		});
 	}
 
 	// 进度推送节流：桌面歌词本地插值，300ms 锚点已远超逐字动效的精度需求。

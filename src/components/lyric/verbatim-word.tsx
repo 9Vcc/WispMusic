@@ -25,6 +25,14 @@ import {
 	VERBATIM_TRANSLATE_SPRING,
 } from "./lyric-animation";
 
+/**
+ * 逐字填充基色：**基色不透明**，明暗层级全部由遮罩 alpha 表达（已唱 0.85 /
+ * 未唱 0.32，随进度插值）。默认纯白即歌词页的既有外观；桌面歌词窗口会注入
+ * --dl-word-fill-color 跟随用户配色（该窗口无 plus-lighter 链路，见
+ * desktop-lyric-colors.ts）。
+ */
+const WORD_FILL_COLOR = "var(--dl-word-fill-color, rgba(255,255,255,1))";
+
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 const isCJK = (text: string) =>
 	/^[\p{Unified_Ideograph}\u0800-\u9FFC]+$/u.test(text);
@@ -247,7 +255,7 @@ export const VerbatimWord = React.memo(function VerbatimWord({
 					padding: "0.25em",
 					x: translateX,
 					y: translateY,
-					color: "rgba(255,255,255,1)",
+					color: WORD_FILL_COLOR,
 					WebkitMaskImage: wordMaskImage,
 					maskImage: wordMaskImage,
 					WebkitMaskRepeat: "no-repeat",
@@ -271,7 +279,7 @@ export const VerbatimWord = React.memo(function VerbatimWord({
 				padding: "0.25em",
 				x: translateX,
 				y: translateY,
-				color: "rgba(255,255,255,1)",
+				color: WORD_FILL_COLOR,
 				WebkitMaskImage: wordMaskImage,
 				maskImage: wordMaskImage,
 				WebkitMaskRepeat: "no-repeat",

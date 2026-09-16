@@ -22,8 +22,9 @@ import {
  * 屏幕上随字号等比），round join/cap 避免笔画尖端出现毛刺。
  */
 const PATH_STYLE: CSSProperties = {
-	fill: "rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1)))",
-	stroke: "rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1)))",
+	fill: "var(--dl-glyph-fill-color, rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1))))",
+	stroke:
+		"var(--dl-glyph-fill-color, rgb(255 255 255 / calc(88% * var(--lyric-alpha-scale, 1))))",
 	strokeWidth: 30,
 	strokeLinejoin: "round",
 	strokeLinecap: "round",
@@ -35,7 +36,8 @@ const PATH_STYLE: CSSProperties = {
 
 /** 无笔画数据（字母/标点/生僻字）的静态字兜底 */
 const FALLBACK_STYLE: CSSProperties = {
-	color: "rgb(255 255 255 / calc(62% * var(--lyric-alpha-scale, 1)))",
+	color:
+		"var(--dl-glyph-fill-soft, rgb(255 255 255 / calc(62% * var(--lyric-alpha-scale, 1))))",
 	fontFamily: '"Kaiti SC", "KaiTi", "STKaiti", serif',
 	userSelect: "none",
 };

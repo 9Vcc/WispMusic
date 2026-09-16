@@ -320,26 +320,45 @@
    可读性由独立的暗色描边背衬层保证（.desktop-lyric-glyph-backdrop 与
    填充层同文本同布局完全重叠）。描边用 em 相对字号缩放，paint-order:
    stroke 让描边垫在字形下方不吃掉笔画（WebView2/Chromium 对 HTML 文本
-   支持完整）；不用 backdrop-filter——它够不到窗口后面的桌面。 */
+   支持完整）；不用 backdrop-filter——它够不到窗口后面的桌面。
+
+   颜色全部走 --dl-* 变量（由 desktop-lyric-colors.ts 生成、挂在窗口根层）：
+   变量在继承链上传播，换配色只改变量值，不重建任何歌词行、不打断逐字
+   填充与进度插值。变量缺失时的兜底值 = 用户自定义配色上线前的硬编码外观，
+   因此歌词页（不定义这些变量）与老配置都保持原样。 */
 .desktop-lyric-glyph-backdrop {
   color: transparent;
-  -webkit-text-stroke: 0.1em rgb(8 10 14 / 0.52);
+  -webkit-text-stroke: 0.1em var(--dl-stroke-color, rgb(8 10 14 / 0.52));
   paint-order: stroke fill;
   text-shadow:
-    0 1px 12px rgb(0 0 0 / 0.45),
-    0 0 2px rgb(0 0 0 / 0.55);
+    0 1px 12px var(--dl-shadow-soft, rgb(0 0 0 / 0.45)),
+    0 0 2px var(--dl-shadow-strong, rgb(0 0 0 / 0.55));
 }
 
 /* 填充层自身的浅投影（跟随逐字遮罩渐隐），强化已唱部分的立体感 */
 .desktop-lyric-glyph-halo {
-  text-shadow: 0 1px 6px rgb(0 0 0 / 0.32);
+  text-shadow: 0 1px 6px var(--dl-halo-shadow, rgb(0 0 0 / 0.32));
 }
 
 /* 笔画动效的 SVG 字格：drop-shadow 提供与文字背衬层同级的可读性兜底。
    仅作用于桌面歌词窗口（无 plus-lighter 链路），不违反歌词页的
    「混合祖先链禁 filter」约束 */
 .desktop-lyric-stroke-shadow {
-  filter: drop-shadow(0 1.5px 4px rgb(0 0 0 / 0.5));
+  filter: drop-shadow(0 1.5px 4px var(--dl-stroke-drop-shadow, rgb(0 0 0 / 0.5)));
+}
+
+/* 桌面歌词窗口背景：默认全透明（只有 hover 淡入深灰背板衬托悬浮控件），
+   用户可在设置里调高不透明度给歌词垫底。两条规则都不吃工具类，故直接
+   写在未分层区（优先级高于 @layer utilities）。 */
+.desktop-lyric-root {
+  background-color: rgb(0 0 0 / var(--dl-bg-alpha, 0));
+  transition: background-color 300ms ease;
+}
+
+/* 悬浮时的下限（默认 60%）在 desktop-lyric-colors.ts 里与用户值取 max，
+   保证工具条胶囊在任何自定义透明度下都有足够背衬 */
+.desktop-lyric-root:hover {
+  background-color: rgb(0 0 0 / var(--dl-bg-alpha-hover, 0.6));
 }
 
 /* ===== 材质 / 明暗切换的过渡 =====
