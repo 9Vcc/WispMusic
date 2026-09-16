@@ -19,17 +19,24 @@ import {
 	DESKTOP_LYRIC_VERTICAL_SAFE_INSET,
 } from "@/lib/utils/desktop-lyric-geometry";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
-import { resolveVerticalSlots } from "./desktop-lyric-slots";
+import { useLyricPair } from "./use-lyric-pair";
 
 /**
  * 桌面歌词「默认动效」视图。
  *
- * 横向布局为双行（EchoMusic 式）：行元素按歌词索引作 key 绝对定位在
- * 两个行槽上——切句时旧当前句上滑退出、旧下一句**同 key 晋级**（行槽
- * y 与字号缩放平滑过渡，文本内容同步换为新当前句）、新下一句从底部
- * 滑入；当前句带逐字填充动效（与歌词页共用 VerbatimWord），下一句是
- * 静态低亮度预览；超宽当前句按演唱进度横向滚动（30% 进度起、句尾前
- * 2s 收住）。竖向布局保持单列直书，进出场沿水平轴整列滑动。
+ * 播放模型与笔画动效**完全一致**（配对轮换，见 use-lyric-pair.ts）：
+ * 配对 = 连续两句歌词，配对固定挂载——**第一句完整播放结束后再播放第二句**
+ * （两格各自在自己的演唱窗口内做逐字填充），当前句在配对内推进不换对；
+ * 只有两句都播完、当前句推进到配对之外才整对轮换（先整对滑出、再换进下两句）。
+ * 旧行为是「每换一句就滚动一格」（当前句晋级、下一句从底部滑入的连续滚动），
+ * 已废弃。
+ *
+ * 格位与贴边（两种方向同构）：
+ * - 横向：上行 = 配对首句（贴左）、下行 = 配对次句（贴右）；
+ * - 竖向：左列 = 配对首句（贴左 + 列内贴顶）、右列 = 配对次句（贴右 +
+ *   列内贴底，避让工具条）。
+ * 正在演唱的那一格用高亮色、另一格用普通文字色（同亮度同字号，与笔画动效
+ * 一致）；未唱到的字仍按逐字遮罩保持暗态，已唱过的字保持亮态。
  *
  * 与歌词页的关键差异：桌面歌词浮在任意壁纸上，plus-lighter 叠加不可用，
  * 可读性由独立的暗色描边背衬层保证——背衬层与填充层同文本同布局完全
@@ -39,29 +46,26 @@ import { resolveVerticalSlots } from "./desktop-lyric-slots";
 export type DesktopLyricOrientation = "horizontal" | "vertical";
 
 interface DesktopDefaultViewProps {
-	/** 当前句（undefined / 过门圆点行 → 显示呼吸圆点） */
-	line?: ILyricLine;
-	/** 下一句（横向双行的预览行） */
-	nextLine?: ILyricLine;
-	/** 当前句索引（行元素的稳定 key：下一句晋级当前句时 key 不变，触发平滑过渡） */
+	/** 歌词全文（配对由视图内部按当前句索引推导，与笔画动效同一套语义） */
+	lines: ILyricLine[];
+	/** 当前演唱句索引 */
 	currentIndex: number;
 	direction: DesktopLyricOrientation;
 	fontSize: number;
-	/** 用户配色：当前句用高亮色、预览行用文字色，逐字填充走 --dl-word-fill-color */
+	/** 用户配色：正在演唱的格用高亮色、另一格用普通文字色 */
 	colors: DesktopLyricColors;
 	currentTimeMotion: MotionValue<number>;
 }
 
 /** 单行槽位高度（与 lineHeight 1.35 一致，钳制超高字符防溢出对侧行） */
 const LINE_SLOT_RATIO = 1.35;
-/** 下一句预览的字号缩放（EchoMusic 0.8em 层级） */
-const NEXT_LINE_SCALE = 0.8;
-/** 行槽切换的滑动时长与缓动（EchoMusic lyric-slide 同参数） */
+/** 格位进出场的滑动时长与缓动（EchoMusic lyric-slide 同参数） */
 const SLOT_SLIDE: Transition = { duration: 0.22, ease: [0.22, 1, 0.36, 1] };
+/** 整对退出时长：与滑动时长对齐，退出结束即换进新配对 */
+const PAIR_EXIT_MS = 220;
 
 export function DesktopDefaultView({
-	line,
-	nextLine,
+	lines,
 	currentIndex,
 	direction,
 	fontSize,
@@ -69,32 +73,45 @@ export function DesktopDefaultView({
 	currentTimeMotion,
 }: DesktopDefaultViewProps) {
 	const isVertical = direction === "vertical";
-	// 行色由配色推导（默认白 = 改造前的 rgb(255 255 255 / 0.88) 与 / 0.45）
-	const activeLineColor = withAlpha(
+	// 正在演唱 / 另一格的行色：同亮度、只换色相（与笔画动效的「两格同亮」一致；
+	// 默认白 = 改造前的 rgb(255 255 255 / 0.88)）
+	const singingLineColor = withAlpha(
 		colors.highlightColor,
 		DESKTOP_LYRIC_ALPHA.current,
 	);
-	const previewLineColor = withAlpha(
+	const idleLineColor = withAlpha(
 		colors.textColor,
-		DESKTOP_LYRIC_ALPHA.preview,
+		DESKTOP_LYRIC_ALPHA.current,
 	);
 
+	const { pairFirst } = useLyricPair({
+		currentIndex,
+		exitMs: PAIR_EXIT_MS,
+	});
+	const secondIndex =
+		pairFirst >= 0 && pairFirst + 1 < lines.length ? pairFirst + 1 : undefined;
+	const firstLine = pairFirst >= 0 ? lines[pairFirst] : undefined;
+	const secondLine = secondIndex === undefined ? undefined : lines[secondIndex];
+	const hasPair = Boolean(firstLine || secondLine);
+	// 本句演唱窗口（到下一句切句点为止；末句兜底），供溢出滚动用
+	const windowMsOf = (index: number | undefined) =>
+		index === undefined
+			? 10000
+			: Math.max(
+					600,
+					(lines[index + 1]?.lineStart ?? lines[index].lineStart + 6000) -
+						lines[index].lineStart,
+				);
+
 	if (isVertical) {
-		// 竖向双列：**当前句恒左列（列贴左缘 + 内容贴顶）、下一句恒右列
-		// （列贴右缘 + 内容贴底）**，两句天然错位成对角。贴边只由槽位决定，
-		// 与歌词行号奇偶无关——旧实现按 index % 2 分配列，奇数句时当前句
-		// 会跑到右下（用户反馈的「贴边不准确」）。各槽独立进出场（整列沿
-		// 水平轴滑动，与书写方向一致；左槽从左缘、右槽从右缘）；当前句整
-		// 字号、下一句 0.8 灰。右缘留出工具条安全边距，贴右是「贴到工具条
-		// 内侧的右缘」而不是被工具栏压住。
 		const columnSlide = fontSize * 1.35;
-		const slots = resolveVerticalSlots({ line, nextLine, currentIndex });
-		const hasAny = Boolean(slots.left || slots.right);
 		const renderColumn = (
-			item: ReturnType<typeof resolveVerticalSlots>["left"],
+			index: number | undefined,
 			side: "left" | "right",
 		) => {
 			const isLeft = side === "left";
+			const item = index === undefined ? undefined : lines[index];
+			const isSinging = index !== undefined && index === currentIndex;
 			return (
 				<div
 					key={side}
@@ -106,7 +123,7 @@ export function DesktopDefaultView({
 					<AnimatePresence mode="popLayout" initial={false}>
 						{item && (
 							<motion.div
-								key={`col-${item.index}`}
+								key={`col-${index}`}
 								initial={{
 									opacity: 0,
 									x: isLeft ? -columnSlide : columnSlide,
@@ -120,23 +137,20 @@ export function DesktopDefaultView({
 								className="max-h-full max-w-full"
 								style={{
 									writingMode: "vertical-rl",
-									color: item.isCurrent ? activeLineColor : previewLineColor,
+									color: isSinging ? singingLineColor : idleLineColor,
 								}}
 							>
-								<DesktopLineText
-									line={item.line}
-									direction={direction}
-									fontSize={
-										item.isCurrent
-											? fontSize
-											: Math.round(fontSize * NEXT_LINE_SCALE)
-									}
-									currentTimeMotion={currentTimeMotion}
-									isCurrent={item.isCurrent}
-									lineWindowMs={
-										nextLine ? nextLine.lineStart - item.line.lineStart : 10000
-									}
-								/>
+								{item.isLeadDots ? (
+									<DesktopLeadDots vertical />
+								) : (
+									<DesktopLineText
+										line={item}
+										direction={direction}
+										fontSize={fontSize}
+										currentTimeMotion={currentTimeMotion}
+										lineWindowMs={windowMsOf(index)}
+									/>
+								)}
 							</motion.div>
 						)}
 					</AnimatePresence>
@@ -148,44 +162,41 @@ export function DesktopDefaultView({
 				className="flex h-full w-full items-stretch overflow-hidden"
 				style={{
 					fontFamily: "var(--app-lyric-font-family, inherit)",
-					color: activeLineColor,
+					color: singingLineColor,
 					paddingTop: DESKTOP_LYRIC_EDGE_INSET / 2,
 					paddingBottom: DESKTOP_LYRIC_EDGE_INSET / 2,
 					paddingLeft: DESKTOP_LYRIC_EDGE_INSET / 2,
 					paddingRight: DESKTOP_LYRIC_VERTICAL_SAFE_INSET,
 				}}
 			>
-				{!hasAny ? (
+				{!hasPair ? (
 					<div className="flex h-full w-full items-center justify-center">
 						<DesktopLeadDots vertical />
 					</div>
 				) : (
 					<>
-						{renderColumn(slots.left, "left")}
-						{renderColumn(slots.right, "right")}
+						{renderColumn(pairFirst >= 0 ? pairFirst : undefined, "left")}
+						{renderColumn(secondIndex, "right")}
 					</>
 				)}
 			</div>
 		);
 	}
 
-	// 横向双行：**上行（当前句）恒贴左边、下行（下一句）恒贴右边**，与歌词
-	// 行号奇偶无关（旧实现按 index % 2 交替，奇数句时上行会跑到右边）。
-	// 行元素按索引作 key：下一句晋级当前句时 key 不变，framer 平滑过渡
-	// y/缩放/颜色——贴边侧也会在这一刻从右换到左，故文本块挂 `layout`，
-	// 让这次换边以位移动画完成而不是瞬移。行槽块恒定挂载（含呼吸圆点
-	// 兜底），块自身 overflow-hidden，进出场滑动在块边缘裁切；左右各留
-	// 一点边距，避免字形描边被窗口裁掉。
+	// 横向双行：上行 = 配对首句（贴左）、下行 = 配对次句（贴右）。两行的 y
+	// 恒定（不再有「晋级上滑」），整对轮换时整对滑出、新对从底部滑入——
+	// 与笔画动效的「按对翻页」一致。行槽块恒定挂载（含呼吸圆点兜底），块
+	// 自身 overflow-hidden，进出场滑动在块边缘裁切；左右各留一点边距，
+	// 避免字形描边被窗口裁掉。
 	const slotH = fontSize * LINE_SLOT_RATIO;
-	const items: Array<{ line: ILyricLine; index: number; isCurrent: boolean }> =
-		line && !line.isLeadDots && currentIndex >= 0
-			? [
-					{ line, index: currentIndex, isCurrent: true },
-					...(nextLine
-						? [{ line: nextLine, index: currentIndex + 1, isCurrent: false }]
-						: []),
-				]
-			: [];
+	const rows = [
+		{
+			index: pairFirst >= 0 ? pairFirst : undefined,
+			line: firstLine,
+			edge: "start" as const,
+		},
+		{ index: secondIndex, line: secondLine, edge: "end" as const },
+	].filter((row) => row.index !== undefined && row.line);
 
 	return (
 		<div
@@ -200,58 +211,51 @@ export function DesktopDefaultView({
 				className="relative w-full overflow-hidden"
 				style={{ height: slotH * 2 }}
 			>
-				{items.length === 0 && (
+				{!hasPair && (
 					<div className="absolute inset-0 flex items-center justify-center">
 						<DesktopLeadDots vertical={false} />
 					</div>
 				)}
 				<AnimatePresence initial={false}>
-					{items.map(({ line: itemLine, index, isCurrent }) => (
-						<motion.div
-							key={`line-${index}`}
-							initial={{ opacity: 0, y: slotH * 2 }}
-							animate={{
-								opacity: 1,
-								y: isCurrent ? 0 : slotH,
-								scale: isCurrent ? 1 : NEXT_LINE_SCALE,
-								color: isCurrent ? activeLineColor : previewLineColor,
-							}}
-							exit={{ opacity: 0, y: -slotH }}
-							transition={{
-								...SLOT_SLIDE,
-								opacity: { duration: 0.18, ease: "easeOut" },
-							}}
-							className={cn(
-								"absolute inset-x-0 top-0 flex items-center overflow-hidden",
-								isCurrent ? "justify-start" : "justify-end",
-							)}
-							style={{
-								height: slotH,
-								// 缩放原点贴对齐侧（EchoMusic 同款）：下一句 0.8
-								// 缩放向贴边侧收紧，不产生反向缩进
-								transformOrigin: isCurrent ? "left center" : "right center",
-							}}
-						>
-							{/* layout：贴边侧由槽位决定，下一句晋级当前句时会从右换到左，
-							    用位移动画承接这次换边（否则是瞬移） */}
+					{rows.map(({ index, line, edge }) => {
+						if (index === undefined || !line) return null;
+						const isSinging = index === currentIndex;
+						return (
 							<motion.div
-								layout
-								className="relative flex max-w-full items-center"
-								transition={SLOT_SLIDE}
+								key={`line-${index}`}
+								initial={{ opacity: 0, y: slotH * 2 }}
+								animate={{
+									opacity: 1,
+									y: edge === "start" ? 0 : slotH,
+									color: isSinging ? singingLineColor : idleLineColor,
+								}}
+								exit={{ opacity: 0, y: -slotH }}
+								transition={{
+									...SLOT_SLIDE,
+									opacity: { duration: 0.18, ease: "easeOut" },
+								}}
+								className={cn(
+									"absolute inset-x-0 top-0 flex items-center overflow-hidden",
+									edge === "start" ? "justify-start" : "justify-end",
+								)}
+								style={{ height: slotH }}
 							>
-								<DesktopLineText
-									line={itemLine}
-									direction={direction}
-									fontSize={fontSize}
-									currentTimeMotion={currentTimeMotion}
-									isCurrent={isCurrent}
-									lineWindowMs={
-										nextLine ? nextLine.lineStart - itemLine.lineStart : 10000
-									}
-								/>
+								<span className="relative flex max-w-full items-center">
+									{line.isLeadDots ? (
+										<DesktopLeadDots vertical={false} />
+									) : (
+										<DesktopLineText
+											line={line}
+											direction={direction}
+											fontSize={fontSize}
+											currentTimeMotion={currentTimeMotion}
+											lineWindowMs={windowMsOf(index)}
+										/>
+									)}
+								</span>
 							</motion.div>
-						</motion.div>
-					))}
+						);
+					})}
 				</AnimatePresence>
 			</div>
 		</div>
@@ -264,16 +268,13 @@ function DesktopLineText({
 	direction,
 	fontSize,
 	currentTimeMotion,
-	isCurrent = true,
 	lineWindowMs,
 }: {
 	line: ILyricLine;
 	direction: DesktopLyricOrientation;
 	fontSize: number;
 	currentTimeMotion: MotionValue<number>;
-	/** 下一句预览：静态低亮度文本，不带逐字动效与滚动 */
-	isCurrent?: boolean;
-	/** 当前句的演唱窗口（下一句 lineStart - 本句 lineStart），无逐字数据时作滚动时窗兜底 */
+	/** 本行的演唱窗口（下一句 lineStart - 本句 lineStart），无逐字数据时作滚动时窗兜底 */
 	lineWindowMs: number;
 }) {
 	const isVertical = direction === "vertical";
@@ -292,13 +293,14 @@ function DesktopLineText({
 
 	const hasWords = Boolean(line.words && line.words.length > 0);
 
-	// —— 超宽句横向滚动（仅当前句）：溢出量实测，滚动窗口对齐 EchoMusic
-	//（30% 演唱进度起步、句尾前 2s 收住；无逐字数据按行窗口的 80% 兜底）
+	// —— 超宽句横向滚动（仅横排）：溢出量实测，滚动窗口对齐 EchoMusic
+	//（30% 演唱进度起步、句尾前 2s 收住；无逐字数据按行窗口的 80% 兜底）。
+	// 配对两格都跟播，因此两行都做溢出测量（未到它的窗口时位移恒为 0）
 	const outerRef = useRef<HTMLSpanElement>(null);
 	const innerRef = useRef<HTMLSpanElement>(null);
 	const [overflowPx, setOverflowPx] = useState(0);
 	useLayoutEffect(() => {
-		if (!isCurrent || isVertical) return;
+		if (isVertical) return;
 		const outer = outerRef.current;
 		const inner = innerRef.current;
 		if (!outer || !inner) return;
@@ -311,7 +313,7 @@ function DesktopLineText({
 		ro.observe(outer);
 		ro.observe(inner);
 		return () => ro.disconnect();
-	}, [isCurrent, isVertical]);
+	}, [isVertical]);
 
 	const lastWord =
 		line.words && line.words.length > 0
@@ -341,7 +343,7 @@ function DesktopLineText({
 			<motion.span
 				ref={innerRef}
 				className="relative inline-block"
-				style={{ x: isCurrent && !isVertical ? scrollX : 0 }}
+				style={{ x: isVertical ? 0 : scrollX }}
 			>
 				{/* 暗色描边背衬层：永远完整描出整行轮廓（任意壁纸下的可读性兜底） */}
 				<span
@@ -351,7 +353,7 @@ function DesktopLineText({
 					{line.lineText}
 				</span>
 				<span className="desktop-lyric-glyph-halo relative">
-					{isCurrent && hasWords && line.words ? (
+					{hasWords && line.words ? (
 						line.words.map((word) => (
 							<VerbatimWord
 								key={`${word.startTime}-${word.duration}-${word.char}`}

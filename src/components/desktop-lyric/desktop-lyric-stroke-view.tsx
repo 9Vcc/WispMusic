@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { StrokeCharCell } from "@/components/lyric/stroke/stroke-char";
 import {
 	flattenLineChars,
@@ -20,6 +20,7 @@ import {
 import { prefetchHanziChars } from "@/lib/utils/hanzi-strokes";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
 import { DesktopLeadDots } from "./desktop-lyric-default-view";
+import { useLyricPair } from "./use-lyric-pair";
 
 /**
  * 桌面歌词「笔画动效」视图：与歌词页 StrokeLyricView 同一套进入+散开
@@ -42,9 +43,8 @@ import { DesktopLeadDots } from "./desktop-lyric-default-view";
 /** 切句等待动画的上限（ms）：兜底防失控（与歌词页一致） */
 const SWITCH_WAIT_MAX_MS = 2000;
 
-/** 桌面歌词笔画字格尺寸上下限（px）：窗口小于歌词页舞台，整体略收 */
-const CELL_MIN_PX = 20;
-const CELL_MAX_PX = 56;
+/** 桌面歌词笔画字格最小尺寸（px）：字格跟随有效字号，仅在长句放不下时收缩，最小值保证字形可辨 */
+const CELL_MIN_PX = 12;
 
 /**
  * 竖排两列的字格宽度占位系数：每个字格占「格宽 × 该系数」的横向额度
@@ -61,12 +61,6 @@ interface DesktopStrokeViewProps {
 	/** 用户配色：当前句字格走高亮色，同屏的另一句走普通文字色 */
 	colors: DesktopLyricColors;
 	getNowMs: () => number;
-}
-
-/** 配对展示状态：first=配对首行索引（横向次行为 first+1；竖向 first 即当前句），phase=in 进入（飞入/直接显示）/ out 句尾散开 */
-interface PairState {
-	first: number;
-	phase: "in" | "out";
 }
 
 /** 配对行（横向）：一行歌词的笔画字格行——正常跟播（非预览），与歌词页同式预算 */
@@ -248,68 +242,32 @@ export function DesktopStrokeView({
 	colors,
 	getNowMs,
 }: DesktopStrokeViewProps) {
-	// 配对展示状态机：当前句在配对内不动；推进到配对外时轮换——先等两格
-	// 动画播完（封顶防失控），整对散开后再换进以新当前句为首的下两句。
-	// 横向双行与竖向双列都覆盖 (first, first+1) 两句，判定完全一致
-	const [display, setDisplay] = useState<PairState>({ first: -1, phase: "in" });
-	const displayRef = useRef(display);
-	displayRef.current = display;
-	const pendingFirstRef = useRef(-1);
-	const swapTimerRef = useRef<number | null>(null);
-	// 旧行飞入动画的最晚完成时刻（performance.now 时钟）：轮换散开前等它到期
+	const isVertical = direction === "vertical";
+
+	// 旧行飞入动画的最晚完成时刻（performance.now 时钟）：整对散开前等它到期
 	const flyEndAtRef = useRef(0);
 	const handleFlyEndAt = useCallback((endAtMs: number) => {
 		flyEndAtRef.current = Math.max(flyEndAtRef.current, endAtMs);
 	}, []);
+	const getPendingWaitMs = useCallback(
+		() => Math.max(0, flyEndAtRef.current - performance.now()),
+		[],
+	);
 
-	const isVertical = direction === "vertical";
-
+	// 配对轮换状态机与默认动效共用（第一句播完再播第二句，两句播完才换对）；
+	// 差异只在这里：笔画要等字格飞入动画播完再散开，退出时长用散开时长
+	const { pairFirst, phase } = useLyricPair({
+		currentIndex,
+		exitMs: STROKE_LINE_SCATTER_MS,
+		getPendingWaitMs,
+		maxWaitMs: SWITCH_WAIT_MAX_MS,
+	});
+	// 换进新配对后清空旧的飞入完成时刻（新字格会重新登记）
+	// biome-ignore lint/correctness/useExhaustiveDependencies: pairFirst 是刻意的触发源——body 只写 ref，但换对必须复位
 	useEffect(() => {
-		const cur = displayRef.current;
-		// 当前句仍在配对内（首句或次句）——不轮换
-		const inPair = currentIndex === cur.first || currentIndex === cur.first + 1;
-		if (inPair) {
-			// 跳回配对内（seek 回）：取消待轮换定时器；已散开则复位重进本配对
-			if (cur.first !== -1 && swapTimerRef.current !== null) {
-				clearTimeout(swapTimerRef.current);
-				swapTimerRef.current = null;
-				if (cur.phase === "out") {
-					setDisplay({ first: cur.first, phase: "in" });
-				}
-			}
-			return;
-		}
-		if (cur.first === -1) {
-			setDisplay({ first: currentIndex, phase: "in" });
-			return;
-		}
-		if (cur.phase === "out") {
-			pendingFirstRef.current = currentIndex;
-			return;
-		}
-		pendingFirstRef.current = currentIndex;
-		const waitMs = Math.min(
-			Math.max(0, flyEndAtRef.current - performance.now()),
-			SWITCH_WAIT_MAX_MS,
-		);
-		if (swapTimerRef.current !== null) clearTimeout(swapTimerRef.current);
-		swapTimerRef.current = window.setTimeout(() => {
-			swapTimerRef.current = null;
-			setDisplay({ first: displayRef.current.first, phase: "out" });
-			swapTimerRef.current = window.setTimeout(() => {
-				swapTimerRef.current = null;
-				flyEndAtRef.current = 0;
-				setDisplay({ first: pendingFirstRef.current, phase: "in" });
-			}, STROKE_LINE_SCATTER_MS);
-		}, waitMs);
-	}, [currentIndex]);
-
-	// 卸载时清理散开→换句的定时器
-	useEffect(() => {
-		return () => {
-			if (swapTimerRef.current !== null) clearTimeout(swapTimerRef.current);
-		};
-	}, []);
+		flyEndAtRef.current = 0;
+	}, [pairFirst]);
+	const display = { first: pairFirst, phase };
 
 	// 预取笔画数据：下一配对两句（当前对的次行随本对挂载自取，无需预取）。
 	// 轮换时数据大概率已在缓存；横向双行与竖向双列的预取口径一致
@@ -380,15 +338,16 @@ export function DesktopStrokeView({
 	const stageDesignHeight =
 		design.height - (isVertical ? 0 : DESKTOP_LYRIC_HEADER_RESERVE);
 
-	// 字格尺寸：两种方向都是「配对双格共享同一尺寸」（同字号观感）——
-	// 横向受宽度约束（两行各自的字数并排在一行里）、竖向受高度约束
-	// （两列各自的字数叠在一列里），另一维给出两格所需的余量
+	// 字格尺寸：**目标尺寸 = 有效字号**（与默认动效同一自适应口径——字号本身
+	// 已按窗口尺寸自适应），仅当整句放不下时才按窗口/内容收缩。旧实现用
+	// 绝对上限 56px 夹住，最大字号下字格明显小于默认动效的文字。
+	// 两种方向共用同一套推导：横向两行受宽度约束（字数并排一行）、竖向两列
+	// 受高度约束（字数叠一列），另一维给出两格所需的余量
 	const cellSize = useMemo(() => {
-		const clamp = (v: number) =>
-			Math.min(CELL_MAX_PX, Math.max(CELL_MIN_PX, Math.floor(v)));
+		const toCellSize = (v: number) =>
+			Math.max(CELL_MIN_PX, Math.floor(Number.isFinite(v) ? v : fontSize));
 		const maxChars = Math.max(firstTimings.length, secondTimings.length, 1);
 		if (isVertical) {
-			// 竖向：两列并排 → 宽度除以「两列 + 列间距」，高度留给最长的一列
 			const availableWidth = Math.max(
 				0,
 				design.width -
@@ -397,13 +356,14 @@ export function DesktopStrokeView({
 			);
 			const byWidth = availableWidth / (2 * VERTICAL_COLUMN_SLOT_RATIO);
 			const byHeight = (design.height * 0.94) / maxChars;
-			return clamp(Math.min(byHeight, byWidth));
+			return toCellSize(Math.min(fontSize, byWidth, byHeight));
 		}
 		const byHeight = stageDesignHeight * 0.42;
 		const byWidth = (design.width * 0.92) / maxChars;
-		return clamp(Math.min(byHeight, byWidth));
+		return toCellSize(Math.min(fontSize, byHeight, byWidth));
 	}, [
 		design,
+		fontSize,
 		isVertical,
 		stageDesignHeight,
 		firstTimings.length,

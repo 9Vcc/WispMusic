@@ -354,13 +354,6 @@ export default function DesktopLyric() {
 		[currentTimeMotion],
 	);
 
-	const currentLine = currentIndex >= 0 ? lines[currentIndex] : undefined;
-	// 下一句预览跳过过门圆点行（圆点行自己晋级时由呼吸圆点兜底接管）
-	let nextLine = currentIndex >= 0 ? lines[currentIndex + 1] : undefined;
-	if (nextLine?.isLeadDots) {
-		nextLine = lines[currentIndex + 2];
-	}
-
 	// 工具条指令：一律回传主窗口（settingStore / playerStore 是唯一可信源）
 	const send = useCallback((payload: Record<string, unknown>) => {
 		invoke("desktop_lyric_command", { payload }).catch(console.error);
@@ -534,8 +527,7 @@ export default function DesktopLyric() {
 						/>
 					) : (
 						<DesktopDefaultView
-							line={currentLine}
-							nextLine={nextLine}
+							lines={lines}
 							currentIndex={currentIndex}
 							direction={settings.direction}
 							fontSize={effectiveFontSize}
