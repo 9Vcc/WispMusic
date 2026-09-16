@@ -15,6 +15,10 @@ import { useSettingStore } from "@/lib/store/settingStore/settingStore";
 import { cn } from "@/lib/utils";
 import { lyricSheetEase } from "./lyric-sheet-motion";
 import {
+  type LyricSheetPanel,
+  toggleLyricSheetPanel,
+} from "./lyric-sheet-panel";
+import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
@@ -29,14 +33,13 @@ import { WispButton } from "../wisp-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 interface LyricSheetBottomBarProps {
-  isLyricOpen: boolean;
-  isPlaylistOpen: boolean;
+  /** 当前展开的侧面板（null = 都收起）；歌词与播放列表互斥，见 lyric-sheet-panel.ts */
+  activePanel: LyricSheetPanel | null;
   hasTransLyric: boolean;
   hasRomaLyric: boolean;
   showTrans: boolean;
   showRoma: boolean;
-  onLyricOpenChangeAction: (value: boolean) => void;
-  onPlaylistOpenChangeAction: (value: boolean) => void;
+  onActivePanelChangeAction: (panel: LyricSheetPanel | null) => void;
   onShowTransChangeAction: (value: boolean) => void;
   onShowRomaChangeAction: (value: boolean) => void;
 }
@@ -100,17 +103,18 @@ export const GLASS_CONTROL_SURFACE = "wisp-glass-surface rounded-full p-1 bg-whi
  */
 
 export function LyricSheetBottomBar({
-  isLyricOpen,
-  isPlaylistOpen,
+  activePanel,
   hasTransLyric,
   hasRomaLyric,
   showTrans,
   showRoma,
-  onLyricOpenChangeAction,
-  onPlaylistOpenChangeAction,
+  onActivePanelChangeAction,
   onShowTransChangeAction,
   onShowRomaChangeAction,
 }: LyricSheetBottomBarProps) {
+  // 歌词显示选项只跟随歌词面板；播放列表面板展开时不显示（同排但语义不同）
+  const isLyricOpen = activePanel === "lyric";
+
   return (
     <motion.div
       className="grid h-16 w-full shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end px-6 pb-6 z-10000"
@@ -136,10 +140,8 @@ export function LyricSheetBottomBar({
           onShowRomaChangeAction={onShowRomaChangeAction}
         />
         <SheetPanelControls
-          isLyricOpen={isLyricOpen}
-          isPlaylistOpen={isPlaylistOpen}
-          onLyricOpenChangeAction={onLyricOpenChangeAction}
-          onPlaylistOpenChangeAction={onPlaylistOpenChangeAction}
+          activePanel={activePanel}
+          onActivePanelChangeAction={onActivePanelChangeAction}
         />
       </div>
     </motion.div>
@@ -375,18 +377,18 @@ function LyricDisplayControls({
  * 多版本数据来自酷狗歌词库（官方推荐 / 用户上传 / 第三方），按歌曲记忆手动选择。
  */
 function SheetPanelControls({
-  isLyricOpen,
-  isPlaylistOpen,
-  onLyricOpenChangeAction,
-  onPlaylistOpenChangeAction,
+  activePanel,
+  onActivePanelChangeAction,
 }: {
-  isLyricOpen: boolean;
-  isPlaylistOpen: boolean;
-  onLyricOpenChangeAction: (value: boolean) => void;
-  onPlaylistOpenChangeAction: (value: boolean) => void;
+  activePanel: LyricSheetPanel | null;
+  onActivePanelChangeAction: (panel: LyricSheetPanel | null) => void;
 }) {
   const isFmMode = usePlayerStore((s) => s.isFmMode);
+  const isLyricOpen = activePanel === "lyric";
+  const isPlaylistOpen = activePanel === "playlist";
 
+  // 两个按钮改写同一个面板状态：切换即「点开自己 / 收起自己」，
+  // 由 toggleLyricSheetPanel 保证任一时刻只可能有一个面板展开
   return (
     <div className={cn("flex gap-2", GLASS_CONTROL_SURFACE)}>
       <Tooltip>
@@ -395,10 +397,11 @@ function SheetPanelControls({
             variant="ghost"
             aria-pressed={isLyricOpen}
             icon={<LyricPanelIcon active={isLyricOpen} />}
-            onClick={() => {
-              onLyricOpenChangeAction(!isLyricOpen);
-              onPlaylistOpenChangeAction(false);
-            }}
+            onClick={() =>
+              onActivePanelChangeAction(
+                toggleLyricSheetPanel(activePanel, "lyric"),
+              )
+            }
             className={cn(
               "relative size-10 rounded-full transition-all duration-300 ease-in-out",
               isLyricOpen
@@ -417,10 +420,11 @@ function SheetPanelControls({
               variant="ghost"
               aria-pressed={isPlaylistOpen}
               icon={<PlaylistPanelIcon active={isPlaylistOpen} />}
-              onClick={() => {
-                onPlaylistOpenChangeAction(!isPlaylistOpen);
-                onLyricOpenChangeAction(false);
-              }}
+              onClick={() =>
+                onActivePanelChangeAction(
+                  toggleLyricSheetPanel(activePanel, "playlist"),
+                )
+              }
               className={cn(
                 "relative size-10 rounded-full transition-all duration-300 ease-in-out",
                 isPlaylistOpen

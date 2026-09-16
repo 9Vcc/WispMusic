@@ -27,6 +27,7 @@ import {
 } from "./lyric-sheet-background";
 import { LyricSheetBottomBar } from "./lyric-sheet-bottom-bar";
 import { getSidePanelMotion, lyricSheetEase } from "./lyric-sheet-motion";
+import type { LyricSheetPanel } from "./lyric-sheet-panel";
 import { LyricSheetSonginfo } from "./lyric-sheet-songinfo";
 import { LyricSheetSonglist } from "./lyric-sheet-songlist";
 import { LyricSheetTitlebar } from "./lyric-sheet-titlebar";
@@ -91,8 +92,11 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 	const currentSong = usePlayerStore((s) => s.currentSong);
 	const currentCoverUrl = currentSong?.al?.picUrl || currentSong?.album?.picUrl;
 	const [isMounted, setIsMounted] = useState(false);
-	const [isPlaylistOpen, setIsPlaylistOpen] = useState(false);
-	const [isLyricOpen, setIsLyricOpen] = useState(true);
+	// 歌词 / 播放列表两个侧面板的展开状态是**一份**互斥状态（见
+	// lyric-sheet-panel.ts）：二者布局区域重合，用两个独立 boolean 时
+	// 收起歌词页（标题栏 / Esc）不会复位播放列表标志位，下次打开歌词页又被
+	// 默认展开的歌词面板叠加，于是两整块文字重叠渲染。
+	const [activePanel, setActivePanel] = useState<LyricSheetPanel | null>(null);
 	const togglePlay = usePlayerStore((s) => s.togglePlay);
 	const currentSongLyrics = usePlayerStore((s) => s.currentSongLyrics);
 	// 本地歌词优先：它没有翻译/罗马音分轨，激活时对应开关一并下线
@@ -194,18 +198,20 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 		if (!hasRomaLyric && showRoma) setShowRoma(false);
 	}, [hasRomaLyric, hasTransLyric, showRoma, showTrans]);
 
-	// 每次打开歌词页都默认展开歌词面板，用户仍可在底部栏手动收起
+	// 每次打开歌词页都默认展开歌词面板，用户仍可在底部栏手动收起。
+	// 写的是唯一的面板状态，因此顺带收敛掉上一次会话残留的选择——标题栏
+	// 收起与 Esc 都不经过外部关闭事件，不会复位面板状态，旧实现下再次打开
+	// 就会出现「歌词面板 + 播放列表」同时渲染。
 	useEffect(() => {
 		if (!isOpen) return;
 		setIsMounted(true);
-		setIsLyricOpen(true);
+		setActivePanel("lyric");
 	}, [isOpen]);
 
 	useEffect(() => {
 		function handleCloseLyricSheet() {
 			setIsOpen(false);
-			setIsPlaylistOpen(false);
-			setIsLyricOpen(false);
+			setActivePanel(null);
 		}
 
 		window.addEventListener(CLOSE_LYRIC_SHEET_EVENT, handleCloseLyricSheet);
@@ -288,7 +294,7 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 												initial={false}
 												animate={{
 													x: "0%",
-													width: isPlaylistOpen || isLyricOpen ? "50%" : "100%",
+													width: activePanel !== null ? "50%" : "100%",
 												}}
 												transition={
 													reduceMotion
@@ -299,8 +305,10 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 											>
 												<LyricSheetSonginfo setIsOpen={setIsOpen} />
 											</motion.div>
+											{/* 两个侧面板同一个状态的两个取值，因此下面两块互斥：
+											    任一时刻最多只有一个在渲染 */}
 											<AnimatePresence>
-												{isPlaylistOpen && (
+												{activePanel === "playlist" && (
 													<motion.div
 														{...sidePanelMotion}
 														className="absolute top-24 right-24 bottom-12 w-[calc(50%-48px)]"
@@ -313,7 +321,7 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 												)}
 											</AnimatePresence>
 											<AnimatePresence>
-												{isLyricOpen && (
+												{activePanel === "lyric" && (
 													// biome-ignore lint/a11y/noStaticElementInteractions: 这是右侧工具条的 hover 热区（纯显隐检测层，pointer-events 交给歌词面板与工具条）
 													<div
 														className="pointer-events-none absolute top-18 right-0 bottom-0 w-[50%]"
@@ -342,14 +350,12 @@ export function LyricSheet({ children }: { children: React.ReactNode }) {
 										</div>
 
 										<LyricSheetBottomBar
-											isLyricOpen={isLyricOpen}
-											isPlaylistOpen={isPlaylistOpen}
+											activePanel={activePanel}
 											hasTransLyric={hasTransLyric}
 											hasRomaLyric={hasRomaLyric}
 											showTrans={showTrans}
 											showRoma={showRoma}
-											onLyricOpenChangeAction={setIsLyricOpen}
-											onPlaylistOpenChangeAction={setIsPlaylistOpen}
+											onActivePanelChangeAction={setActivePanel}
 											onShowTransChangeAction={setShowTrans}
 											onShowRomaChangeAction={setShowRoma}
 										/>
