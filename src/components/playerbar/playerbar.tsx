@@ -130,7 +130,10 @@ function LeftButtonRegion() {
 							containerClassName="min-w-0 shrink"
 							textClassName="text-sm font-bold text-primary"
 						/>
-						<div className="hidden min-w-0 shrink truncate md:flex">
+						{/* 歌手列：块级 + truncate 才能对行内链接生效（flex 容器上
+						    text-overflow 不作用到 flex 子项，旧写法是硬裁切，
+						    宽度一变就露出半个字）；min-w-0 保证能收缩到省略号 */}
+						<div className="hidden min-w-0 shrink truncate md:block">
 							{currentSong?.ar?.map((ar, idx) => (
 								<Link
 									to={`/detail/artist?id=${ar.id}`}

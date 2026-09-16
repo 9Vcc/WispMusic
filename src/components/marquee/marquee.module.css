@@ -35,10 +35,13 @@
 
 /* 一组 = 连续 3 轮，写成单条关键帧以保证组内匀速无减速：
    开头缓入加速到巡航速度（占一轮距离的 15%），随后全程 linear 匀速，
-   在 0 与 -50% 像素重合的衔接点瞬时归位（+0.001% 的极小窗口），
+   在 0 与 -100% 像素重合的衔接点瞬时归位（+0.001% 的极小窗口），
    结尾对称缓出停回起点。百分比由「缓入/缓出时长 = 1.639 × 0.15 轮」推得，
    总时长系数 3.192 与 marquee.tsx 的 GROUP_DURATION_FACTOR 对应。
-   修改轮数需同步重算这些百分比。 */
+   平移基准 = **一个轨道宽**（= 单份文本 + pr-8 循环间距）：轨道在流内
+   恒定只放一份文本，副本文案绝对定位贴在 left:100%，所以 -100% 恰好
+   等于「接上下一份」的距离（旧实现轨道内放两份、基准是 -50%）。
+   修改轮数或间距需同步重算这些百分比。 */
 .marqueeScrolling {
 	animation: marqueeScrollGroup var(--marquee-duration, 30s) 1 both;
 }
@@ -54,29 +57,29 @@
 		animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0);
 	}
 	7.704% {
-		transform: translateX(-7.5%);
+		transform: translateX(-15%);
 		animation-timing-function: linear;
 	}
 	34.335% {
-		transform: translateX(-50%);
+		transform: translateX(-100%);
 	}
 	34.336% {
 		transform: translateX(0);
 		animation-timing-function: linear;
 	}
 	65.665% {
-		transform: translateX(-50%);
+		transform: translateX(-100%);
 	}
 	65.666% {
 		transform: translateX(0);
 		animation-timing-function: linear;
 	}
 	92.296% {
-		transform: translateX(-42.5%);
+		transform: translateX(-85%);
 		/* 正弦缓出，起点斜率 ≈ 巡航速度 */
 		animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1);
 	}
 	100% {
-		transform: translateX(-50%);
+		transform: translateX(-100%);
 	}
 }

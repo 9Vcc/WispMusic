@@ -10,11 +10,15 @@ import { Resource, Song } from "@/lib/types";
 import { toast } from "sonner";
 
 export function useSongLogic() {
-	const { likeListSet, toggleLikeMusic } = useUserStore();
+	// 逐项订阅而不是 useUserStore()：无选择器订阅等于订阅整个用户 store，
+	// 喜欢列表、歌单、用户资料任一变化都会重渲染所有用到本 hook 的组件
+	//（播放条左侧区域、歌曲行、卡片…）。播放条左侧同时挂着 Marquee 的量算
+	// 逻辑，无关重渲染会放大底栏文字抖动的观感，这里按需订阅收窄重渲染面。
+	const likeListSet = useUserStore((s) => s.likeListSet);
+	const toggleLikeMusic = useUserStore((s) => s.toggleLikeMusic);
+	const favPlaylistId = useUserStore((s) => s.favPlaylist?.id);
 	const playSong = usePlayerStore((s) => s.playSong);
 	const addToPlaylist = usePlayerStore((s) => s.addToPlaylist);
-	const favPlaylist = useUserStore((s) => s.favPlaylist);
-	const favPlaylistId = favPlaylist?.id;
 
 	const checkIsLiked = (type: string, data: any): boolean => {
 		if (!data) return false;
