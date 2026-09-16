@@ -240,22 +240,45 @@ export default function DesktopLyric() {
 	const stageDesignHeight =
 		design.height - (isVertical ? 0 : DESKTOP_LYRIC_HEADER_RESERVE);
 	const stageRef = useRef<HTMLDivElement>(null);
-	const [contentScale, setContentScale] = useState(1);
+	const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 	useEffect(() => {
 		const el = stageRef.current;
 		if (!el) return;
 		const update = () => {
-			const next = Math.min(
-				el.clientWidth / design.width,
-				el.clientHeight / stageDesignHeight,
-			);
-			setContentScale(Number.isFinite(next) && next > 0 ? next : 1);
+			setStageSize((prev) => {
+				const next = { width: el.clientWidth, height: el.clientHeight };
+				return prev.width === next.width && prev.height === next.height
+					? prev
+					: next;
+			});
 		};
 		update();
 		const ro = new ResizeObserver(update);
 		ro.observe(el);
 		return () => ro.disconnect();
-	}, [design, stageDesignHeight]);
+	}, []);
+	// 内容缩放比：设计几何 → 舞台实尺寸（沿用既有「高度单边定字号、缩放兜底
+	// 贴合窗口」的模型）。改用派生值而非 state，避免与下面的设计盒宽度互相驱动
+	const contentScale = useMemo(() => {
+		if (stageSize.width <= 0 || stageSize.height <= 0) return 1;
+		const next = Math.min(
+			stageSize.width / design.width,
+			stageSize.height / stageDesignHeight,
+		);
+		return Number.isFinite(next) && next > 0 ? next : 1;
+	}, [stageSize, design, stageDesignHeight]);
+	// 设计盒尺寸按舞台实尺寸反推（= 舞台尺寸 ÷ 缩放比），使缩放后的盒**恰好**
+	// 覆盖舞台：贴边要贴的是窗口边缘，若沿用固定设计宽（1000），高度受限时
+	// 缩放后盒宽小于窗口宽、居中留出白边，歌词永远贴不到边（实测 1200 宽窗口
+	// 下差 112px）
+	const stageBoxWidth =
+		stageSize.width > 0 && contentScale > 0
+			? stageSize.width / contentScale
+			: design.width;
+	const stageBoxHeight =
+		stageSize.height > 0 && contentScale > 0
+			? stageSize.height / contentScale
+			: stageDesignHeight;
 
 	useEffect(() => {
 		const unlisten = listen<SyncPayload>("desktop-lyric-sync-state", (e) => {
@@ -481,10 +504,11 @@ export default function DesktopLyric() {
 				</header>
 			)}
 
-			{/* 歌词舞台：内容固定按设计尺寸布局、整体等比缩放居中（缩放比
-			    大于 1 时布局盒不变，只是视觉放大，不会溢出裁切）；字体走
-			    全局歌词字体变量（含用户自定义字体）。舞台本身不裁切——笔画
-			    动效要从窗口外飞入，只在根层按窗口边界裁 */}
+			{/* 歌词舞台：内容按「舞台反推的设计盒」布局并等比缩放，盒缩放后恰好
+			    覆盖舞台 —— 贴边要贴的是窗口边缘，盒必须与舞台同宽同高（旧实现
+			    用固定设计宽 1000，高度受限时盒比窗口窄、居中留白，歌词贴不到
+			    边）；字体走全局歌词字体变量（含用户自定义字体）。舞台本身不
+			    裁切——笔画动效要从窗口外飞入，只在根层按窗口边界裁 */}
 			<div
 				ref={stageRef}
 				className="relative flex min-h-0 flex-1 items-center justify-center"
@@ -492,8 +516,8 @@ export default function DesktopLyric() {
 				<div
 					className="relative flex items-center justify-center"
 					style={{
-						width: design.width,
-						height: stageDesignHeight,
+						width: stageBoxWidth,
+						height: stageBoxHeight,
 						fontFamily: "var(--app-lyric-font-family, inherit)",
 						transform: `scale(${contentScale})`,
 						transformOrigin: "center",

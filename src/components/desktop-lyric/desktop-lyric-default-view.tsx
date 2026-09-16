@@ -14,7 +14,12 @@ import {
 	type DesktopLyricColors,
 	withAlpha,
 } from "@/lib/utils/desktop-lyric-colors";
+import {
+	DESKTOP_LYRIC_EDGE_INSET,
+	DESKTOP_LYRIC_VERTICAL_SAFE_INSET,
+} from "@/lib/utils/desktop-lyric-geometry";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
+import { resolveVerticalSlots } from "./desktop-lyric-slots";
 
 /**
  * 桌面歌词「默认动效」视图。
@@ -75,48 +80,79 @@ export function DesktopDefaultView({
 	);
 
 	if (isVertical) {
-		// 竖向双列（与横向双行的奇偶交替同构）：偶数行列在左上（列靠左、
-		// 内容贴顶），奇数行列在右下（列靠右、内容贴底），当前句与下一句
-		// 天然错位成对角。各槽独立进出场（整列沿水平轴滑动，与书写方向
-		// 一致；左槽从左缘、右槽从右缘）；当前句整字号、下一句 0.8 灰。
-		// 右侧预留工具栏安全边距（pr-12）。
+		// 竖向双列：**当前句恒左列（列贴左缘 + 内容贴顶）、下一句恒右列
+		// （列贴右缘 + 内容贴底）**，两句天然错位成对角。贴边只由槽位决定，
+		// 与歌词行号奇偶无关——旧实现按 index % 2 分配列，奇数句时当前句
+		// 会跑到右下（用户反馈的「贴边不准确」）。各槽独立进出场（整列沿
+		// 水平轴滑动，与书写方向一致；左槽从左缘、右槽从右缘）；当前句整
+		// 字号、下一句 0.8 灰。右缘留出工具条安全边距，贴右是「贴到工具条
+		// 内侧的右缘」而不是被工具栏压住。
 		const columnSlide = fontSize * 1.35;
-		const slots: Array<{
-			item: { line: ILyricLine; index: number; isCurrent: boolean } | undefined;
-			side: "left" | "right";
-		}> = [
-			{
-				item:
-					line &&
-					!line.isLeadDots &&
-					currentIndex >= 0 &&
-					currentIndex % 2 === 0
-						? { line, index: currentIndex, isCurrent: true }
-						: nextLine && !nextLine.isLeadDots && (currentIndex + 1) % 2 === 0
-							? { line: nextLine, index: currentIndex + 1, isCurrent: false }
-							: undefined,
-				side: "left",
-			},
-			{
-				item:
-					line &&
-					!line.isLeadDots &&
-					currentIndex >= 0 &&
-					currentIndex % 2 !== 0
-						? { line, index: currentIndex, isCurrent: true }
-						: nextLine && !nextLine.isLeadDots && (currentIndex + 1) % 2 !== 0
-							? { line: nextLine, index: currentIndex + 1, isCurrent: false }
-							: undefined,
-				side: "right",
-			},
-		];
-		const hasAny = slots.some((s) => s.item);
+		const slots = resolveVerticalSlots({ line, nextLine, currentIndex });
+		const hasAny = Boolean(slots.left || slots.right);
+		const renderColumn = (
+			item: ReturnType<typeof resolveVerticalSlots>["left"],
+			side: "left" | "right",
+		) => {
+			const isLeft = side === "left";
+			return (
+				<div
+					key={side}
+					className={cn(
+						"relative flex min-w-0 flex-1 overflow-hidden",
+						isLeft ? "items-start justify-start" : "items-end justify-end",
+					)}
+				>
+					<AnimatePresence mode="popLayout" initial={false}>
+						{item && (
+							<motion.div
+								key={`col-${item.index}`}
+								initial={{
+									opacity: 0,
+									x: isLeft ? -columnSlide : columnSlide,
+								}}
+								animate={{ opacity: 1, x: 0 }}
+								exit={{
+									opacity: 0,
+									x: isLeft ? -columnSlide : columnSlide,
+								}}
+								transition={SLOT_SLIDE}
+								className="max-h-full max-w-full"
+								style={{
+									writingMode: "vertical-rl",
+									color: item.isCurrent ? activeLineColor : previewLineColor,
+								}}
+							>
+								<DesktopLineText
+									line={item.line}
+									direction={direction}
+									fontSize={
+										item.isCurrent
+											? fontSize
+											: Math.round(fontSize * NEXT_LINE_SCALE)
+									}
+									currentTimeMotion={currentTimeMotion}
+									isCurrent={item.isCurrent}
+									lineWindowMs={
+										nextLine ? nextLine.lineStart - item.line.lineStart : 10000
+									}
+								/>
+							</motion.div>
+						)}
+					</AnimatePresence>
+				</div>
+			);
+		};
 		return (
 			<div
-				className="flex h-full w-full items-stretch overflow-hidden py-2 pl-3 pr-12"
+				className="flex h-full w-full items-stretch overflow-hidden"
 				style={{
 					fontFamily: "var(--app-lyric-font-family, inherit)",
 					color: activeLineColor,
+					paddingTop: DESKTOP_LYRIC_EDGE_INSET / 2,
+					paddingBottom: DESKTOP_LYRIC_EDGE_INSET / 2,
+					paddingLeft: DESKTOP_LYRIC_EDGE_INSET / 2,
+					paddingRight: DESKTOP_LYRIC_VERTICAL_SAFE_INSET,
 				}}
 			>
 				{!hasAny ? (
@@ -124,73 +160,22 @@ export function DesktopDefaultView({
 						<DesktopLeadDots vertical />
 					</div>
 				) : (
-					slots.map(({ item, side }) => {
-						const isLeft = side === "left";
-						return (
-							<div
-								key={side}
-								className={cn(
-									"relative flex min-w-0 flex-1 overflow-hidden",
-									isLeft
-										? "items-start justify-center"
-										: "items-end justify-center",
-								)}
-							>
-								<AnimatePresence mode="popLayout" initial={false}>
-									{item && (
-										<motion.div
-											key={`col-${item.index}`}
-											initial={{
-												opacity: 0,
-												x: isLeft ? -columnSlide : columnSlide,
-											}}
-											animate={{ opacity: 1, x: 0 }}
-											exit={{
-												opacity: 0,
-												x: isLeft ? -columnSlide : columnSlide,
-											}}
-											transition={SLOT_SLIDE}
-											className="max-h-full max-w-full"
-											style={{
-												writingMode: "vertical-rl",
-												color: item.isCurrent
-													? activeLineColor
-													: previewLineColor,
-											}}
-										>
-											<DesktopLineText
-												line={item.line}
-												direction={direction}
-												fontSize={
-													item.isCurrent
-														? fontSize
-														: Math.round(fontSize * NEXT_LINE_SCALE)
-												}
-												currentTimeMotion={currentTimeMotion}
-												isCurrent={item.isCurrent}
-												lineWindowMs={
-													nextLine
-														? nextLine.lineStart - item.line.lineStart
-														: 10000
-												}
-											/>
-										</motion.div>
-									)}
-								</AnimatePresence>
-							</div>
-						);
-					})
+					<>
+						{renderColumn(slots.left, "left")}
+						{renderColumn(slots.right, "right")}
+					</>
 				)}
 			</div>
 		);
 	}
 
-	// 横向双行：行槽块整体居中，当前句在上槽、下一句在下槽，按歌词行
-	// 索引奇偶一左一右交替排列（EchoMusic alignment=both：偶数行靠左、
-	// 奇数行靠右；相邻行天然一奇一偶）。行元素按索引作 key：下一句晋级
-	// 当前句时 key 不变，framer 平滑过渡 y/缩放/颜色，配合旧句上滑退出、
-	// 新下一句从底部滑入。行槽块恒定挂载（含呼吸圆点兜底），行↔圆点
-	// 切换同样有过渡；块自身 overflow-hidden，进出场滑动在块边缘裁切。
+	// 横向双行：**上行（当前句）恒贴左边、下行（下一句）恒贴右边**，与歌词
+	// 行号奇偶无关（旧实现按 index % 2 交替，奇数句时上行会跑到右边）。
+	// 行元素按索引作 key：下一句晋级当前句时 key 不变，framer 平滑过渡
+	// y/缩放/颜色——贴边侧也会在这一刻从右换到左，故文本块挂 `layout`，
+	// 让这次换边以位移动画完成而不是瞬移。行槽块恒定挂载（含呼吸圆点
+	// 兜底），块自身 overflow-hidden，进出场滑动在块边缘裁切；左右各留
+	// 一点边距，避免字形描边被窗口裁掉。
 	const slotH = fontSize * LINE_SLOT_RATIO;
 	const items: Array<{ line: ILyricLine; index: number; isCurrent: boolean }> =
 		line && !line.isLeadDots && currentIndex >= 0
@@ -204,8 +189,12 @@ export function DesktopDefaultView({
 
 	return (
 		<div
-			className="flex h-full w-full items-center justify-center overflow-hidden px-8"
-			style={{ fontFamily: "var(--app-lyric-font-family, inherit)" }}
+			className="flex h-full w-full items-center justify-center overflow-hidden"
+			style={{
+				fontFamily: "var(--app-lyric-font-family, inherit)",
+				paddingLeft: DESKTOP_LYRIC_EDGE_INSET,
+				paddingRight: DESKTOP_LYRIC_EDGE_INSET,
+			}}
 		>
 			<div
 				className="relative w-full overflow-hidden"
@@ -234,26 +223,33 @@ export function DesktopDefaultView({
 							}}
 							className={cn(
 								"absolute inset-x-0 top-0 flex items-center overflow-hidden",
-								index % 2 === 0 ? "justify-start" : "justify-end",
+								isCurrent ? "justify-start" : "justify-end",
 							)}
 							style={{
 								height: slotH,
-								// 缩放原点贴对齐侧（EchoMusic 同款）：左右交替布局下
-								// 下一句 0.8 缩放向对齐侧收紧，不产生反向缩进
-								transformOrigin:
-									index % 2 === 0 ? "left center" : "right center",
+								// 缩放原点贴对齐侧（EchoMusic 同款）：下一句 0.8
+								// 缩放向贴边侧收紧，不产生反向缩进
+								transformOrigin: isCurrent ? "left center" : "right center",
 							}}
 						>
-							<DesktopLineText
-								line={itemLine}
-								direction={direction}
-								fontSize={fontSize}
-								currentTimeMotion={currentTimeMotion}
-								isCurrent={isCurrent}
-								lineWindowMs={
-									nextLine ? nextLine.lineStart - itemLine.lineStart : 10000
-								}
-							/>
+							{/* layout：贴边侧由槽位决定，下一句晋级当前句时会从右换到左，
+							    用位移动画承接这次换边（否则是瞬移） */}
+							<motion.div
+								layout
+								className="relative flex max-w-full items-center"
+								transition={SLOT_SLIDE}
+							>
+								<DesktopLineText
+									line={itemLine}
+									direction={direction}
+									fontSize={fontSize}
+									currentTimeMotion={currentTimeMotion}
+									isCurrent={isCurrent}
+									lineWindowMs={
+										nextLine ? nextLine.lineStart - itemLine.lineStart : 10000
+									}
+								/>
+							</motion.div>
 						</motion.div>
 					))}
 				</AnimatePresence>

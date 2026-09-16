@@ -14,7 +14,9 @@ import {
 } from "@/lib/utils/desktop-lyric-colors";
 import {
 	computeDesktopLyricGeometry,
+	DESKTOP_LYRIC_EDGE_INSET,
 	DESKTOP_LYRIC_HEADER_RESERVE,
+	DESKTOP_LYRIC_VERTICAL_SAFE_INSET,
 } from "@/lib/utils/desktop-lyric-geometry";
 import { prefetchHanziChars } from "@/lib/utils/hanzi-strokes";
 import type { ILyricLine } from "@/lib/utils/lyric-parser";
@@ -100,10 +102,18 @@ function PairStrokeRow({
 	return (
 		<div
 			className={cn(
-				"flex min-h-0 flex-1 items-center px-6",
+				"flex min-h-0 flex-1 items-center",
+				// 贴边：首行（当前句）恒贴左、次行（下一句）恒贴右，与歌词行号
+				// 奇偶无关（默认动效视图同规则）；边距只留字形描边不被裁的余量
 				align === "start" ? "justify-start" : "justify-end",
 			)}
-			style={colorVars as React.CSSProperties}
+			style={
+				{
+					paddingLeft: DESKTOP_LYRIC_EDGE_INSET,
+					paddingRight: DESKTOP_LYRIC_EDGE_INSET,
+					...colorVars,
+				} as React.CSSProperties
+			}
 		>
 			{/* 不加 overflow-hidden——笔画要从窗口外飞入，裁切会让动画只覆盖
 			    半窗（字格尺寸已按宽度钳制，内容本就不溢出） */}
@@ -337,12 +347,14 @@ export function DesktopStrokeView({
 		>
 			{isVertical ? (
 				firstLine && !firstLine.isLeadDots && columns.length > 0 ? (
-					// 竖排右起多列，右侧预留工具栏安全边距（pr-12）
+					// 竖排右起多列：列序从右到左（先唱的在最右），整块贴右缘并
+					// 避让工具条（row-reverse 下 justify-start 即贴右）
 					<div
-						className="flex h-full w-full flex-row-reverse items-center justify-center pr-12"
+						className="flex h-full w-full flex-row-reverse items-center justify-start"
 						style={
 							{
 								gap: columnGap,
+								paddingRight: DESKTOP_LYRIC_VERTICAL_SAFE_INSET,
 								...buildStrokeRowColorVars(colors, true),
 							} as React.CSSProperties
 						}

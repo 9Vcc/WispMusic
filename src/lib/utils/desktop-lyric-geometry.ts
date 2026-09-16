@@ -22,6 +22,22 @@ export interface DesktopLyricGeometry {
  */
 export const DESKTOP_LYRIC_HEADER_RESERVE = 48;
 
+/**
+ * 歌词贴边时相对窗口边缘的留白（设计像素）。
+ *
+ * 贴边指的是「文字盒贴到窗口边缘」，但必须留出字形描边（0.1em）与投影的
+ * 余量，否则会被窗口的 overflow-hidden 裁掉轮廓（EchoMusic 同量级：容器
+ * 8px + 行 4px ≈ 12px）。数值在设计坐标系里，实际屏幕留白 = 该值 × 内容缩放比。
+ */
+export const DESKTOP_LYRIC_EDGE_INSET = 16;
+
+/**
+ * 竖排贴右时的工具条安全边距（设计像素）：竖排悬浮工具栏钉在右缘
+ * （≈40px 宽），列贴右必须让开它（EchoMusic 竖排 safe-inline = 工具条 36
+ * + 边距 8 + 间隙 12 = 56，本实现工具条更窄故取 48）。
+ */
+export const DESKTOP_LYRIC_VERTICAL_SAFE_INSET = 48;
+
 /** 横向窗口：宽度吃满合理上限、高度容纳头部 + 双行（当前句 + 下一句预览）；竖向窗口：高度吃满合理上限、宽度跟随字号（含多列） */
 export function computeDesktopLyricGeometry(
 	direction: DesktopLyricDirection,
