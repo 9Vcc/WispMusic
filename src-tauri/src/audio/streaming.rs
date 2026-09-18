@@ -14,6 +14,18 @@ use super::mp4_decoder::Mp4Decoder;
 
 pub(super) type BoxedAudioSource = Box<dyn Source<Item = i16> + Send>;
 
+/// data 预分配上限。Content-Length 已知时按它一次性预留，避免 Vec 逐次倍增
+/// 扩容在最后一次重分配时同时持有「旧 + 新」两块（≈2× 当前长度）的瞬时峰值。
+/// 取 24MB 是个折中：常见 mp3/m4a 单曲都在此之内 → 全程零重分配；超大无损
+/// 只预留这么多，避免用户秒切歌时白占一整份文件的容量。
+const DATA_RESERVE_MAX_BYTES: u64 = 24 * 1024 * 1024;
+
+/// Range 快进 tail 缓冲上限。tail 里的字节主顺序下载稍后也会写到 data，
+/// 不设限时两者可同时持有近整份文件（峰值≈2× 文件长度）。超限即中止本次
+/// Range 流（tail_finished），reader 读到 tail 末尾后会对新位置重新发起
+/// Range，而 reset_tail 会先回收旧缓冲，因此不会一直占着这 32MB。
+const TAIL_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 struct StreamingState {
     data: Vec<u8>,
     complete: bool,
@@ -37,9 +49,14 @@ pub(super) struct StreamingBuffer {
 impl StreamingBuffer {
     pub(super) fn new(total_len: Option<u64>) -> Arc<Self> {
         let (fast_forward_tx, _) = watch::channel(None);
+        // 已知总长度就一次性预留，避免逐次倍增扩容带来的瞬时双份占用
+        let reserve_bytes = total_len
+            .filter(|len| *len > 0)
+            .map(|len| len.min(DATA_RESERVE_MAX_BYTES) as usize)
+            .unwrap_or(0);
         Arc::new(Self {
             state: Mutex::new(StreamingState {
-                data: Vec::new(),
+                data: Vec::with_capacity(reserve_bytes),
                 complete: false,
                 error: None,
                 total_len,
@@ -123,6 +140,14 @@ impl StreamingBuffer {
             .state
             .lock()
             .map_err(|_| "streaming audio buffer lock poisoned".to_string())?;
+        // 超限即中止本次 Range 流：调用方会置 tail_done，reader 读到已缓存的
+        // tail 末尾后重新发起 Range（reset_tail 先回收旧缓冲），内存有界
+        if state.tail_data.len() >= TAIL_MAX_BYTES {
+            return Err(format!(
+                "streaming tail buffer reached {} bytes limit",
+                TAIL_MAX_BYTES
+            ));
+        }
         state.tail_data.extend_from_slice(chunk);
         self.available.notify_all();
         Ok(())
