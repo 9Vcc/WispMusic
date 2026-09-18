@@ -67,6 +67,7 @@ pub fn process_role_from_command_line(command_line: &str) -> &'static str {
 #[cfg(target_os = "windows")]
 mod imp {
     use super::{ProcessMemoryEntry, ProcessMemoryReport};
+    use std::ffi::c_void;
     use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -76,10 +77,8 @@ mod imp {
         K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
     use windows::Win32::System::Threading::{
-        NtQueryInformationProcess, OpenProcess, PROCESSINFOCLASS,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        NtQueryInformationProcess, OpenProcess, PROCESSINFOCLASS, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use std::ffi::c_void;
 
     struct RawProcess {
         pid: u32,
@@ -268,10 +267,8 @@ pub fn get_process_memory_report() -> Result<ProcessMemoryReport, String> {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::{BOOL, CloseHandle};
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows::Win32::Foundation::{CloseHandle, BOOL};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     /// 真跑一遍 Win32 链路（进程快照 → OpenProcess → K32GetProcessMemoryInfo），
     /// 确保命令不是「编译得过但运行时拿不到数」。
