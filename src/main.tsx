@@ -2,11 +2,13 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { SWRConfig } from "swr";
 import App from "./App";
 import "./index.css";
 import { initGlobalShortcuts } from "./lib/shortcuts/global-shortcut-manager";
 import { initLocalMusic } from "./lib/store/localMusicStore/localMusicStore";
 import { initSettings } from "./lib/store/settingStore/settingStore";
+import { createSwrLruCache } from "./lib/utils/swr-cache";
 
 const settingsReady = initSettings();
 settingsReady.then(() => initGlobalShortcuts());
@@ -42,6 +44,10 @@ if (isTauri() && getCurrentWindow().label === "main") {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 	<React.StrictMode>
-		<App />
+		{/* SWR 默认缓存是无上限的 Map，而 playlist-tracks / user-cloud / 探索分页这些
+		    key 会装下整张歌单或整个云盘的数据；这里换成带上限的 LRU（见 utils/swr-cache.ts） */}
+		<SWRConfig value={{ provider: () => createSwrLruCache() }}>
+			<App />
+		</SWRConfig>
 	</React.StrictMode>,
 );
