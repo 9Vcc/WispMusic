@@ -353,10 +353,21 @@ export default function MiniPlayer() {
 	}, []);
 
 	useEffect(() => {
+		let cancelled = false;
 		const unlisten = listen<Partial<MiniState>>("mini-sync-state", (e) => {
 			setState((prev) => ({ ...prev, ...e.payload }));
 		});
+		// mini 窗口是首次进入 mini 模式时才创建的：Rust 在 show 那一刻推送的
+		// 快照会早于本监听器注册而丢失。等监听器真正注册完成后再主动要一次
+		// （主窗口侧复用既有的 mini-entered → 全量推送链路）
+		void unlisten.then(() => {
+			if (cancelled) return;
+			invoke("aux_window_ready", { label: "mini-player" }).catch(
+				console.error,
+			);
+		});
 		return () => {
+			cancelled = true;
 			unlisten.then((f) => f());
 		};
 	}, []);

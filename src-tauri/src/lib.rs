@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    utils::config::WindowConfig,
+    webview::WebviewWindowBuilder,
     Emitter, Manager, WindowEvent,
 };
 
@@ -21,6 +23,51 @@ use tauri::{
 /// 激活期间：托盘左击呼出 mini 窗口而非主窗口；mini 窗口被"关闭"仅隐藏，
 /// 主窗口保持隐藏，托盘可再次呼出。
 static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 按需创建的辅助窗口规格（mini-player / desktop-lyric）。
+/// 它们不在 tauri.conf.json 里静态声明，否则启动时每个都会建一个 webview
+/// （各自的 JS 堆），即使用户从不打开。规格放在独立 JSON 里而不是写在 Rust
+/// 常量中：这样窗口选项与静态声明时的写法同源，由 from_config 原样套用，
+/// 不会因为抄漏某个选项（transparent / skipTaskbar / shadow 等）而行为不一致。
+const AUX_WINDOW_SPECS: &str = include_str!("../aux-windows.json");
+
+#[derive(serde::Deserialize)]
+struct AuxWindowSpecFile {
+    windows: Vec<WindowConfig>,
+}
+
+fn aux_window_spec(label: &str) -> Option<WindowConfig> {
+    let specs: AuxWindowSpecFile = serde_json::from_str(AUX_WINDOW_SPECS)
+        .map_err(|err| eprintln!("[window] parse aux-windows.json failed: {err}"))
+        .ok()?;
+    specs
+        .windows
+        .into_iter()
+        .find(|spec| spec.label.as_str() == label)
+}
+
+/// 取辅助窗口；不存在则按 aux-windows.json 的规格现场创建。
+/// 只在「确实要显示该窗口」的路径上调用——纯推送状态的路径不能调它，
+/// 否则一个 emit 就会把窗口建出来，懒创建失去意义。
+///
+/// **调用方必须是 async command**：tauri 的 from_config 文档写明，Windows 上
+/// 在同步命令或事件处理器里创建 webview 会死锁（wry#583，主线程等自己做窗口
+/// 创建的消息循环）。异步命令跑在运行时线程上，正是官方推荐的写法。
+fn ensure_aux_window(
+    app: &tauri::AppHandle,
+    label: &str,
+) -> Result<tauri::WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window(label) {
+        return Ok(window);
+    }
+
+    let spec =
+        aux_window_spec(label).ok_or_else(|| format!("no window spec for {label}"))?;
+    WebviewWindowBuilder::from_config(app, &spec)
+        .map_err(|err| format!("build {label} window failed: {err}"))?
+        .build()
+        .map_err(|err| format!("create {label} window failed: {err}"))
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -75,15 +122,15 @@ fn mini_push_state(
         .map_err(|e| e.to_string())
 }
 
-/// 进入 mini 模式：mini 窗口定位到主窗口中心偏上，显示并隐藏主窗口
+/// 进入 mini 模式：mini 窗口定位到主窗口中心偏上，显示并隐藏主窗口。
+/// 必须是 async：内部可能现场创建 mini 窗口（见 ensure_aux_window）
 #[tauri::command]
-fn mini_enter(app: tauri::AppHandle) -> Result<(), String> {
+async fn mini_enter(app: tauri::AppHandle) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
         .ok_or("main window not found")?;
-    let mini = app
-        .get_webview_window("mini-player")
-        .ok_or("mini-player window not found")?;
+    // 首次进入 mini 模式时才创建 mini 窗口（见 ensure_aux_window）
+    let mini = ensure_aux_window(&app, "mini-player")?;
 
     // 定位到主窗口视口中心偏上（物理坐标），用户拖动后本次会话位置保留
     // （窗口仅 hide/show 不销毁，再次进入时不再强制归位）
@@ -110,7 +157,9 @@ fn mini_enter(app: tauri::AppHandle) -> Result<(), String> {
     let _ = main.hide();
     MINI_MODE_ACTIVE.store(true, Ordering::Release);
 
-    // mini 窗口（重新）显示后立即拿一次完整快照，避免显示旧状态
+    // mini 窗口（重新）显示后立即拿一次完整快照，避免显示旧状态。
+    // 刚创建的窗口此时 JS 还没挂载、监听器未注册，这次推送会丢，
+    // 由窗口挂载后的 aux_window_ready 再要一次兜底
     let _ = app.emit_to("main", "mini-entered", ());
     Ok(())
 }
@@ -121,15 +170,15 @@ fn mini_restore_main(app: tauri::AppHandle) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
         .ok_or("main window not found")?;
-    let mini = app
-        .get_webview_window("mini-player")
-        .ok_or("mini-player window not found")?;
 
     MINI_MODE_ACTIVE.store(false, Ordering::Release);
     main.show().map_err(|e| e.to_string())?;
     let _ = main.set_focus();
     let _ = main.emit("app-foreground", ());
-    let _ = mini.hide();
+    // 没进过 mini 模式时窗口不存在，不能为了 hide 把它建出来
+    if let Some(mini) = app.get_webview_window("mini-player") {
+        let _ = mini.hide();
+    }
     Ok(())
 }
 
@@ -194,10 +243,26 @@ fn mini_set_bounds(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let window = app
-        .get_webview_window("mini-player")
-        .ok_or("mini-player window not found")?;
+    // 窗口不存在说明没进过 mini 模式（或已退出），此时无需调整尺寸
+    let Some(window) = app.get_webview_window("mini-player") else {
+        return Ok(());
+    };
     set_window_bounds_atomic(&window, x, y, width, height)
+}
+
+/// 辅助窗口挂载完成后调用：通知主窗口重新推送一次完整快照。
+/// 懒创建后窗口首次显示时其 JS 监听器尚未注册，show 时刻的推送会丢，
+/// 必须由窗口自己就绪后再要一次（与桌面歌词 ready 同源，事件名复用既有的
+/// mini-entered / tray-menu-shown，主窗口侧无需新增处理分支）。
+#[tauri::command]
+fn aux_window_ready(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    let event = match label.as_str() {
+        "mini-player" => "mini-entered",
+        "tray-menu" => "tray-menu-shown",
+        "desktop-lyric" => "desktop-lyric-shown",
+        _ => return Err(format!("unsupported aux window: {label}")),
+    };
+    app.emit_to("main", event, ()).map_err(|e| e.to_string())
 }
 
 // ===================== 桌面歌词悬浮控件 =====================
@@ -224,15 +289,15 @@ fn desktop_lyric_anchor_monitor(
 /// 显示桌面歌词窗口：落在主窗口所在显示器的底部居中（预留下方任务栏余量），
 /// 尺寸由前端按方向/字号计算后传入（逻辑像素）。不抢焦点——桌面歌词
 /// 必须在不打断用户当前工作的前提下出现。
+/// 必须是 async：首次打开时会现场创建桌面歌词窗口（见 ensure_aux_window）
 #[tauri::command]
-fn desktop_lyric_show(
+async fn desktop_lyric_show(
     app: tauri::AppHandle,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let window = app
-        .get_webview_window("desktop-lyric")
-        .ok_or("desktop-lyric window not found")?;
+    // 首次打开桌面歌词时才创建窗口（见 ensure_aux_window）
+    let window = ensure_aux_window(&app, "desktop-lyric")?;
 
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let w_phys = (width * scale).round().max(1.0) as i32;
@@ -240,7 +305,7 @@ fn desktop_lyric_show(
 
     // 已在屏上（方向/字号变更触发的重显示）→ 原地缩放，不重新落位
     if window.is_visible().unwrap_or(false) {
-        return desktop_lyric_resize(app.clone(), width, height);
+        return desktop_lyric_resize(app.clone(), width, height).await;
     }
 
     let (x_phys, y_phys) = match desktop_lyric_anchor_monitor(&app) {
@@ -265,27 +330,28 @@ fn desktop_lyric_show(
     Ok(())
 }
 
-/// 隐藏桌面歌词窗口（保持进程与窗口存活，可再次呼出）
+/// 隐藏桌面歌词窗口（保持窗口存活，可再次呼出）
 #[tauri::command]
 fn desktop_lyric_hide(app: tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("desktop-lyric")
-        .ok_or("desktop-lyric window not found")?;
-    window.hide().map_err(|e| e.to_string())?;
+    // 从未打开过时窗口不存在，hide 无效即可，不必建出来再藏起来
+    if let Some(window) = app.get_webview_window("desktop-lyric") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
 /// 横竖切换/字号变更时的窗口缩放：保持窗口中心点不动（物理坐标），
 /// 并钳制在当前显示器范围内，一次 SetWindowPos 原子完成。
+/// 必须是 async：窗口异常缺失时会现场补建（见 ensure_aux_window）
 #[tauri::command]
-fn desktop_lyric_resize(
+async fn desktop_lyric_resize(
     app: tauri::AppHandle,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let window = app
-        .get_webview_window("desktop-lyric")
-        .ok_or("desktop-lyric window not found")?;
+    // 调用方认为窗口是可见的，缺失只可能是异常状态：按规格补建后仅调尺寸，
+    // 是否显示仍由 desktop_lyric_show 决定，不在这里擅自改变可见性
+    let window = ensure_aux_window(&app, "desktop-lyric")?;
 
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let pos = window.outer_position().map_err(|e| e.to_string())?;
@@ -338,10 +404,9 @@ fn desktop_lyric_command(
 /// 隐藏 mini 窗口但保持 mini 模式激活（主窗口仍隐藏，托盘左击可再次呼出）
 #[tauri::command]
 fn mini_close(app: tauri::AppHandle) -> Result<(), String> {
-    let mini = app
-        .get_webview_window("mini-player")
-        .ok_or("mini-player window not found")?;
-    mini.hide().map_err(|e| e.to_string())?;
+    if let Some(mini) = app.get_webview_window("mini-player") {
+        mini.hide().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -555,6 +620,7 @@ pub fn run() {
             mini_restore_main,
             mini_close,
             mini_set_bounds,
+            aux_window_ready,
             desktop_lyric_show,
             desktop_lyric_hide,
             desktop_lyric_resize,
@@ -599,4 +665,71 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod window_lifecycle_tests {
+    use super::*;
+
+    const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+    const CAPABILITIES: &str = include_str!("../capabilities/default.json");
+
+    fn parsed_specs() -> AuxWindowSpecFile {
+        serde_json::from_str(AUX_WINDOW_SPECS).expect("aux-windows.json 应可解析")
+    }
+
+    #[test]
+    fn aux_windows_are_not_declared_statically() {
+        // 两者互斥：静态声明就会在启动时把 webview 建出来，懒创建即失效。
+        // 这条断言用来防止以后有人「顺手」把窗口加回 tauri.conf.json
+        for label in ["mini-player", "desktop-lyric"] {
+            assert!(
+                aux_window_spec(label).is_some(),
+                "{label} 缺少按需创建规格"
+            );
+            assert!(
+                !TAURI_CONF.contains(&format!("\"{label}\"")),
+                "{label} 仍静态声明在 tauri.conf.json，启动时会白建一个 webview"
+            );
+        }
+    }
+
+    #[test]
+    fn every_aux_window_label_is_allowed_by_capabilities() {
+        // capabilities 的 windows 数组漏配 → 该窗口的 core 命令全被 ACL 拒，
+        // 表现为窗口空白，是这套结构里最容易踩且最难排查的一环
+        let caps: serde_json::Value =
+            serde_json::from_str(CAPABILITIES).expect("capabilities/default.json 应可解析");
+        let allowed: Vec<String> = caps["windows"]
+            .as_array()
+            .expect("capabilities 应有 windows 数组")
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+
+        for spec in parsed_specs().windows {
+            assert!(
+                allowed.contains(&spec.label),
+                "capabilities/default.json 的 windows 缺少 {}",
+                spec.label
+            );
+        }
+    }
+
+    #[test]
+    fn aux_window_specs_keep_expected_geometry() {
+        let mini = aux_window_spec("mini-player").expect("mini-player 规格应存在");
+        assert_eq!((mini.width, mini.height), (360.0, 72.0));
+        assert!(mini.always_on_top, "mini 需置顶");
+        assert!(mini.skip_taskbar, "mini 不进任务栏");
+        assert!(mini.transparent, "mini 需透明底");
+        assert!(!mini.decorations, "mini 无系统边框");
+        assert!(!mini.resizable, "mini 尺寸由展开状态接管");
+
+        let lyric = aux_window_spec("desktop-lyric").expect("desktop-lyric 规格应存在");
+        assert_eq!((lyric.width, lyric.height), (1000.0, 188.0));
+        assert!(lyric.resizable, "桌面歌词需系统边缘缩放");
+        assert!(lyric.always_on_top && lyric.skip_taskbar && lyric.transparent);
+        assert!(!lyric.shadow, "桌面歌词不要系统投影");
+    }
 }
