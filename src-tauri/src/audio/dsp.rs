@@ -507,6 +507,7 @@ pub(super) fn replay_gain_factor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::tempo::{SpeedControl, TempoSource};
     use std::sync::Arc;
 
     #[test]
@@ -611,5 +612,82 @@ mod tests {
             let input = if index % 2 == 0 { 0.25 } else { -0.25 };
             assert!(processor.process(input).is_finite());
         }
+    }
+
+    /// 可定位的测试源：1000Hz 单声道，1 个样本 == 1ms，样本值 = (位置 % 1000) × 32。
+    /// ×32 是为了让取值在 i16 → f32 → i16 往返里可精确表示（仍是 1/1024 的整数倍）
+    struct SeekableSource {
+        position: u64,
+        total: u64,
+    }
+
+    impl Iterator for SeekableSource {
+        type Item = i16;
+        fn next(&mut self) -> Option<i16> {
+            if self.position >= self.total {
+                return None;
+            }
+            let value = ((self.position % 1000) * 32) as i16;
+            self.position += 1;
+            Some(value)
+        }
+    }
+
+    impl Source for SeekableSource {
+        fn current_frame_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> u16 {
+            1
+        }
+        fn sample_rate(&self) -> u32 {
+            1000
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+            self.position = (pos.as_millis() as u64).min(self.total);
+            Ok(())
+        }
+    }
+
+    /// 定位链路（Sink::try_seek → LevelMeter → TempoSource → decoder）必须真的转发到
+    /// 内层源，并丢掉变速器里缓存的旧位置样本。
+    ///
+    /// 这是「用 try_seek 取代 skip_duration 做重定位」这一优化的前提：任何一层若吞掉
+    /// try_seek，重建管线后就会从曲目开头开始播（设备切换、seek 回退路径都会中招）。
+    #[test]
+    fn try_seek_reaches_inner_source_through_level_meter_and_tempo() {
+        let mut source = LevelMeter::new(
+            TempoSource::new(
+                SeekableSource {
+                    position: 0,
+                    total: 10_000,
+                },
+                Arc::new(SpeedControl::default()),
+                1.0,
+            ),
+            Arc::new(AtomicU32::new(0.0f32.to_bits())),
+            Arc::new(std::array::from_fn(|_| AtomicU32::new(0.0f32.to_bits()))),
+            None,
+            Arc::new(DspState::new()),
+        );
+
+        // 先产出若干样本，把 TempoSource 的直通缓冲与响应状态带起来
+        for _ in 0..8 {
+            assert!(source.next().is_some());
+        }
+
+        source
+            .try_seek(Duration::from_millis(2500))
+            .expect("try_seek 应被转发到内层源");
+
+        // 2500ms @ 1000Hz 单声道 → 第 2500 个样本 → (2500 % 1000) × 32 = 16000
+        let sample = source.next().expect("定位后应继续产出样本");
+        assert!(
+            (sample - 16_000).abs() <= 2,
+            "定位后应产出目标位置的样本，实际 {sample}"
+        );
     }
 }

@@ -9,9 +9,9 @@ use std::{
 
 use super::device::open_output;
 use super::dsp::{DspState, LevelMeter, SPECTRUM_BANDS};
-use super::source::{decode_file_source, AudioSource};
+use super::source::{decode_file_source, AudioSource, ReplayGainInfo};
 use super::state::{AudioThreadInner, FadeInState, FadingSink};
-use super::streaming::decode_streaming_reader;
+use super::streaming::{decode_streaming_reader, BoxedAudioSource};
 use super::tempo::{SpeedControl, TempoSource};
 
 pub(super) fn rebuild_sink(
@@ -53,6 +53,9 @@ pub(super) fn rebuild_sink(
         sink.pause();
     }
 
+    // 新 sink 已经就绪（源也定位完成）之后才停/淡出旧 sink——旧实现在
+    // set_output_device_inner 里提前把旧 sink 停掉，导致「建源 + 定位」的全部
+    // 耗时都落在静音窗口内。
     if let Some(old_sink) = inner.sink.take() {
         if should_crossfade {
             inner.fading_sinks.push(FadingSink {
@@ -131,6 +134,16 @@ fn ensure_output(inner: &mut AudioThreadInner) -> Result<(), String> {
     Ok(())
 }
 
+/// 把源挂到 sink 上，并保证它**从 `position` 开始**产出样本。
+///
+/// 定位优先走 demuxer 级 seek（`Source::try_seek`，毫秒级）——注意是在挂载**之前**
+/// 对源本身做的，所以源一开始产出就在目标位置，不会漏出文件开头的声音，也不需要
+/// 事后在 sink 上补一次 seek。
+///
+/// 旧实现无条件用 `decoder.skip_duration(position)`：rodio 0.20 的 `skip_duration`
+/// 在**构造时**就同步执行整个跳过（`skip_samples` 里逐样本 `input.next()` 后丢弃），
+/// 成本随播放位置线性增长——长无损曲目中后段定位要解码数分钟音频，播放线程被占住
+/// 就是秒级静音（切设备、seek 回退路径都会中招）。
 fn append_source(
     sink: &Sink,
     source: &AudioSource,
@@ -142,41 +155,81 @@ fn append_source(
     speed_control: Arc<SpeedControl>,
 ) -> Result<Option<Duration>, String> {
     match source {
-        AudioSource::File { path, .. } => {
-            let decoder = decode_file_source(path)?;
-            let duration = decoder.total_duration();
-            sink.append(LevelMeter::new(
-                wrap_with_tempo(decoder.skip_duration(position), speed, speed_control),
-                audio_level,
-                audio_spectrum,
-                source.replay_gain(),
-                Arc::clone(&dsp),
-            ));
-            Ok(duration)
-        }
+        AudioSource::File { path, .. } => append_positioned_source(
+            sink,
+            || decode_file_source(path),
+            position,
+            audio_level,
+            audio_spectrum,
+            source.replay_gain(),
+            dsp,
+            speed,
+            speed_control,
+        ),
         AudioSource::Stream {
             reader,
             format,
             label,
             ..
-        } => {
-            let decoder = decode_streaming_reader(reader.clone(), *format).map_err(|err| {
-                format!(
-                    "decode streaming {} audio {label} failed: {err}",
-                    format.label()
-                )
-            })?;
-            let duration = decoder.total_duration();
-            sink.append(LevelMeter::new(
-                wrap_with_tempo(decoder.skip_duration(position), speed, speed_control),
-                audio_level,
-                audio_spectrum,
-                source.replay_gain(),
-                Arc::clone(&dsp),
-            ));
-            Ok(duration)
-        }
+        } => append_positioned_source(
+            sink,
+            || {
+                decode_streaming_reader(reader.clone(), *format).map_err(|err| {
+                    format!(
+                        "decode streaming {} audio {label} failed: {err}",
+                        format.label()
+                    )
+                })
+            },
+            position,
+            audio_level,
+            audio_spectrum,
+            source.replay_gain(),
+            dsp,
+            speed,
+            speed_control,
+        ),
     }
+}
+
+/// 建解码器 → 定位 → 包变速层 → 挂到 sink。
+///
+/// `create_decoder` 是闭包而不是现成解码器：回退路径需要**第二个干净的解码器**
+/// （失败的 seek 可能把原解码器留在不确定状态），且首次构造才能真正丢弃重来。
+fn append_positioned_source<F>(
+    sink: &Sink,
+    create_decoder: F,
+    position: Duration,
+    audio_level: Arc<AtomicU32>,
+    audio_spectrum: Arc<[AtomicU32; SPECTRUM_BANDS]>,
+    replay_gain: Option<ReplayGainInfo>,
+    dsp: Arc<DspState>,
+    speed: f32,
+    speed_control: Arc<SpeedControl>,
+) -> Result<Option<Duration>, String>
+where
+    F: Fn() -> Result<BoxedAudioSource, String>,
+{
+    let decoder = create_decoder()?;
+    let duration = decoder.total_duration();
+
+    let mut positioned = wrap_with_tempo(decoder, speed, Arc::clone(&speed_control));
+    if !position.is_zero() && positioned.try_seek(position).is_err() {
+        // 回退路径：正常不会走到——LevelMeter → TempoSource → decoder 三层都转发了
+        // try_seek（dsp.rs / tempo.rs / mp4_decoder.rs），Symphonia 解码器也支持。
+        // 走到这里说明该源确实不支持 demuxer 级 seek，只能退回解码跳过。
+        let decoder = create_decoder()?;
+        positioned = wrap_with_tempo(decoder.skip_duration(position), speed, speed_control);
+    }
+
+    sink.append(LevelMeter::new(
+        positioned,
+        audio_level,
+        audio_spectrum,
+        replay_gain,
+        dsp,
+    ));
+    Ok(duration)
 }
 
 /// 变速倍率非 1.0 时包一层 SoundTouch 变速源（不变调）；

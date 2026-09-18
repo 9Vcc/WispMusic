@@ -337,6 +337,13 @@ fn set_speed_inner(inner: &mut AudioThreadInner, speed: f32) -> Result<AudioSnap
     Ok(snapshot_inner(inner))
 }
 
+/// 切换输出设备。
+///
+/// 顺序很关键：**先把新流换进来，但不停旧 sink**，让旧设备继续发声，直到新 sink
+/// 在新设备上建好并定位完成（停旧 sink 由 rebuild_sink 内部负责）。旧实现是
+/// 先 stop 旧 sink 再重建，于是「枚举设备 + 打开 WASAPI 流 + 重建解码器 + 定位」
+/// 的全部耗时都落在静音窗口里。旧 OutputStream 也必须活到旧 sink 停播之后——
+/// 它的混音线程才是旧 sink 停播动作的执行者。
 fn set_output_device_inner(
     inner: &mut AudioThreadInner,
     device_id: Option<String>,
@@ -359,16 +366,24 @@ fn set_output_device_inner(
         .map(|track| track.is_playing)
         .unwrap_or(false);
 
-    if let Some(sink) = inner.sink.take() {
-        sink.stop();
-    }
-    stop_fading_sinks(inner);
-    inner.stream = Some(stream);
-    inner.handle = Some(handle);
+    let previous_device_id = inner.selected_device_id.clone();
+    let previous_stream = inner.stream.replace(stream);
+    let previous_handle = inner.handle.replace(handle);
     inner.selected_device_id = selected_device_id;
 
     if inner.track.is_some() {
-        let duration = rebuild_sink(inner, track_position, was_playing, false)?;
+        let duration = match rebuild_sink(inner, track_position, was_playing, false) {
+            Ok(duration) => duration,
+            Err(err) => {
+                // 回滚：rebuild_sink 只在建源成功后才停旧 sink，失败时旧 sink 与旧流
+                // 都还有效，放回去即可继续在原设备上出声，不至于两边都没声音
+                inner.handle = previous_handle;
+                inner.stream = previous_stream;
+                inner.selected_device_id = previous_device_id;
+                return Err(err);
+            }
+        };
+
         if let Some(track) = inner.track.as_mut() {
             track.duration = duration.or(track.duration);
             track.base_position = track_position;
@@ -381,6 +396,8 @@ fn set_output_device_inner(
         }
     }
 
+    drop(previous_handle);
+    drop(previous_stream);
     Ok(snapshot_inner(inner))
 }
 
