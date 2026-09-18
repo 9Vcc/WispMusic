@@ -11,7 +11,8 @@ export interface LruCache<K, V> {
 	get(key: K): V | undefined;
 	has(key: K): boolean;
 	set(key: K, value: V): void;
-	delete(key: K): void;
+	/** 返回是否真的删掉了（与 Map 语义一致，SWR 之类的调用方会用到返回值） */
+	delete(key: K): boolean;
 	keys(): K[];
 }
 
@@ -47,7 +48,7 @@ export function createLruCache<K, V>(limit: number): LruCache<K, V> {
 			}
 		},
 		delete(key) {
-			store.delete(key);
+			return store.delete(key);
 		},
 		keys() {
 			return [...store.keys()];
