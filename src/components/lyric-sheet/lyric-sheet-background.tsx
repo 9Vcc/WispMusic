@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { usePlayerStore } from "@/lib/store/playerStore/playerStore";
+import { GetThumbnail } from "@/lib/utils";
 import {
 	extractBackgroundColors,
 	getCachedBackgroundColors,
@@ -105,7 +106,11 @@ export function LyricSheetBackground({
 					<div
 						className="absolute -inset-[8%]"
 						style={{
-							backgroundImage: `url("${coverUrl.replace(/"/g, "%22")}")`,
+							// 这一层只是渐入期垫底的模糊色块（上面会淡入 mesh 渐变），
+							// 52px 模糊下 400px 与原图肉眼无差；用原图（常 1300px，
+							// 解码后 ~7MB）渲染纯属浪费，而且它和下面的 WebGL 画布
+							// 是歌词页内存峰值的主要来源
+							backgroundImage: `url("${GetThumbnail(coverUrl, 400).replace(/"/g, "%22")}")`,
 							backgroundPosition: "center",
 							backgroundSize: "cover",
 							// Mirrors applyBgRenderGrade so the pre-fade cover layer

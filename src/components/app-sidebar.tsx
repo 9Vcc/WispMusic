@@ -2,6 +2,7 @@ import { useSettingStore } from "@/lib/store/settingStore/settingStore";
 import type { SidebarEntryKey } from "@/lib/store/settingStore/settingStore";
 import { useUserStore } from "@/lib/store/userStore/userStore";
 import { Playlist } from "@/lib/types";
+import { GetThumbnail } from "@/lib/utils";
 import {
 	Add20Regular,
 	ArrowDownload20Filled,
@@ -387,7 +388,7 @@ export function AppSidebar() {
 														<div className="flex items-center gap-2">
 															<div className="relative size-6 overflow-hidden rounded-sm">
 																<img
-																	src={playlist.coverImgUrl}
+																	src={GetThumbnail(playlist.coverImgUrl, 60)}
 																	alt={`${playlist.name} 歌单封面`}
 																	className="size-6"
 																/>
@@ -407,7 +408,7 @@ export function AppSidebar() {
 														<div className="flex items-center gap-2">
 															<div className="relative size-6 overflow-hidden rounded-sm">
 																<img
-																	src={playlist.coverImgUrl}
+																	src={GetThumbnail(playlist.coverImgUrl, 60)}
 																	alt={`${playlist.name} 歌单封面`}
 																	className="size-6"
 																/>

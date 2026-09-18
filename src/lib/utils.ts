@@ -75,8 +75,16 @@ export async function getCropppedImg(imageSrc: string, pixelCrop: Area) {
 	});
 }
 
+/**
+ * 给图片 CDN 的 URL 追加缩略图参数。
+ *
+ * 只对 http(s) 直链追加：`data:` / `asset:` / `localmusic:` 这类本地资源不支持
+ * query 参数（拼上去可能取不到文件），而它们本来就是本地小图，无需缩放。
+ * 另外缩略图尺寸要和**实际渲染尺寸**匹配——用原图渲染 24px 的图标会让浏览器
+ * 按原尺寸解码（单张多花 1~7MB 位图），封面列表页尤其明显。
+ */
 export function GetThumbnail(url: string, w: number = 200, h?: number) {
-	if (url.startsWith("data:")) return url;
+	if (!url.startsWith("http")) return url;
 
 	return `${url}?param=${w}y${h ? h : w}`;
 }

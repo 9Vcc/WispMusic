@@ -355,6 +355,11 @@ export const MeshGradient: React.FC<{
 					// through instead; the shader writes alpha=1 everywhere, so
 					// once drawn the canvas is fully opaque anyway.
 					alpha: true,
+					// 场景只有一个全屏面片，不做任何深度比较，深度/模板附件纯属浪费：
+					// 默认帧缓冲按窗口尺寸分配（2560×1440 的 depth 附件就有 ~15MB，
+					// MSAA 下还要按样本数翻倍）。画面上完全等价。
+					depth: false,
+					stencil: false,
 					powerPreference: "high-performance",
 				}}
 			>
