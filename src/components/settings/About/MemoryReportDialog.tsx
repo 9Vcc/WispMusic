@@ -60,11 +60,11 @@ export function MemoryReportDialog({
 		if (report.processes) {
 			lines.push(
 				"",
-				`## 进程树（工作集合计 ${formatBytes(report.processes.totalWorkingSet)}）`,
+				`## 进程树（工作集合计 ${formatBytes(report.processes.totalWorkingSet)} / 私有合计 ${formatBytes(report.processes.totalPrivateBytes)}）`,
 			);
 			for (const process of report.processes.processes) {
 				lines.push(
-					`- ${process.name} (pid ${process.pid}) 工作集 ${formatBytes(process.workingSet)} / 私有 ${formatBytes(process.privateBytes)}`,
+					`- ${process.name}${process.role ? ` [${process.role}]` : ""} (pid ${process.pid}, 父 ${process.parentPid}) 工作集 ${formatBytes(process.workingSet)} / 私有 ${formatBytes(process.privateBytes)}`,
 				);
 			}
 		}
@@ -124,13 +124,17 @@ export function MemoryReportDialog({
 
 								<Section
 									title="进程树（工作集）"
-									note="Rust 侧读取：本进程 + 全部子进程，含 WebView2 的渲染 / GPU 进程"
+									note="Rust 侧读取：本进程 + 全部子进程；工作集之和含共享页重复计算，私有合计才是实数"
 								>
 									{report.processes ? (
 										report.processes.processes.map((process) => (
 											<Row
 												key={process.pid}
-												name={process.name}
+												name={
+													process.role
+														? `${process.name} · ${process.role}`
+														: process.name
+												}
 												detail={`pid ${process.pid} · 私有 ${formatBytes(process.privateBytes)}`}
 												bytes={process.workingSet}
 												max={report.processes?.processes[0]?.workingSet ?? 1}
@@ -215,8 +219,15 @@ function SummaryCards({ report }: { report: MemoryReport }) {
 				? formatBytes(report.processes.totalWorkingSet)
 				: "—",
 			detail: report.processes
-				? `${report.processes.processes.length} 个进程`
+				? `${report.processes.processes.length} 个进程 · 含共享页重复计算`
 				: "不可用",
+		},
+		{
+			label: "进程树私有合计",
+			value: report.processes
+				? formatBytes(report.processes.totalPrivateBytes)
+				: "—",
+			detail: "更接近实际占用 / 可回收量",
 		},
 		{
 			label: "V8 已用堆",
@@ -231,7 +242,7 @@ function SummaryCards({ report }: { report: MemoryReport }) {
 	];
 
 	return (
-		<div className="grid grid-cols-3 gap-3">
+		<div className="grid grid-cols-2 gap-3">
 			{cards.map((card) => (
 				<div
 					key={card.label}

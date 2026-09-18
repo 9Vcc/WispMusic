@@ -55,14 +55,19 @@ export interface MemorySample {
 
 export interface ProcessMemoryEntry {
 	pid: number;
+	parentPid: number;
 	name: string;
+	/** Chromium 进程角色：browser / renderer / gpu / network / audio / utility */
+	role: string;
 	workingSet: number;
 	privateBytes: number;
 }
 
 export interface ProcessMemoryReport {
 	selfPid: number;
+	/** 工作集之和：Chromium 各进程共享大量代码页，相加会重复计算共享部分，只看相对大小 */
 	totalWorkingSet: number;
+	/** 私有提交量之和：更接近「这套进程实际占了多少、关掉能还回多少」 */
 	totalPrivateBytes: number;
 	processes: ProcessMemoryEntry[];
 }

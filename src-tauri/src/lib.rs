@@ -409,10 +409,17 @@ fn mini_close(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    std::env::set_var(
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--disable-features=HardwareMediaKeyHandling",
-    );
+    // 诊断：设了 WISP_CDP_PORT 就为 WebView2 打开远程调试端口，用 CDP 抓堆快照
+    // （内存面板显示 V8 已用堆一百多 MB，而 JS 侧归因只有几 MB，剩下的成分必须
+    // 靠快照才能看清）。默认不设即关闭——正式用户不可能同时开了端口在跑。
+    let browser_arguments = match std::env::var("WISP_CDP_PORT") {
+        Ok(port) if !port.trim().is_empty() => format!(
+            "--disable-features=HardwareMediaKeyHandling --remote-debugging-port={} --remote-allow-origins=*",
+            port.trim()
+        ),
+        _ => "--disable-features=HardwareMediaKeyHandling".to_string(),
+    };
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", browser_arguments);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
