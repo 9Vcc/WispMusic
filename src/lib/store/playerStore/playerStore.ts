@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { SharedPlayerState } from "../../types/player";
 import { createJSONStorage, persist, subscribeWithSelector } from "zustand/middleware";
-import { idbStorage, localStorageWithDirtyCheck } from "../idbStorage";
+import { localStorageWithDirtyCheck, playerPlaylistStorage } from "../idbStorage";
 import { createLyricOffsetSlice } from "./playerStoreSlice/createLyricOffsetSlice";
 import { createLyricVersionSlice } from "./playerStoreSlice/createLyricVersionSlice";
 import { createPlaylistSlice } from "./playerStoreSlice/createPlaylistSlice";
@@ -26,7 +26,8 @@ export const usePlayerStore = create<SharedPlayerState>()(
 			})),
 			{
 				name: "player-store-idb",
-				storage: createJSONStorage(() => idbStorage),
+				// 存对象而非 JSON：避免每次 set 都完整序列化整条 playlist（见 idbStorage.ts）
+				storage: playerPlaylistStorage,
 				partialize: (state) => ({
 					playlist: state.playlist,
 				}),
