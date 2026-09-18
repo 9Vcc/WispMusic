@@ -18,8 +18,9 @@ import { ParseLyric, type ILyricLine } from "@/lib/utils/lyric-parser";
  * 最近加载的若干首——手动挑版本的人通常只在那几首之间来回。
  *
  * 注意：数字键的普通对象不保证插入顺序，必须另存一份顺序表才能正确淘汰。
+ * 上限 3：手动挑版本的人只在那几首之间来回，够覆盖前后切歌，常驻量压在 ~1.5MB 内。
  */
-const LYRIC_VERSION_LINES_LIMIT = 5;
+const LYRIC_VERSION_LINES_LIMIT = 3;
 const lyricVersionLinesOrder: number[] = [];
 
 function rememberLyricVersionLines(

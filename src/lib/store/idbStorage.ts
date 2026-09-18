@@ -2,6 +2,24 @@ import { get, set, del } from "idb-keyval";
 import type { PersistStorage, StateStorage } from "zustand/middleware";
 import type { SharedPlayerState } from "../types/player";
 
+/**
+ * 内容指纹：长度 + 32 位滚动哈希。
+ *
+ * 脏检查原本直接比对序列化后的字符串，这要求把**整段 JSON 常驻**在模块变量里
+ * （userStore 的 playlistList + artistList + albumList 可达 1~2MB 文本，UTF-16
+ * 下翻倍），而它不在任何 store 里、没有任何代码能释放它。改用指纹后只留几个
+ * 数字；代价是理论上存在哈希碰撞（碰撞的后果是跳过本次写入，而非数据损坏），
+ * 32 位 + 长度组合在实际使用中可忽略。
+ */
+function contentFingerprint(value: string): string {
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < value.length; index += 1) {
+		hash ^= value.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return `${value.length}:${(hash >>> 0).toString(36)}`;
+}
+
 const lastSavedString: Record<string, string> = {};
 
 export const idbStorage: StateStorage = {
@@ -9,13 +27,15 @@ export const idbStorage: StateStorage = {
 		return (await get(name)) ?? null;
 	},
 	setItem: async (name: string, value: string): Promise<void> => {
-		if (lastSavedString[name] === value) {
+		const fingerprint = contentFingerprint(value);
+		if (lastSavedString[name] === fingerprint) {
 			return;
 		}
-		lastSavedString[name] = value;
+		lastSavedString[name] = fingerprint;
 		await set(name, value);
 	},
 	removeItem: async (name: string): Promise<void> => {
+		delete lastSavedString[name];
 		await del(name);
 	},
 };
@@ -28,13 +48,15 @@ export const localStorageWithDirtyCheck: StateStorage = {
 		return localStorage.getItem(name);
 	},
 	setItem: (name: string, value: string): void => {
-		if (lastSavedLocal[name] === value) {
+		const fingerprint = contentFingerprint(value);
+		if (lastSavedLocal[name] === fingerprint) {
 			return;
 		}
-		lastSavedLocal[name] = value;
+		lastSavedLocal[name] = fingerprint;
 		localStorage.setItem(name, value);
 	},
 	removeItem: (name: string): void => {
+		delete lastSavedLocal[name];
 		localStorage.removeItem(name);
 	},
 };

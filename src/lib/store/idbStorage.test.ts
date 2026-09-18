@@ -19,7 +19,7 @@ vi.mock("idb-keyval", () => ({
 	},
 }));
 
-import { playerPlaylistStorage } from "./idbStorage";
+import { playerPlaylistStorage, idbStorage } from "./idbStorage";
 
 type PersistedPlaylist = Parameters<typeof playerPlaylistStorage.setItem>[1];
 
@@ -106,3 +106,43 @@ describe("playerPlaylistStorage", () => {
 		expect(writeCount.value).toBe(1);
 	});
 });
+
+/**
+ * 字符串存储（userStore 的 IDB 层）用「长度 + 哈希指纹」做脏检查：原先直接留着
+ * 上一份序列化字符串，那是 1~2MB 文本（UTF-16 翻倍）常驻模块变量，且不在任何
+ * store 里、没人能释放它。这里断言仍然只写一次、内容变了会写、删除后可重写。
+ */
+describe("idbStorage 的字符串脏检查", () => {
+	const NAME = "user-store-idb";
+
+	beforeEach(() => {
+		idbStore.clear();
+		writeCount.value = 0;
+	});
+
+	it("内容未变时跳过写入，内容变化时写入", async () => {
+		await idbStorage.setItem(NAME, '{"state":{"a":1}}');
+		await idbStorage.setItem(NAME, '{"state":{"a":1}}');
+		expect(writeCount.value).toBe(1);
+
+		await idbStorage.setItem(NAME, '{"state":{"a":2}}');
+		expect(writeCount.value).toBe(2);
+		expect(idbStore.get(NAME)).toBe('{"state":{"a":2}}');
+	});
+
+	it("长度相同但内容不同的字符串不会被误判为未变", async () => {
+		await idbStorage.setItem(NAME, "aaaa");
+		await idbStorage.setItem(NAME, "aaab");
+		expect(writeCount.value).toBe(2);
+	});
+
+	it("删除后可以重新写入同样的内容", async () => {
+		await idbStorage.setItem(NAME, "abc");
+		await idbStorage.removeItem(NAME);
+		writeCount.value = 0;
+
+		await idbStorage.setItem(NAME, "abc");
+		expect(writeCount.value).toBe(1);
+	});
+});
+

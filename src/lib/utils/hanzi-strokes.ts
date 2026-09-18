@@ -28,10 +28,13 @@ export interface HanziCharData {
 /**
  * 笔画字符缓存。Map 只增不减时，笔画歌词模式下每听一首中文歌都会永久留下新字，
  * 长期使用单调增长（全库体量约 20MB）。这里加 LRU 上限：命中即刷新，超出上限
- * 从最久未用淘汰。2000 字远超单曲工作集（一首歌通常 100~300 个不重复汉字），
- * 换歌仍在命中范围内，同时把常驻量压在数 MB 级。
+ * 从最久未用淘汰。
+ *
+ * 上限 800：单曲工作集是 100~300 个不重复汉字，800 字约等于「最近三首」的容量，
+ * 上一首/下一首往返仍在命中范围内；每字约 1~4KB 路径串，常驻量因此压在 ~3MB 内
+ * （原先 2000 字上限下约 6MB）。
  */
-const CHAR_CACHE_LIMIT = 2000;
+const CHAR_CACHE_LIMIT = 800;
 const charDataCache = createLruCache<string, Promise<HanziCharData | null>>(
 	CHAR_CACHE_LIMIT,
 );

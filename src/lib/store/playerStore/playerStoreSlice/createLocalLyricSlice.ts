@@ -37,8 +37,9 @@ export const createLocalLyricSlice: StateCreator<
 	 *
 	 * 每条记录持有整份解析后的歌词行（可达数百 KB），无上限时会随手动指定的
 	 * 歌曲数单调增长；用 LRU 只保留最近若干首（用户实际来回重听的总是那几首）。
+	 * 上限 4：够覆盖「上一首/下一首」往返，常驻量压在 ~2MB 内。
 	 */
-	const manualLyricCache = createLruCache<number, LocalLyricState>(8);
+	const manualLyricCache = createLruCache<number, LocalLyricState>(4);
 
 	const resetLocalLyric = () => {
 		localLyricRequestId += 1;
