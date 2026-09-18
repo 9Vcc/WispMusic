@@ -32,30 +32,41 @@ export function useAppWindow() {
 	const [isFullscreen, setIsFullscreen] = useState(false);
 
 	useEffect(() => {
+		let cancelled = false;
 		let unlistenResize: (() => void) | null = null;
 
 		import("@tauri-apps/api/window").then(async (module) => {
+			if (cancelled) return;
 			const window = module.getCurrentWindow();
 			setAppWindow(window);
 
 			const _isMaximized = await window.isMaximized();
-			setIsMaximized(_isMaximized);
-
 			const _isFullscreen = await window.isFullscreen();
+			if (cancelled) return;
+			setIsMaximized(_isMaximized);
 			setIsFullscreen(_isFullscreen);
 
 			const unlisten = await window.onResized(async () => {
 				const curMaximized = await window.isMaximized();
-				setIsMaximized(curMaximized);
 				const curFullscreen = await window.isFullscreen();
+				if (cancelled) return;
+				setIsMaximized(curMaximized);
 				setIsFullscreen(curFullscreen);
 			});
 
+			// onResized 是异步注册的：cleanup 可能已经先跑完（StrictMode 的
+			// setup→cleanup→setup 双循环），此时同步读取闭包变量拿到的仍是 null，
+			// 必须在这里补判一次并立刻注销，否则第一个监听器永远不会释放
+			if (cancelled) {
+				unlisten();
+				return;
+			}
 			unlistenResize = unlisten;
 		});
 
 		return () => {
-			if (unlistenResize) unlistenResize();
+			cancelled = true;
+			unlistenResize?.();
 		};
 	}, []);
 

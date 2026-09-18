@@ -69,9 +69,14 @@ async function runDownload(
 	let unlistenPaused: (() => void) | null = null;
 
 	const cleanupListeners = () => {
+		// 置空后再调用，使本函数可重入：complete / paused / finally 三条路径
+		// 可能都走到这里，重复 unlisten 会无效调用甚至报错
 		unlistenProgress?.();
 		unlistenComplete?.();
 		unlistenPaused?.();
+		unlistenProgress = null;
+		unlistenComplete = null;
+		unlistenPaused = null;
 	};
 
 	unlistenProgress = await listen<{
@@ -175,6 +180,10 @@ async function runDownload(
 			return { activeTasks: next };
 		});
 		toast.error(`下载失败：${e}`);
+	} finally {
+		// 兜底注销：正常返回时终止事件不保证先到（如下载被其他逻辑取消），
+		// 只靠事件回调清理会让三个监听器连同闭包长期挂住
+		cleanupListeners();
 	}
 }
 
