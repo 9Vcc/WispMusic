@@ -117,14 +117,45 @@ fn show_tray_menu_at(
     Ok(())
 }
 
-/// 在独立线程里确保托盘菜单窗口存在。
+/// 托盘菜单隐藏后空闲多久销毁。期间若菜单被重新显示（标记回 true）则跳过，
+/// 所以延迟只影响「彻底没有窗口」的时间点，不影响任何弹出操作。
+const TRAY_MENU_IDLE_DESTROY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 托盘菜单创建单飞标记：托盘 Enter 预热与右键补建都可能并发触发，
+/// 同一 label 的并发 build 会互相干扰（先建者赢，后者报「已存在」），
+/// 这里保证任意时刻最多一个线程在建，其余直接返回。
+static TRAY_MENU_CREATING: AtomicBool = AtomicBool::new(false);
+
+/// 单飞创建托盘菜单（任意线程可调；与预热线程并发时直接让位）。
+fn create_tray_menu_once(app: tauri::AppHandle) {
+    if TRAY_MENU_CREATING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let result = ensure_aux_window(&app, "tray-menu");
+    TRAY_MENU_CREATING.store(false, Ordering::Release);
+    if let Err(err) = result {
+        eprintln!("[tray] create tray-menu failed: {err}");
+    }
+}
+
+/// 延迟回收隐藏着的托盘菜单实例。
 ///
-/// **绝不能在托盘事件处理器的主线程里直接建 webview**：wry#583 会在 Windows 上
-/// 死锁（from_config 的文档同样写明要用 async 命令或独立线程）。
-fn ensure_tray_menu_async(app: tauri::AppHandle) {
+/// 什么时候调：菜单隐藏（失焦）或预热实例未被使用（Leave）。直接销毁会和
+/// 「弹出」动作竞态——托盘图标的鼠标事件（Enter/Leave）与焦点事件在窗口
+/// 刚显示的几百毫秒里交错，销毁可能正好插在 show 之后，把刚弹出的菜单打掉。
+/// 延迟 + 双重条件（未被重新显示 && 当前不可见）让回收永远不与显示冲突。
+fn schedule_tray_menu_cleanup(app: tauri::AppHandle) {
+    TRAY_MENU_SHOWN.store(false, Ordering::Release);
     std::thread::spawn(move || {
-        if let Err(err) = ensure_aux_window(&app, "tray-menu") {
-            eprintln!("[tray] create tray-menu failed: {err}");
+        std::thread::sleep(TRAY_MENU_IDLE_DESTROY_DELAY);
+        if TRAY_MENU_SHOWN.load(Ordering::Acquire) {
+            return; // 期间被重新显示了，仍在使用
+        }
+        if let Some(window) = app.get_webview_window("tray-menu") {
+            // 二次确认可见性：标记可能滞后于真实状态
+            if !window.is_visible().unwrap_or(true) {
+                let _ = window.destroy();
+            }
         }
     });
 }
@@ -577,7 +608,8 @@ pub fn run() {
                     // 预热：鼠标一进托盘图标就开始建窗口（懒创建），等真正右键时
                     // 多半已经就绪，菜单弹出不再有建 webview 的等待
                     TrayIconEvent::Enter { .. } => {
-                        ensure_tray_menu_async(tray.app_handle().clone());
+                        let app = tray.app_handle().clone();
+                        std::thread::spawn(move || create_tray_menu_once(app));
                     }
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -614,44 +646,54 @@ pub fn run() {
                                     eprintln!("[tray] show tray-menu failed: {err}");
                                 }
                             }
-                            // 悬停预热没赶上（比如进图标立刻就点了）：在线程里现建，
-                            // 建好后自己定位显示。主线程内建 webview 会死锁（wry#583）
+                            // 悬停预热没赶上（比如进图标立刻就点了）：在线程里
+                            // 单飞创建，然后等它就绪再定位显示（最多等 2s）。
+                            // 主线程内建 webview 会死锁（wry#583），必须丢线程
                             None => {
                                 let app_for_create = app.clone();
                                 std::thread::spawn(move || {
-                                    // 预热线程可能恰好也在建：先建的那个赢，输的一方
-                                    // ensure 会报「已存在」，此时再取一次照常显示
-                                    let window =
-                                        match ensure_aux_window(&app_for_create, "tray-menu") {
-                                            Ok(window) => Some(window),
-                                            Err(err) => {
-                                                eprintln!(
-                                                    "[tray] create tray-menu failed: {err}"
-                                                );
-                                                app_for_create
-                                                    .get_webview_window("tray-menu")
-                                            }
-                                        };
+                                    create_tray_menu_once(app_for_create.clone());
 
-                                    if let Some(window) = window {
-                                        if let Err(err) = show_tray_menu_at(
-                                            &window,
-                                            &app_for_create,
-                                            position,
-                                        ) {
-                                            eprintln!("[tray] show tray-menu failed: {err}");
+                                    let deadline =
+                                        std::time::Instant::now() + std::time::Duration::from_millis(2000);
+                                    let window = loop {
+                                        if let Some(window) =
+                                            app_for_create.get_webview_window("tray-menu")
+                                        {
+                                            break Some(window);
                                         }
+                                        if std::time::Instant::now() > deadline {
+                                            break None;
+                                        }
+                                        std::thread::sleep(
+                                            std::time::Duration::from_millis(20),
+                                        );
+                                    };
+
+                                    match window {
+                                        Some(window) => {
+                                            if let Err(err) = show_tray_menu_at(
+                                                &window,
+                                                &app_for_create,
+                                                position,
+                                            ) {
+                                                eprintln!(
+                                                    "[tray] show tray-menu failed: {err}"
+                                                );
+                                            }
+                                        }
+                                        None => eprintln!(
+                                            "[tray] tray-menu not ready after 2s, skip show"
+                                        ),
                                     }
                                 });
                             }
                         }
                     }
                     TrayIconEvent::Leave { .. } => {
-                        // 预热了但没点（或菜单已关）：回收掉，
+                        // 预热了但没点（或菜单已关）：延迟回收隐藏实例，
                         // 保持「不使用时没有辅助窗口」的形态
-                        if !TRAY_MENU_SHOWN.load(Ordering::Acquire) {
-                            destroy_aux_window(tray.app_handle(), "tray-menu");
-                        }
+                        schedule_tray_menu_cleanup(tray.app_handle().clone());
                     }
                     _ => {}
                 })
@@ -702,7 +744,7 @@ pub fn run() {
                     return;
                 }
                 if window.label() == "tray-menu" {
-                    // 托盘菜单被系统关掉（Alt+F4）= 用完，销毁
+                    // 托盘菜单被系统关掉（Alt+F4）= 用户显式关闭，立即销毁
                     TRAY_MENU_SHOWN.store(false, Ordering::Release);
                     destroy_aux_window(window.app_handle(), "tray-menu");
                     return;
@@ -719,11 +761,12 @@ pub fn run() {
                 });
             }
             WindowEvent::Focused(focused) => {
-                // 托盘菜单失焦 = 这次弹出用完了：销毁而不是隐藏。
-                // 下次鼠标进托盘图标（Enter）会预热重建，弹出不带冷启动
+                // 托盘菜单失焦 = 这次弹出结束：隐藏（与历史行为一致，避免与
+                // 弹出瞬间的焦点事件竞态），并调度延迟销毁把资源还回去。
+                // 3 秒内重新显示（标记回 true）则跳过销毁。
                 if !focused && window.label() == "tray-menu" {
-                    TRAY_MENU_SHOWN.store(false, Ordering::Release);
-                    destroy_aux_window(window.app_handle(), "tray-menu");
+                    let _ = window.hide();
+                    schedule_tray_menu_cleanup(window.app_handle().clone());
                 }
             }
             _ => {}
