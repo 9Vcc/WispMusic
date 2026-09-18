@@ -25,6 +25,11 @@ use tauri::{
 /// 主窗口保持隐藏，托盘可再次呼出。
 static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// 托盘菜单当前是否正显示着（show_tray_menu_at 置位，失焦/销毁清零）。
+/// 用静态标记而不是去查窗口可见性：托盘事件处理器在主线程上跑，
+/// 这里只需要一个无歧义的、不可能死锁的判断依据。
+static TRAY_MENU_SHOWN: AtomicBool = AtomicBool::new(false);
+
 /// 按需创建的辅助窗口规格（mini-player / desktop-lyric）。
 /// 它们不在 tauri.conf.json 里静态声明，否则启动时每个都会建一个 webview
 /// （各自的 JS 堆），即使用户从不打开。规格放在独立 JSON 里而不是写在 Rust
@@ -48,6 +53,10 @@ fn aux_window_spec(label: &str) -> Option<WindowConfig> {
 }
 
 /// 取辅助窗口；不存在则按 aux-windows.json 的规格现场创建。
+///
+/// 这里就是**实例缓存**：Tauri 的窗口注册表按 label 存活实例，存在即复用；
+/// 被销毁后 get_webview_window 返回 None，下次调用会按规格重建（与 EchoMusic
+/// 的 ensureXxxWindow 同一形态：缓存命中直接返回，未命中才建）。
 /// 只在「确实要显示该窗口」的路径上调用——纯推送状态的路径不能调它，
 /// 否则一个 emit 就会把窗口建出来，懒创建失去意义。
 ///
@@ -64,6 +73,18 @@ fn ensure_aux_window(app: &tauri::AppHandle, label: &str) -> Result<tauri::Webvi
         .map_err(|err| format!("build {label} window failed: {err}"))?
         .build()
         .map_err(|err| format!("create {label} window failed: {err}"))
+}
+
+/// 销毁辅助窗口（不存在则忽略）。
+///
+/// 这是「懒创建 + 实例缓存 + 用完即毁」的最后一层：销毁后渲染进程、JS 堆、
+/// DOM、WebGL 资源随窗口一起释放，而不是常驻到进程退出。下次需要时由
+/// ensure_aux_window 按规格重建。Tauri 的 destroy 经事件循环代理执行，
+/// 在事件处理器或命令线程里调用都安全（它不是创建，没有 wry#583 的问题）。
+fn destroy_aux_window(app: &tauri::AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.destroy();
+    }
 }
 
 /// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
@@ -88,6 +109,7 @@ fn show_tray_menu_at(
         .map_err(|err| err.to_string())?;
     window.show().map_err(|err| err.to_string())?;
     window.set_focus().map_err(|err| err.to_string())?;
+    TRAY_MENU_SHOWN.store(true, Ordering::Release);
 
     // 菜单弹出后通知主窗口推送最新播放器状态，
     // 否则托盘菜单只显示初始默认值
@@ -213,10 +235,10 @@ fn mini_restore_main(app: tauri::AppHandle) -> Result<(), String> {
     main.show().map_err(|e| e.to_string())?;
     let _ = main.set_focus();
     let _ = main.emit("app-foreground", ());
-    // 没进过 mini 模式时窗口不存在，不能为了 hide 把它建出来
-    if let Some(mini) = app.get_webview_window("mini-player") {
-        let _ = mini.hide();
-    }
+    // 退出 mini 模式 = mini 窗口不再使用：销毁而不是隐藏，把渲染进程还回去。
+    // 下次进 mini 模式由 mini_enter 按规格重建（ Destroyed 前窗口内的状态本就
+    // 不需要保留，重新显示时会由 aux_window_ready 重新拿一次完整快照）。
+    destroy_aux_window(&app, "mini-player");
     Ok(())
 }
 
@@ -368,28 +390,33 @@ async fn desktop_lyric_show(
     Ok(())
 }
 
-/// 隐藏桌面歌词窗口（保持窗口存活，可再次呼出）
+/// 关闭桌面歌词窗口。
+///
+/// 这个命令只会在**用户把开关关掉**时被调用（见 desktopLyricSync），所以语义
+/// 就是「不再使用」→ 销毁而不是隐藏，让渲染进程与歌词窗口的 JS 堆一并释放；
+/// 下次开启由 desktop_lyric_show 按规格重建，窗口挂载后的 ready 回执会重新
+/// 拿一次全量快照。从未打开过时窗口不存在，无需处理。
 #[tauri::command]
 fn desktop_lyric_hide(app: tauri::AppHandle) -> Result<(), String> {
-    // 从未打开过时窗口不存在，hide 无效即可，不必建出来再藏起来
-    if let Some(window) = app.get_webview_window("desktop-lyric") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
+    destroy_aux_window(&app, "desktop-lyric");
     Ok(())
 }
 
 /// 横竖切换/字号变更时的窗口缩放：保持窗口中心点不动（物理坐标），
 /// 并钳制在当前显示器范围内，一次 SetWindowPos 原子完成。
-/// 必须是 async：窗口异常缺失时会现场补建（见 ensure_aux_window）
+///
+/// 窗口不存在时直接忽略：现在窗口会被销毁（开关关闭 / Alt+F4），而 JS 侧的
+/// 可见性是近似记账，若在这里「补建」就可能把用户刚关掉的窗口又悄悄建回来。
+/// 是否显示只由 desktop_lyric_show 决定。
 #[tauri::command]
 async fn desktop_lyric_resize(
     app: tauri::AppHandle,
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    // 调用方认为窗口是可见的，缺失只可能是异常状态：按规格补建后仅调尺寸，
-    // 是否显示仍由 desktop_lyric_show 决定，不在这里擅自改变可见性
-    let window = ensure_aux_window(&app, "desktop-lyric")?;
+    let Some(window) = app.get_webview_window("desktop-lyric") else {
+        return Ok(());
+    };
 
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let pos = window.outer_position().map_err(|e| e.to_string())?;
@@ -440,6 +467,10 @@ fn desktop_lyric_command(
 }
 
 /// 隐藏 mini 窗口但保持 mini 模式激活（主窗口仍隐藏，托盘左击可再次呼出）
+///
+/// **这里必须只隐藏、不能销毁**：MINI_MODE_ACTIVE 为 true 时托盘左击与二次启动
+/// 都按「窗口已存在」直接呼出（只 get 不 ensure），销毁会让这两条路径静默失效。
+/// 窗口的销毁时机是退出 mini 模式（mini_restore_main）。
 #[tauri::command]
 fn mini_close(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(mini) = app.get_webview_window("mini-player") {
@@ -588,24 +619,38 @@ pub fn run() {
                             None => {
                                 let app_for_create = app.clone();
                                 std::thread::spawn(move || {
-                                    match ensure_aux_window(&app_for_create, "tray-menu") {
-                                        Ok(window) => {
-                                            if let Err(err) = show_tray_menu_at(
-                                                &window,
-                                                &app_for_create,
-                                                position,
-                                            ) {
+                                    // 预热线程可能恰好也在建：先建的那个赢，输的一方
+                                    // ensure 会报「已存在」，此时再取一次照常显示
+                                    let window =
+                                        match ensure_aux_window(&app_for_create, "tray-menu") {
+                                            Ok(window) => Some(window),
+                                            Err(err) => {
                                                 eprintln!(
-                                                    "[tray] show tray-menu failed: {err}"
+                                                    "[tray] create tray-menu failed: {err}"
                                                 );
+                                                app_for_create
+                                                    .get_webview_window("tray-menu")
                                             }
+                                        };
+
+                                    if let Some(window) = window {
+                                        if let Err(err) = show_tray_menu_at(
+                                            &window,
+                                            &app_for_create,
+                                            position,
+                                        ) {
+                                            eprintln!("[tray] show tray-menu failed: {err}");
                                         }
-                                        Err(err) => eprintln!(
-                                            "[tray] create tray-menu failed: {err}"
-                                        ),
                                     }
                                 });
                             }
+                        }
+                    }
+                    TrayIconEvent::Leave { .. } => {
+                        // 预热了但没点（或菜单已关）：回收掉，
+                        // 保持「不使用时没有辅助窗口」的形态
+                        if !TRAY_MENU_SHOWN.load(Ordering::Acquire) {
+                            destroy_aux_window(tray.app_handle(), "tray-menu");
                         }
                     }
                     _ => {}
@@ -632,23 +677,37 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
+            // 窗口销毁策略（懒创建 + 实例缓存 + 用完即毁）：
+            // · main：唯一 eager 且常驻的窗口，关闭=藏进托盘，永不销毁；
+            // · mini-player：mini 模式期间的关闭只隐藏（托盘左击还要再呼出），
+            //   退出 mini 模式（mini_restore_main）时销毁；
+            // · desktop-lyric：用户关掉（开关或 Alt+F4）即销毁；
+            // · tray-menu：失焦即用完，销毁（Enter 预热会兜住下次弹出的冷启动）。
+            //   销毁后下次需要时由 ensure_aux_window 按规格重建，调用方无感。
             WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
                 if window.label() == "mini-player" {
                     // mini 窗口被关闭（Alt+F4 等）→ 仅隐藏并保持 mini 模式，
                     // 托盘左击可再次呼出
+                    api.prevent_close();
                     let _ = window.hide();
                     return;
                 }
                 if window.label() == "desktop-lyric" {
-                    // 桌面歌词被关闭（Alt+F4 等）→ 仅隐藏，并通知主窗口把
-                    // 开关设置同步回 false（设置是唯一可信源）
-                    let _ = window.hide();
+                    // 用户关掉桌面歌词 = 不再使用：先同步开关设置回 false
+                    // （设置是唯一可信源），再销毁。不 prevent_close，
+                    // 默认关闭行为就是销毁窗口本身
                     let _ = window
                         .app_handle()
                         .emit_to("main", "desktop-lyric-hidden", ());
                     return;
                 }
+                if window.label() == "tray-menu" {
+                    // 托盘菜单被系统关掉（Alt+F4）= 用完，销毁
+                    TRAY_MENU_SHOWN.store(false, Ordering::Release);
+                    destroy_aux_window(window.app_handle(), "tray-menu");
+                    return;
+                }
+                api.prevent_close();
                 let _ = window.emit("app-background", ());
 
                 std::thread::spawn({
@@ -660,8 +719,11 @@ pub fn run() {
                 });
             }
             WindowEvent::Focused(focused) => {
+                // 托盘菜单失焦 = 这次弹出用完了：销毁而不是隐藏。
+                // 下次鼠标进托盘图标（Enter）会预热重建，弹出不带冷启动
                 if !focused && window.label() == "tray-menu" {
-                    let _ = window.hide();
+                    TRAY_MENU_SHOWN.store(false, Ordering::Release);
+                    destroy_aux_window(window.app_handle(), "tray-menu");
                 }
             }
             _ => {}
