@@ -19,10 +19,18 @@ import { createLruCache } from "./lru";
  */
 export const SWR_CACHE_LIMIT = 64;
 
+/**
+ * 最近一次创建的缓存实例（provider 在根部只调用一次）。
+ * 仅供调试面板做归因——除了读键与取值不做别的事，也不常驻任何引用。
+ */
+let activeCache: ReturnType<typeof createLruCache<string, State<unknown>>> | null =
+	null;
+
 export function createSwrLruCache(
 	limit: number = SWR_CACHE_LIMIT,
 ): Cache<unknown> {
 	const store = createLruCache<string, State<unknown>>(limit);
+	activeCache = store;
 
 	return {
 		// 数组本身可迭代；SWR 只做一次遍历，无需返回 Map 的活迭代器
@@ -35,4 +43,17 @@ export function createSwrLruCache(
 			store.delete(key);
 		},
 	};
+}
+
+/** 诊断用：当前缓存里的键与各自持有的数据（键按最近使用顺序排列） */
+export function getSwrCacheSnapshot(): {
+	key: string;
+	data: unknown;
+}[] {
+	if (!activeCache) return [];
+
+	return activeCache.keys().map((key) => ({
+		key,
+		data: activeCache?.get(key)?.data,
+	}));
 }

@@ -12,6 +12,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { registerWebglCanvas } from "@/lib/debug/graphics-registry";
 import { fsSource, vsSource } from "./shaders";
 
 const GRID_SIZE = 5;
@@ -84,7 +85,11 @@ const BackgroundPlane: React.FC<BackgroundPlaneProps> = ({
 	const targetColorsRef = useRef(makeColors(colors));
 	const displayColorsRef = useRef(makeColors(colors));
 	const lastLoggedTextureUuidRef = useRef<string | null>(null);
-	const { size } = useThree();
+	const { size, gl } = useThree();
+
+	// 登记到调试用登记表：WebGL 画布的内存大头是按尺寸分配的默认帧缓冲
+	// （见 lib/debug/graphics-registry.ts），只数 canvas 元素看不出这块量
+	useEffect(() => registerWebglCanvas(gl.domElement), [gl]);
 	// Random per-mount offsets: the R3F clock restarts at 0 whenever a song
 	// change remounts the canvas, so without these every playback would open
 	// on the exact same flow-field configuration. timeOffset enters the

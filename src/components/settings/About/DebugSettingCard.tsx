@@ -12,6 +12,7 @@ import {
 } from "@/components/update/update-dialog";
 import type { AppUpdateInfo } from "@/lib/services/appUpdate";
 import { useSettingStore } from "@/lib/store/settingStore/settingStore";
+import { MemoryReportDialog } from "./MemoryReportDialog";
 
 /** 连续点击「关于」解锁调试模式所需的次数（与版本号彩蛋同规则） */
 export const DEBUG_UNLOCK_CLICK_COUNT = 5;
@@ -40,13 +41,15 @@ const PREVIEW_ITEMS: { phase: UpdatePhase; desc: string }[] = [
 /**
  * 调试模式（隐藏功能）：默认不可见，需在设置页「关于」分组标题上
  * 2 秒内连点 5 次解锁（解锁状态持久化）。开启调试模式后可手动触发
- * 更新弹窗预览，验证初始 / 下载中 / 即将重启三种状态下的显示效果。
+ * 更新弹窗预览，验证初始 / 下载中 / 即将重启三种状态下的显示效果，
+ * 以及对 WebView 内存做一次归因采样。
  */
 export function DebugSettingCard() {
 	const debugMode = useSettingStore((s) => s.debug.enabled);
 	const setDebugMode = useSettingStore((s) => s.setDebugMode);
 	const [previewOpen, setPreviewOpen] = useState(false);
 	const [previewPhase, setPreviewPhase] = useState<UpdatePhase>("idle");
+	const [memoryOpen, setMemoryOpen] = useState(false);
 
 	function openPreview(phase: UpdatePhase) {
 		setPreviewPhase(phase);
@@ -66,18 +69,30 @@ export function DebugSettingCard() {
 						onCheckedChange={(checked) => void setDebugMode(checked)}
 					/>
 				</SettingsExpandarDetail>
-				{debugMode &&
-					PREVIEW_ITEMS.map((item) => (
-						<SettingsExpandarDetail key={item.phase} desc={item.desc}>
+				{debugMode && (
+					<>
+						{PREVIEW_ITEMS.map((item) => (
+							<SettingsExpandarDetail key={item.phase} desc={item.desc}>
+								<Button
+									variant="winui"
+									size="sm"
+									onClick={() => openPreview(item.phase)}
+								>
+									预览
+								</Button>
+							</SettingsExpandarDetail>
+						))}
+						<SettingsExpandarDetail desc="内存归因：进程树工作集 + JS 侧逐项占比">
 							<Button
 								variant="winui"
 								size="sm"
-								onClick={() => openPreview(item.phase)}
+								onClick={() => setMemoryOpen(true)}
 							>
-								预览
+								采样
 							</Button>
 						</SettingsExpandarDetail>
-					))}
+					</>
+				)}
 			</SettingsExpandar>
 			<UpdateDialog
 				info={createPreviewInfo()}
@@ -85,6 +100,10 @@ export function DebugSettingCard() {
 				onDismiss={() => setPreviewOpen(false)}
 				preview
 				initialPhase={previewPhase}
+			/>
+			<MemoryReportDialog
+				open={memoryOpen}
+				onClose={() => setMemoryOpen(false)}
 			/>
 		</>
 	);
