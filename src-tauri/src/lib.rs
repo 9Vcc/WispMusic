@@ -5,6 +5,7 @@ mod download;
 mod local_lyric;
 mod local_music;
 mod ncm;
+mod process_memory;
 mod smtc;
 mod thumbbar;
 mod unm;
@@ -53,16 +54,12 @@ fn aux_window_spec(label: &str) -> Option<WindowConfig> {
 /// **调用方必须是 async command**：tauri 的 from_config 文档写明，Windows 上
 /// 在同步命令或事件处理器里创建 webview 会死锁（wry#583，主线程等自己做窗口
 /// 创建的消息循环）。异步命令跑在运行时线程上，正是官方推荐的写法。
-fn ensure_aux_window(
-    app: &tauri::AppHandle,
-    label: &str,
-) -> Result<tauri::WebviewWindow, String> {
+fn ensure_aux_window(app: &tauri::AppHandle, label: &str) -> Result<tauri::WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(label) {
         return Ok(window);
     }
 
-    let spec =
-        aux_window_spec(label).ok_or_else(|| format!("no window spec for {label}"))?;
+    let spec = aux_window_spec(label).ok_or_else(|| format!("no window spec for {label}"))?;
     WebviewWindowBuilder::from_config(app, &spec)
         .map_err(|err| format!("build {label} window failed: {err}"))?
         .build()
@@ -662,6 +659,7 @@ pub fn run() {
             local_music::get_default_music_dir,
             local_lyric::read_text_file,
             local_lyric::find_sibling_lyric,
+            process_memory::get_process_memory_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
