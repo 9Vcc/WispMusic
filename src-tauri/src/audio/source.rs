@@ -146,7 +146,9 @@ async fn resolve_remote_audio_source(
             let streamable = !matches!(stream_format, StreamFormat::M4a | StreamFormat::Mp4)
                 || content_length.is_some();
             if streamable {
-                let shared = StreamingBuffer::new(content_length);
+                // 把最终落盘路径交给缓冲：顺序下载完成后它会打开该文件接管读取，
+                // 释放整份内存副本（见 StreamingBuffer::finish）
+                let shared = StreamingBuffer::new(content_length, Some(final_path.clone()));
                 shared.append(&first_chunk)?;
                 let reader = StreamingReader::new(
                     Arc::clone(&shared),

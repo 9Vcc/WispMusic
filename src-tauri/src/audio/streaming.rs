@@ -1,7 +1,9 @@
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use rodio::{decoder::DecoderError, Decoder, Source};
 use std::{
+    fs::File,
     io::{self, ErrorKind, Read, Seek, SeekFrom},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Condvar, Mutex,
@@ -37,6 +39,11 @@ struct StreamingState {
     tail_start: u64,
     tail_data: Vec<u8>,
     tail_done: bool,
+    /// 下载完成并落盘后打开的只读句柄。一旦就位，读取改从磁盘进行、
+    /// data 立即释放（长无损单曲可省下数十 MB 常驻）。
+    /// 句柄保持打开还有一层作用：即使文件随后被缓存淘汰逻辑删除，
+    /// 已打开的句柄仍可继续读到全部数据，当前播放不会中断。
+    file: Option<File>,
 }
 
 pub(super) struct StreamingBuffer {
@@ -44,10 +51,12 @@ pub(super) struct StreamingBuffer {
     available: Condvar,
     /// reader 读到未下载边界之外时发出的快进目标字节位置；None 表示无需快进。
     fast_forward_tx: watch::Sender<Option<u64>>,
+    /// 顺序下载最终落盘的路径。None 表示该缓冲没有对应磁盘文件，永不回退读盘。
+    final_path: Option<PathBuf>,
 }
 
 impl StreamingBuffer {
-    pub(super) fn new(total_len: Option<u64>) -> Arc<Self> {
+    pub(super) fn new(total_len: Option<u64>, final_path: Option<PathBuf>) -> Arc<Self> {
         let (fast_forward_tx, _) = watch::channel(None);
         // 已知总长度就一次性预留，避免逐次倍增扩容带来的瞬时双份占用
         let reserve_bytes = total_len
@@ -63,9 +72,11 @@ impl StreamingBuffer {
                 tail_start: 0,
                 tail_data: Vec::new(),
                 tail_done: true,
+                file: None,
             }),
             available: Condvar::new(),
             fast_forward_tx,
+            final_path,
         })
     }
 
@@ -74,6 +85,10 @@ impl StreamingBuffer {
             .state
             .lock()
             .map_err(|_| "streaming audio buffer lock poisoned".to_string())?;
+        // 已切换到磁盘读取：内存副本不再维护（此时顺序下载也已结束）
+        if state.file.is_some() {
+            return Ok(());
+        }
         state.data.extend_from_slice(chunk);
         // 主下载追平 tail 区域后合并，避免重复占内存
         if !state.tail_data.is_empty() {
@@ -93,6 +108,22 @@ impl StreamingBuffer {
     pub(super) fn finish(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.complete = true;
+            // 顺序下载已把同一份字节按序写进落盘文件（写盘与 append 用的是同
+            // 一批 chunk），因此文件内容与 data 完全一致：打开句柄接管读取，
+            // 释放整份内存副本。打开失败或长度对不上时保留 data 继续用内存，
+            // 行为退回改造前。
+            if let Some(path) = self.final_path.as_ref() {
+                if let Ok(file) = File::open(path) {
+                    let file_len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    if file_len >= state.data.len() as u64 {
+                        state.total_len = Some(file_len);
+                        state.data = Vec::new();
+                        state.tail_data = Vec::new();
+                        state.tail_done = true;
+                        state.file = Some(file);
+                    }
+                }
+            }
             self.available.notify_all();
         }
     }
@@ -140,6 +171,10 @@ impl StreamingBuffer {
             .state
             .lock()
             .map_err(|_| "streaming audio buffer lock poisoned".to_string())?;
+        // 已切换到磁盘读取：reader 不再需要快进，丢弃即可
+        if state.file.is_some() {
+            return Ok(());
+        }
         // 超限即中止本次 Range 流：调用方会置 tail_done，reader 读到已缓存的
         // tail 末尾后重新发起 Range（reset_tail 先回收旧缓冲），内存有界
         if state.tail_data.len() >= TAIL_MAX_BYTES {
@@ -158,6 +193,21 @@ impl StreamingBuffer {
             state.tail_done = true;
             self.available.notify_all();
         }
+    }
+
+    /// 当前内存副本占用（测试断言「落盘后已释放」用）
+    #[cfg(test)]
+    pub(super) fn debug_memory_len(&self) -> usize {
+        self.state.lock().map(|state| state.data.len()).unwrap_or(0)
+    }
+
+    /// 是否已切换到磁盘读取（测试断言用）
+    #[cfg(test)]
+    pub(super) fn debug_is_file_backed(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.file.is_some())
+            .unwrap_or(false)
     }
 }
 
@@ -187,11 +237,11 @@ impl StreamingReader {
         self.latest_request_id.load(Ordering::SeqCst) != self.request_id
     }
 
-    /// 返回流总长度：下载完成时用实际长度，否则用 Content-Length。
+    /// 返回流总长度：下载完成时用实际长度（落盘后即文件长度），否则用 Content-Length。
     pub(super) fn byte_len(&self) -> Option<u64> {
         let state = self.shared.state.lock().ok()?;
         if state.complete {
-            Some(state.data.len() as u64)
+            Some(state.total_len.unwrap_or(state.data.len() as u64))
         } else {
             state.total_len
         }
@@ -213,6 +263,18 @@ impl Read for StreamingReader {
             .state
             .lock()
             .map_err(|_| io::Error::new(ErrorKind::Other, "streaming audio buffer poisoned"))?;
+
+        // 落盘后从磁盘读：每次都按绝对位置 seek，因此多个 decoder 共用
+        // 同一句柄（如交叉淡化时新旧两套管线）不会互相串位
+        if let Some(file) = state.file.as_mut() {
+            if self.is_cancelled() {
+                return Err(Self::cancelled_error());
+            }
+            file.seek(SeekFrom::Start(self.position))?;
+            let read_len = file.read(output)?;
+            self.position += read_len as u64;
+            return Ok(read_len);
+        }
 
         loop {
             if self.is_cancelled() {
@@ -295,7 +357,10 @@ impl Seek for StreamingReader {
                         })?;
                     state = next_state;
                 }
-                state.data.len() as i128 + offset as i128
+                // 落地后 total_len 已被 finish 校正为文件实际长度，
+                // 未落地时它就是 Content-Length
+                let end = state.total_len.unwrap_or(state.data.len() as u64);
+                end as i128 + offset as i128
             }
         };
 
@@ -536,10 +601,23 @@ fn looks_like_iso_bmff(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn temp_stream_file(name: &str, bytes: &[u8]) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "wisp-streaming-test-{}-{name}.bin",
+            std::process::id()
+        ));
+        let mut file = File::create(&path).expect("create temp stream file");
+        file.write_all(bytes).expect("write temp stream file");
+        file.flush().expect("flush temp stream file");
+        path
+    }
 
     #[test]
     fn streaming_reader_reads_and_seeks_buffered_data() {
-        let shared = StreamingBuffer::new(None);
+        let shared = StreamingBuffer::new(None, None);
         shared.append(b"abcdef").expect("append should succeed");
         shared.finish();
         let latest_request_id = Arc::new(AtomicU64::new(1));
@@ -564,12 +642,12 @@ mod tests {
 
     #[test]
     fn streaming_reader_byte_len_prefers_actual_length_when_complete() {
-        let shared = StreamingBuffer::new(Some(100));
+        let shared = StreamingBuffer::new(Some(100), None);
         let latest_request_id = Arc::new(AtomicU64::new(1));
         let reader = StreamingReader::new(shared, latest_request_id, 1);
         assert_eq!(reader.byte_len(), Some(100));
 
-        let shared = StreamingBuffer::new(None);
+        let shared = StreamingBuffer::new(None, None);
         shared.append(b"abcdef").expect("append should succeed");
         shared.finish();
         let latest_request_id = Arc::new(AtomicU64::new(1));
@@ -579,7 +657,7 @@ mod tests {
 
     #[test]
     fn streaming_reader_stops_waiting_when_request_is_stale() {
-        let shared = StreamingBuffer::new(None);
+        let shared = StreamingBuffer::new(None, None);
         let latest_request_id = Arc::new(AtomicU64::new(2));
         let mut reader = StreamingReader::new(shared, latest_request_id, 1);
         let mut output = [0u8; 4];
@@ -588,6 +666,118 @@ mod tests {
             .read(&mut output)
             .expect_err("stale request should cancel read");
         assert_eq!(error.kind(), ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn streaming_reader_switches_to_disk_and_releases_memory_after_finish() {
+        let payload: Vec<u8> = (0..64u8).cycle().take(4096).collect();
+        let path = temp_stream_file("disk-readback", &payload);
+        let shared = StreamingBuffer::new(Some(payload.len() as u64), Some(path.clone()));
+        shared.append(&payload).expect("append should succeed");
+
+        let latest_request_id = Arc::new(AtomicU64::new(7));
+        let mut reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 7);
+
+        // 落盘前：走内存副本
+        let mut output = [0u8; 8];
+        assert_eq!(reader.read(&mut output).expect("read should succeed"), 8);
+        assert_eq!(&output, &payload[..8]);
+        assert!(!shared.debug_is_file_backed());
+        assert_eq!(shared.debug_memory_len(), payload.len());
+
+        shared.finish();
+
+        // 落盘后：内存副本释放，读取改走文件
+        assert!(shared.debug_is_file_backed());
+        assert_eq!(shared.debug_memory_len(), 0);
+        assert_eq!(reader.byte_len(), Some(payload.len() as u64));
+
+        assert_eq!(reader.read(&mut output).expect("read should succeed"), 8);
+        assert_eq!(&output, &payload[8..16]);
+
+        // 回跳重读：位置由 reader 自己维护，与句柄当前偏移无关
+        assert_eq!(reader.seek(SeekFrom::Start(0)).expect("seek"), 0);
+        assert_eq!(reader.read(&mut output).expect("read should succeed"), 8);
+        assert_eq!(&output, &payload[..8]);
+
+        // SeekFrom::End 用的是落盘校正后的实际长度
+        let tail_start = reader
+            .seek(SeekFrom::End(-4))
+            .expect("seek from end should succeed");
+        assert_eq!(tail_start, payload.len() as u64 - 4);
+        let mut tail = [0u8; 8];
+        assert_eq!(reader.read(&mut tail).expect("read should succeed"), 4);
+        assert_eq!(&tail[..4], &payload[payload.len() - 4..]);
+        assert_eq!(reader.read(&mut tail).expect("eof should succeed"), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_backed_reads_are_position_independent_across_readers() {
+        let payload: Vec<u8> = (0..32u8).cycle().take(1024).collect();
+        let path = temp_stream_file("shared-handle", &payload);
+        let shared = StreamingBuffer::new(Some(payload.len() as u64), Some(path.clone()));
+        shared.append(&payload).expect("append should succeed");
+        shared.finish();
+        assert!(shared.debug_is_file_backed());
+
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let mut first = StreamingReader::new(Arc::clone(&shared), Arc::clone(&latest_request_id), 1);
+        let mut second = StreamingReader::new(Arc::clone(&shared), Arc::clone(&latest_request_id), 1);
+
+        first.seek(SeekFrom::Start(8)).expect("seek first");
+        second.seek(SeekFrom::Start(64)).expect("seek second");
+
+        let mut a = [0u8; 4];
+        let mut b = [0u8; 4];
+        assert_eq!(first.read(&mut a).expect("read first"), 4);
+        assert_eq!(second.read(&mut b).expect("read second"), 4);
+        assert_eq!(&a, &payload[8..12]);
+        assert_eq!(&b, &payload[64..68]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn streaming_buffer_keeps_memory_when_disk_file_is_missing() {
+        let payload: Vec<u8> = (0..32u8).cycle().take(512).collect();
+        let mut missing = std::env::temp_dir();
+        missing.push(format!(
+            "wisp-streaming-test-{}-missing.bin",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+
+        let shared = StreamingBuffer::new(Some(payload.len() as u64), Some(missing));
+        shared.append(&payload).expect("append should succeed");
+        shared.finish();
+
+        // 文件打不开时保留内存副本，行为退回改造前
+        assert!(!shared.debug_is_file_backed());
+        assert_eq!(shared.debug_memory_len(), payload.len());
+
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let mut reader = StreamingReader::new(shared, latest_request_id, 1);
+        let mut output = [0u8; 512];
+        assert_eq!(reader.read(&mut output).expect("read should succeed"), 512);
+        assert_eq!(&output[..], &payload[..]);
+    }
+
+    #[test]
+    fn streaming_buffer_keeps_memory_when_disk_file_is_shorter() {
+        let payload: Vec<u8> = (0..64u8).cycle().take(1024).collect();
+        let path = temp_stream_file("short-file", &payload[..256]);
+
+        let shared = StreamingBuffer::new(Some(payload.len() as u64), Some(path.clone()));
+        shared.append(&payload).expect("append should succeed");
+        shared.finish();
+
+        // 磁盘文件比内存副本短说明落盘不可信，继续用内存，避免读到截断内容
+        assert!(!shared.debug_is_file_backed());
+        assert_eq!(shared.debug_memory_len(), payload.len());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
