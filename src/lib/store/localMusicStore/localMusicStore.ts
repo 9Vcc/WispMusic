@@ -4,9 +4,13 @@ import { getLocalMusicStore } from "./localMusic.persistence";
 import {
 	DownloadedSongToLocalTrack,
 	scanLocalMusic,
+	toLocalMatchedSong,
 } from "@/lib/services/localMusic";
 import type { Song } from "@/lib/types";
 import type { DownloadedSong } from "@/lib/types/download";
+
+/** LocalTrackMatchedSong 的字段数（id/name/ar/al/dt）：多于它说明是旧版整份 Song */
+const MATCHED_SONG_KEY_COUNT = 5;
 
 interface LocalMusicState {
 	tracks: LocalTrack[];
@@ -76,11 +80,33 @@ export const useLocalMusicStore = create<LocalMusicState>((set, get) => ({
 		// 先剥离让后续读写恢复轻量，再后台重扫一次由 Rust 端把封面落盘为图片文件
 		const rawTracks = tracks ?? [];
 		const hasLegacyCovers = rawTracks.some((t) => t.coverArtBase64);
-		const cleanTracks = hasLegacyCovers
+		const cleanedTracks = hasLegacyCovers
 			? rawTracks.map(({ coverArtBase64: _legacy, ...rest }) => rest)
 			: rawTracks;
 
-		let needsSave = hasLegacyCovers;
+		// 迁移：neteaseMatch.song 曾经内嵌整份 Song（单条 2~3KB，其中 privilege、
+		// 各档位 url/size、originSongSimpleData 等界面从不消费），这里压成投影并
+		// 回写，让内存与 local-music.json 同时瘦下来。不触发重扫——数据没丢。
+		const hasLegacyMatch = cleanedTracks.some(
+			(track) =>
+				track.neteaseMatch &&
+				Object.keys(track.neteaseMatch.song).length > MATCHED_SONG_KEY_COUNT,
+		);
+		const cleanTracks = hasLegacyMatch
+			? cleanedTracks.map((track) =>
+					track.neteaseMatch
+						? {
+								...track,
+								neteaseMatch: {
+									...track.neteaseMatch,
+									song: toLocalMatchedSong(track.neteaseMatch.song),
+								},
+							}
+						: track,
+				)
+			: cleanedTracks;
+
+		let needsSave = hasLegacyCovers || hasLegacyMatch;
 		if (!scanDirs || scanDirs.length === 0) {
 			try {
 				const { getDefaultMusicDir } = await import("@/lib/services/localMusic");
@@ -214,9 +240,12 @@ export const useLocalMusicStore = create<LocalMusicState>((set, get) => ({
 				track.filePath === filePath
 					? {
 							...track,
+							// 只留投影而不是整份 Song：详情只在展示与判重时用到其中 5 个
+							// 字段，完整 Song 会让本地曲库常驻内存与 local-music.json
+							// 都膨胀数倍（见 LocalTrackMatchedSong 注释）
 							neteaseMatch: {
 								songId: song.id,
-								song,
+								song: toLocalMatchedSong(song),
 								matchedAt: Date.now(),
 							},
 						}

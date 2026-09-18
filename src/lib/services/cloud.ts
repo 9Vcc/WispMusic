@@ -13,7 +13,6 @@ interface UserCloudResponse {
 
 export interface CloudData {
 	songs: Song[];
-	items: CloudSongItem[];
 	count: number;
 	size: number; // 已用容量，字节
 	maxSize: number; // 总容量，字节
@@ -72,7 +71,9 @@ export async function getUserCloudAll(): Promise<CloudData> {
 		offset += pageSize;
 	}
 
-	return { songs: items.map(cloudItemToSong), items, count, size, maxSize };
+	// 只返回转换后的 songs：items 是接口原始体，界面全程未消费，而它会被 SWR
+	// 缓存整份留住（云盘上万首时是十几 MB）。需要原始字段时在循环内就地取用。
+	return { songs: items.map(cloudItemToSong), count, size, maxSize };
 }
 
 // 删除云盘歌曲，id 可多个

@@ -1,10 +1,30 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { LocalTrack } from "../types/localMusic";
-import type { Song } from "../types";
+import type { LocalTrack, LocalTrackMatchedSong } from "../types/localMusic";
+import type { Album, Artist, Song } from "../types";
 import type { DownloadedSong } from "../types/download";
 
 export async function scanLocalMusic(dir: string): Promise<LocalTrack[]> {
 	return invoke<LocalTrack[]>("scan_local_music", { dir });
+}
+
+/**
+ * 把完整 Song 压成 `neteaseMatch` 需要的投影（见 LocalTrackMatchedSong 注释）。
+ * 搜索/云盘等接口可能只给 `artists/album/duration` 别名，这里统一回退。
+ */
+export function toLocalMatchedSong(song: Song): LocalTrackMatchedSong {
+	const raw = song as Song & {
+		artists?: Artist[];
+		album?: Album;
+		duration?: number;
+	};
+
+	return {
+		id: raw.id,
+		name: raw.name,
+		ar: raw.ar ?? raw.artists ?? [],
+		al: raw.al ?? raw.album ?? { id: 0, name: "" },
+		dt: raw.dt ?? raw.duration ?? 0,
+	};
 }
 
 export function DownloadedSongToLocalTrack(
@@ -28,7 +48,7 @@ export function DownloadedSongToLocalTrack(
 		},
 		neteaseMatch: {
 			songId: song.id,
-			song,
+			song: toLocalMatchedSong(song),
 			matchedAt: downloadedSong.downloadedAt,
 		},
 	};
@@ -36,20 +56,18 @@ export function DownloadedSongToLocalTrack(
 
 export function LocalTrackToSong(track: LocalTrack): Song {
 	const matchedSong = track.neteaseMatch?.song;
-	const matchedAlbum = matchedSong?.al || matchedSong?.album;
-	const matchedArtists = matchedSong?.ar || matchedSong?.artists;
 
 	return {
 		id: -Math.abs(hashString(track.filePath)),
 		name: matchedSong?.name || track.title,
-		ar: matchedArtists?.length
-			? matchedArtists
+		ar: matchedSong?.ar?.length
+			? matchedSong.ar
 			: [{ id: 0, name: track.artist }],
 		al: {
-			id: matchedAlbum?.id || 0,
-			name: matchedAlbum?.name || track.album,
+			id: matchedSong?.al?.id || 0,
+			name: matchedSong?.al?.name || track.album,
 			picUrl:
-				matchedAlbum?.picUrl ||
+				matchedSong?.al?.picUrl ||
 				(track.coverArtPath ? convertFileSrc(track.coverArtPath) : undefined),
 		},
 		dt: track.durationSecs * 1000,
