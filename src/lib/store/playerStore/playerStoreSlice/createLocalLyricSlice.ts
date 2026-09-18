@@ -16,6 +16,7 @@ import {
 	LocalLyricParseError,
 	ParseLocalLyric,
 } from "@/lib/utils/lyric-parser";
+import { createLruCache } from "@/lib/utils/lru";
 import { useSettingStore } from "../../settingStore/settingStore";
 
 /**
@@ -33,8 +34,11 @@ export const createLocalLyricSlice: StateCreator<
 	/**
 	 * 本次运行内记住用户手动指定过的歌词，切歌往返时不必重选。
 	 * 只存内存：歌词文件位置属于用户当下的临时意图，不值得落盘。
+	 *
+	 * 每条记录持有整份解析后的歌词行（可达数百 KB），无上限时会随手动指定的
+	 * 歌曲数单调增长；用 LRU 只保留最近若干首（用户实际来回重听的总是那几首）。
 	 */
-	const manualLyricCache = new Map<number, LocalLyricState>();
+	const manualLyricCache = createLruCache<number, LocalLyricState>(8);
 
 	const resetLocalLyric = () => {
 		localLyricRequestId += 1;

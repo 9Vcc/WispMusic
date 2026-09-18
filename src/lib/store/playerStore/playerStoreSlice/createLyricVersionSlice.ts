@@ -10,7 +10,41 @@ import type {
 	LyricVersionSlice,
 	SharedPlayerState,
 } from "@/lib/types/player";
-import { ParseLyric } from "@/lib/utils/lyric-parser";
+import { ParseLyric, type ILyricLine } from "@/lib/utils/lyric-parser";
+
+/**
+ * lyricVersionLines 只在用户手动切换歌词版本时写入，但原先没有上限，会按
+ * songId 累积解析后的逐字行（每条可达数百 KB），跨歌永久驻留。这里只保留
+ * 最近加载的若干首——手动挑版本的人通常只在那几首之间来回。
+ *
+ * 注意：数字键的普通对象不保证插入顺序，必须另存一份顺序表才能正确淘汰。
+ */
+const LYRIC_VERSION_LINES_LIMIT = 5;
+const lyricVersionLinesOrder: number[] = [];
+
+function rememberLyricVersionLines(
+	current: Record<number, ILyricLine[]>,
+	songId: number,
+	lines: ILyricLine[],
+): Record<number, ILyricLine[]> {
+	const seen = lyricVersionLinesOrder.indexOf(songId);
+	if (seen !== -1) lyricVersionLinesOrder.splice(seen, 1);
+	lyricVersionLinesOrder.push(songId);
+
+	const next = { ...current, [songId]: lines };
+	while (lyricVersionLinesOrder.length > LYRIC_VERSION_LINES_LIMIT) {
+		const evicted = lyricVersionLinesOrder.shift();
+		if (evicted === undefined) break;
+		delete next[evicted];
+	}
+	return next;
+}
+
+function forgetLyricVersionLines(songId: number): void {
+	const seen = lyricVersionLinesOrder.indexOf(songId);
+	if (seen !== -1) lyricVersionLinesOrder.splice(seen, 1);
+}
+
 
 /**
  * 歌词版本切片：参考 EchoMusic 的 LyricSourceDialog / manualLyricMap。
@@ -106,7 +140,11 @@ export const createLyricVersionSlice: StateCreator<
 
 			set({
 				lyricVersionMap: { ...get().lyricVersionMap, [songId]: version },
-				lyricVersionLines: { ...get().lyricVersionLines, [songId]: lines },
+				lyricVersionLines: rememberLyricVersionLines(
+					get().lyricVersionLines,
+					songId,
+					lines,
+				),
 			});
 			return true;
 		} catch (error) {
@@ -127,6 +165,7 @@ export const createLyricVersionSlice: StateCreator<
 		delete map[song.id];
 		const lines = { ...get().lyricVersionLines };
 		delete lines[song.id];
+		forgetLyricVersionLines(song.id);
 		set({ lyricVersionMap: map, lyricVersionLines: lines });
 	},
 });
