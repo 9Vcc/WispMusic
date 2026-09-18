@@ -66,6 +66,47 @@ fn ensure_aux_window(app: &tauri::AppHandle, label: &str) -> Result<tauri::Webvi
         .map_err(|err| format!("create {label} window failed: {err}"))
 }
 
+/// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
+/// 状态推送必须跟在 show 之后，否则菜单只会显示初始默认值。
+fn show_tray_menu_at(
+    window: &tauri::WebviewWindow,
+    app: &tauri::AppHandle,
+    position: tauri::PhysicalPosition<f64>,
+) -> Result<(), String> {
+    let size = window
+        .outer_size()
+        .map_err(|err| format!("read tray-menu size failed: {err}"))?;
+    let adjusted_pos = tauri::PhysicalPosition {
+        x: position.x - (size.width as f64 / 2.0),   // 居中于鼠标
+        y: position.y - (size.height as f64) - 10.0, // 在鼠标上方显示（针对底部任务栏）
+    };
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: adjusted_pos.x as i32,
+            y: adjusted_pos.y as i32,
+        }))
+        .map_err(|err| err.to_string())?;
+    window.show().map_err(|err| err.to_string())?;
+    window.set_focus().map_err(|err| err.to_string())?;
+
+    // 菜单弹出后通知主窗口推送最新播放器状态，
+    // 否则托盘菜单只显示初始默认值
+    let _ = app.emit_to("main", "tray-menu-shown", ());
+    Ok(())
+}
+
+/// 在独立线程里确保托盘菜单窗口存在。
+///
+/// **绝不能在托盘事件处理器的主线程里直接建 webview**：wry#583 会在 Windows 上
+/// 死锁（from_config 的文档同样写明要用 async 命令或独立线程）。
+fn ensure_tray_menu_async(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        if let Err(err) = ensure_aux_window(&app, "tray-menu") {
+            eprintln!("[tray] create tray-menu failed: {err}");
+        }
+    });
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -502,6 +543,11 @@ pub fn run() {
                 .icon(tray_image)
                 .tooltip("WispMusic")
                 .on_tray_icon_event(|tray, event| match event {
+                    // 预热：鼠标一进托盘图标就开始建窗口（懒创建），等真正右键时
+                    // 多半已经就绪，菜单弹出不再有建 webview 的等待
+                    TrayIconEvent::Enter { .. } => {
+                        ensure_tray_menu_async(tray.app_handle().clone());
+                    }
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
@@ -531,24 +577,35 @@ pub fn run() {
                         ..
                     } => {
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("tray-menu") {
-                            let size = window.outer_size().unwrap();
-                            let adjusted_pos = tauri::PhysicalPosition {
-                                x: position.x - (size.width as f64 / 2.0),   // 居中于鼠标
-                                y: position.y - (size.height as f64) - 10.0, // 在鼠标上方显示（针对底部任务栏）
-                            };
-                            let _ = window.set_position(tauri::Position::Physical(
-                                tauri::PhysicalPosition {
-                                    x: adjusted_pos.x as i32,
-                                    y: adjusted_pos.y as i32,
-                                },
-                            ));
-                            window.show().unwrap();
-                            window.set_focus().unwrap();
-
-                            // 菜单弹出后通知主窗口推送最新播放器状态，
-                            // 否则托盘菜单只显示初始默认值
-                            let _ = app.emit_to("main", "tray-menu-shown", ());
+                        match app.get_webview_window("tray-menu") {
+                            Some(window) => {
+                                if let Err(err) = show_tray_menu_at(&window, app, position) {
+                                    eprintln!("[tray] show tray-menu failed: {err}");
+                                }
+                            }
+                            // 悬停预热没赶上（比如进图标立刻就点了）：在线程里现建，
+                            // 建好后自己定位显示。主线程内建 webview 会死锁（wry#583）
+                            None => {
+                                let app_for_create = app.clone();
+                                std::thread::spawn(move || {
+                                    match ensure_aux_window(&app_for_create, "tray-menu") {
+                                        Ok(window) => {
+                                            if let Err(err) = show_tray_menu_at(
+                                                &window,
+                                                &app_for_create,
+                                                position,
+                                            ) {
+                                                eprintln!(
+                                                    "[tray] show tray-menu failed: {err}"
+                                                );
+                                            }
+                                        }
+                                        Err(err) => eprintln!(
+                                            "[tray] create tray-menu failed: {err}"
+                                        ),
+                                    }
+                                });
+                            }
                         }
                     }
                     _ => {}
@@ -687,14 +744,22 @@ mod window_lifecycle_tests {
     fn aux_windows_are_not_declared_statically() {
         // 两者互斥：静态声明就会在启动时把 webview 建出来，懒创建即失效。
         // 这条断言用来防止以后有人「顺手」把窗口加回 tauri.conf.json
-        for label in ["mini-player", "desktop-lyric"] {
-            assert!(
-                aux_window_spec(label).is_some(),
-                "{label} 缺少按需创建规格"
-            );
+        for spec in parsed_specs().windows {
+            let label = spec.label.as_str();
             assert!(
                 !TAURI_CONF.contains(&format!("\"{label}\"")),
                 "{label} 仍静态声明在 tauri.conf.json，启动时会白建一个 webview"
+            );
+        }
+    }
+
+    #[test]
+    fn known_aux_windows_have_specs() {
+        // 三个辅助窗口都必须有按需创建规格，缺了会被 ensure_aux_window 拒绝
+        for label in ["tray-menu", "mini-player", "desktop-lyric"] {
+            assert!(
+                aux_window_spec(label).is_some(),
+                "{label} 缺少按需创建规格"
             );
         }
     }
@@ -723,6 +788,14 @@ mod window_lifecycle_tests {
 
     #[test]
     fn aux_window_specs_keep_expected_geometry() {
+        let tray = aux_window_spec("tray-menu").expect("tray-menu 规格应存在");
+        assert_eq!((tray.width, tray.height), (200.0, 412.0));
+        assert!(tray.always_on_top, "托盘菜单需置顶");
+        assert!(tray.skip_taskbar, "托盘菜单不进任务栏");
+        assert!(tray.transparent, "托盘菜单需透明底");
+        assert!(!tray.decorations && !tray.resizable);
+        assert!(tray.window_effects.is_some(), "托盘菜单需要 acrylic 材质");
+
         let mini = aux_window_spec("mini-player").expect("mini-player 规格应存在");
         assert_eq!((mini.width, mini.height), (360.0, 72.0));
         assert!(mini.always_on_top, "mini 需置顶");

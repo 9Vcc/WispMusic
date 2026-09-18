@@ -61,6 +61,11 @@ export default function TrayMenu() {
 		const unlisten = listen<Partial<TrayState>>("tray-sync-state", (e) => {
 			setState((prev) => ({ ...prev, ...e.payload }));
 		});
+		// 托盘菜单现在是首次弹出时才创建的窗口：show 时刻的推送会早于本监听器
+		// 注册而丢失，等监听器真正注册完再主动要一次（复用 tray-menu-shown 链路）
+		void unlisten.then(() => {
+			invoke("aux_window_ready", { label: "tray-menu" }).catch(console.error);
+		});
 		return () => {
 			unlisten.then((f) => f());
 		};
