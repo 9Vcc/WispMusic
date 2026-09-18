@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { computeListWindow } from "@/lib/utils/list-window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -19,6 +20,12 @@ import { Marquee } from "../components/marquee/marquee";
 const MINI_WIDTH = 360;
 const MINI_COLLAPSED_H = 72;
 const MINI_EXPANDED_H = 360;
+
+/** 播放列表行高（显式定高：窗口化的两侧占位高度必须与真实行高完全一致，
+    否则滚动条长度会与未窗口化时不一致）。32px ≈ 原 py-1.5 + 13px 文本 */
+const PLAYLIST_ITEM_H = 32;
+/** 视口外额外渲染的行数，高速滚动时不露白 */
+const PLAYLIST_OVERSCAN = 12;
 
 /** 卡片高度过渡时长：展开时 CSS 端 duration-[240ms] 与此保持一致
     （收起方向不做高度动画编排——窗口先行原子缩回，卡片过渡在裁剪下不可见） */
@@ -373,18 +380,43 @@ export default function MiniPlayer() {
 		return () => clearInterval(timer);
 	}, [state.isPlaying]);
 
-	// 当前曲目行滚动居中（仅面板可见时；刚展开等高度过渡完再滚）
-	const activeItemRef = useRef<HTMLButtonElement | null>(null);
+	// 播放列表窗口化的滚动状态：只渲染视口附近的行，因此滚动位置必须自己跟踪
+	const listRef = useRef<HTMLDivElement | null>(null);
+	const [listScrollTop, setListScrollTop] = useState(0);
+	const [listViewportH, setListViewportH] = useState(0);
+	const listScrollRafRef = useRef<number | null>(null);
+
 	useEffect(() => {
-		if (!panelOpen) return;
-		const timer = window.setTimeout(() => {
-			activeItemRef.current?.scrollIntoView({
-				behavior: "smooth",
-				block: "center",
-			});
-		}, CARD_TRANSITION_MS + 20);
-		return () => window.clearTimeout(timer);
-	}, [panelOpen, state.currentIndex]);
+		const container = listRef.current;
+		if (!container) return;
+		setListViewportH(container.clientHeight);
+		const observer = new ResizeObserver(() => {
+			setListViewportH(container.clientHeight);
+		});
+		observer.observe(container);
+		return () => {
+			observer.disconnect();
+		};
+	}, []);
+
+	useEffect(() => {
+		return () => {
+			if (listScrollRafRef.current !== null) {
+				cancelAnimationFrame(listScrollRafRef.current);
+				listScrollRafRef.current = null;
+			}
+		};
+	}, []);
+
+	// 滚动事件按帧合并：高速滚动时不逐像素触发一次 setState
+	const handleListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+		const next = e.currentTarget.scrollTop;
+		if (listScrollRafRef.current !== null) return;
+		listScrollRafRef.current = requestAnimationFrame(() => {
+			listScrollRafRef.current = null;
+			setListScrollTop(next);
+		});
+	};
 
 	// 音量：实时控制——拖动即生效（本地乐观更新 + 立即下发指令）
 	const handleVolumeChange = (value: number) => {
@@ -410,6 +442,7 @@ export default function MiniPlayer() {
 	};
 
 	const playlist = state.playlist ?? [];
+	const playlistLength = playlist.length;
 	const currentIndex = state.currentIndex ?? -1;
 	const displayVolume = state.volume;
 	const isShuffle = state.playMode === "random";
@@ -424,6 +457,40 @@ export default function MiniPlayer() {
 		if (currentIndex < 0 || !playlist[currentIndex]) return undefined;
 		return `${currentIndex + 1} / ${playlist.length}`;
 	}, [playlist, currentIndex]);
+
+	const listWindow = useMemo(
+		() =>
+			computeListWindow({
+				total: playlist.length,
+				itemHeight: PLAYLIST_ITEM_H,
+				scrollTop: listScrollTop,
+				viewportHeight: listViewportH,
+				overscan: PLAYLIST_OVERSCAN,
+			}),
+		[playlist.length, listScrollTop, listViewportH],
+	);
+
+	// 当前曲目行滚动居中（仅面板可见时；刚展开等高度过渡完再滚）。
+	// 窗口化后当前行不一定在 DOM 里，无法用 scrollIntoView，改为直接算目标
+	// scrollTop —— 位置只由行高与索引决定，反而更可控
+	useEffect(() => {
+		if (!panelOpen) return;
+		const timer = window.setTimeout(() => {
+			const container = listRef.current;
+			const viewportH = container?.clientHeight ?? 0;
+			if (!container || viewportH <= 0 || currentIndex < 0) return;
+			const maxTop = Math.max(playlistLength * PLAYLIST_ITEM_H - viewportH, 0);
+			const center =
+				currentIndex * PLAYLIST_ITEM_H - (viewportH - PLAYLIST_ITEM_H) / 2;
+			container.scrollTo({
+				top: Math.min(Math.max(center, 0), maxTop),
+				behavior: "smooth",
+			});
+		}, CARD_TRANSITION_MS + 20);
+		return () => window.clearTimeout(timer);
+		// playlistLength 而非 playlist 引用：状态每次推送都会换引用，
+		// 依赖引用会导致列表反复被拉回当前曲目、用户无法滚动
+	}, [panelOpen, currentIndex, playlistLength]);
 
 	return (
 		// 锚定容器：填满窗口的透明层。向下展开时卡片顶部锚定（默认），
@@ -654,53 +721,76 @@ export default function MiniPlayer() {
 						)}
 					</div>
 
-					{/* 播放列表滚动区 */}
-					<div className="min-h-0 flex-1 overflow-y-auto no-scrollbar px-2">
-						{playlist.length > 0 ? (
-							playlist.map((item, i) => (
-								<button
-									type="button"
-									key={`${item.id}-${i}`}
-									ref={i === currentIndex ? activeItemRef : undefined}
-									onClick={() =>
-										sendCommand({ event: "playIndex", index: i })
-									}
-									className={cn(
-										"flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-										i === currentIndex
-											? "bg-fill-strong"
-											: "hover:bg-fill-hover",
-									)}
-								>
-									{item.id === playlist[currentIndex]?.id ? (
-										<svg
-											viewBox="0 0 24 24"
-											className="size-3.5 shrink-0 text-primary"
-											fill="currentColor"
-										>
-											<path d="M8 5.14v13.72c0 .8.87 1.3 1.56.88l10.54-6.86a1.05 1.05 0 0 0 0-1.76L9.56 4.26A1.04 1.04 0 0 0 8 5.14Z" />
-										</svg>
-									) : (
-										<MusicNote224Filled className="size-3.5 shrink-0 text-foreground/45" />
-									)}
-									<span
-										className={cn(
-											"min-w-0 shrink truncate text-[13px]",
-											i === currentIndex
-												? "font-bold text-primary"
-												: "text-foreground/80",
-										)}
-									>
-										{item.name}
-									</span>
-									<span className="min-w-0 flex-1 truncate text-[11px] text-foreground/55">
-										{item.artist}
-									</span>
-									<span className="shrink-0 text-[11px] tabular-nums text-foreground/55">
-										{formatTime(item.dt / 1000)}
-									</span>
-								</button>
-							))
+					{/* 播放列表滚动区。窗口化渲染：只挂视口附近的行，两侧用等高
+					    占位撑起总高（播放列表上千首时不再生成上千个 DOM 子树） */}
+					<div
+						ref={listRef}
+						onScroll={handleListScroll}
+						className="min-h-0 flex-1 overflow-y-auto no-scrollbar px-2"
+					>
+						{playlistLength > 0 ? (
+							<>
+								{listWindow.topPad > 0 && (
+									<div
+										style={{ height: listWindow.topPad }}
+										aria-hidden="true"
+									/>
+								)}
+								{playlist
+									.slice(listWindow.start, listWindow.end)
+									.map((item, offset) => {
+										const i = listWindow.start + offset;
+										return (
+											<button
+												type="button"
+												key={`${item.id}-${i}`}
+												onClick={() =>
+													sendCommand({ event: "playIndex", index: i })
+												}
+												className={cn(
+													"flex h-8 w-full items-center gap-2 rounded-md px-2 text-left transition-colors",
+													i === currentIndex
+														? "bg-fill-strong"
+														: "hover:bg-fill-hover",
+												)}
+											>
+												{item.id === playlist[currentIndex]?.id ? (
+													<svg
+														viewBox="0 0 24 24"
+														className="size-3.5 shrink-0 text-primary"
+														fill="currentColor"
+													>
+														<path d="M8 5.14v13.72c0 .8.87 1.3 1.56.88l10.54-6.86a1.05 1.05 0 0 0 0-1.76L9.56 4.26A1.04 1.04 0 0 0 8 5.14Z" />
+													</svg>
+												) : (
+													<MusicNote224Filled className="size-3.5 shrink-0 text-foreground/45" />
+												)}
+												<span
+													className={cn(
+														"min-w-0 shrink truncate text-[13px]",
+														i === currentIndex
+															? "font-bold text-primary"
+															: "text-foreground/80",
+													)}
+												>
+													{item.name}
+												</span>
+												<span className="min-w-0 flex-1 truncate text-[11px] text-foreground/55">
+													{item.artist}
+												</span>
+												<span className="shrink-0 text-[11px] tabular-nums text-foreground/55">
+													{formatTime(item.dt / 1000)}
+												</span>
+											</button>
+										);
+									})}
+								{listWindow.bottomPad > 0 && (
+									<div
+										style={{ height: listWindow.bottomPad }}
+										aria-hidden="true"
+									/>
+								)}
+							</>
 						) : (
 							<div className="flex h-full items-center justify-center text-sm text-foreground/55">
 								播放列表为空
