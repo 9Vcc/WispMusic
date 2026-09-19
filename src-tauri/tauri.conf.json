@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WispMusic",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "identifier": "com.isen.wisp-music",
   "build": {
     "beforeDevCommand": "pnpm dev",
