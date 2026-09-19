@@ -1,30 +1,17 @@
 {
   "$comment": [
-    "按需创建的辅助窗口规格（tray-menu / mini-player / desktop-lyric）。",
+    "按需创建的辅助窗口规格（mini-player / desktop-lyric）。",
     "这些窗口不在 tauri.conf.json 的 app.windows 里静态声明，否则启动时就会",
     "为每个窗口建一个 webview（各自一份 JS 堆），即使用户从不打开它们。",
-    "启动只建主窗口；首次需要某个辅助窗口时由 src/lib.rs 的 ensure_aux_window",
-    "用这里的规格现场创建。注意三份清单必须一致：本文件、tauri.conf.json",
-    "（只有主窗口）、capabilities/default.json 的 windows 数组（漏配=命令全被",
-    "ACL 拒）。lib.rs 的 window_lifecycle_tests 会锁死这三条。"
+    "首次需要时由 src/lib.rs 的 ensure_aux_window 用这里的规格现场创建，",
+    "关闭后销毁、再次需要时重建。",
+    "tray-menu 是例外：它常驻（静态声明，隐藏复用，不销毁）——托盘右键是",
+    "高频主交互，按需创建的冷启动会让首次右键无响应。",
+    "注意三份清单必须一致：本文件、tauri.conf.json（主窗口/tray-menu）、",
+    "capabilities/default.json 的 windows 数组（漏配=命令全被 ACL 拒）。",
+    "lib.rs 的 window_lifecycle_tests 会锁死这三条。"
   ],
   "windows": [
-    {
-      "label": "tray-menu",
-      "title": "TrayMenu",
-      "url": "/tray-menu",
-      "width": 200,
-      "height": 412,
-      "visible": false,
-      "resizable": false,
-      "alwaysOnTop": true,
-      "skipTaskbar": true,
-      "decorations": false,
-      "transparent": true,
-      "windowEffects": {
-        "effects": ["acrylic"]
-      }
-    },
     {
       "label": "mini-player",
       "title": "WispMusic Mini",

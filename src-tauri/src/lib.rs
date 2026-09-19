@@ -25,11 +25,6 @@ use tauri::{
 /// 主窗口保持隐藏，托盘可再次呼出。
 static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// 托盘菜单当前是否正显示着（show_tray_menu_at 置位，失焦/销毁清零）。
-/// 用静态标记而不是去查窗口可见性：托盘事件处理器在主线程上跑，
-/// 这里只需要一个无歧义的、不可能死锁的判断依据。
-static TRAY_MENU_SHOWN: AtomicBool = AtomicBool::new(false);
-
 /// 按需创建的辅助窗口规格（mini-player / desktop-lyric）。
 /// 它们不在 tauri.conf.json 里静态声明，否则启动时每个都会建一个 webview
 /// （各自的 JS 堆），即使用户从不打开。规格放在独立 JSON 里而不是写在 Rust
@@ -88,7 +83,10 @@ fn destroy_aux_window(app: &tauri::AppHandle, label: &str) {
 }
 
 /// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
-/// 状态推送必须跟在 show 之后，否则菜单只会显示初始默认值。
+///
+/// 托盘菜单窗口**常驻**（启动即建、隐藏复用、不销毁）：托盘右键是高频主交互，
+/// 按需创建的冷启动（首次要拉起一个新的 WebView2 渲染进程，1~3 秒）会让
+/// 首次右键无响应。因此这里只做「定位 + 显示 + 重置」，没有任何创建/销毁。
 fn show_tray_menu_at(
     window: &tauri::WebviewWindow,
     app: &tauri::AppHandle,
@@ -97,67 +95,32 @@ fn show_tray_menu_at(
     let size = window
         .outer_size()
         .map_err(|err| format!("read tray-menu size failed: {err}"))?;
-    let adjusted_pos = tauri::PhysicalPosition {
-        x: position.x - (size.width as f64 / 2.0),   // 居中于鼠标
-        y: position.y - (size.height as f64) - 10.0, // 在鼠标上方显示（针对底部任务栏）
-    };
+
+    // 居中于鼠标、显示在鼠标上方（针对底部任务栏）。
+    // 任务栏在屏幕顶部/左右时这个默认位置会把菜单推出屏幕外，按光标所在
+    // 显示器钳制，保证任意位置的托盘都能完整显示菜单。
+    let mut x = (position.x - (size.width as f64 / 2.0)).round() as i32;
+    let mut y = (position.y - (size.height as f64) - 10.0).round() as i32;
+    if let Ok(Some(monitor)) = app.monitor_from_point(position.x, position.y) {
+        let mon_pos = monitor.position();
+        let mon_size = monitor.size();
+        let max_x = mon_pos.x + mon_size.width as i32 - size.width as i32;
+        let max_y = mon_pos.y + mon_size.height as i32 - size.height as i32;
+        x = x.clamp(mon_pos.x, max_x.max(mon_pos.x));
+        y = y.clamp(mon_pos.y, max_y.max(mon_pos.y));
+    }
+
     window
-        .set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-            x: adjusted_pos.x as i32,
-            y: adjusted_pos.y as i32,
-        }))
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
         .map_err(|err| err.to_string())?;
     window.show().map_err(|err| err.to_string())?;
     window.set_focus().map_err(|err| err.to_string())?;
-    TRAY_MENU_SHOWN.store(true, Ordering::Release);
 
-    // 菜单弹出后通知主窗口推送最新播放器状态，
-    // 否则托盘菜单只显示初始默认值
+    // 通知托盘菜单自身重置上一次遗留的临时 UI 状态（如展开中的子菜单），
+    // 并通知主窗口推送最新播放器状态，否则菜单只会显示初始默认值
+    let _ = app.emit_to("tray-menu", "tray-menu-shown", ());
     let _ = app.emit_to("main", "tray-menu-shown", ());
     Ok(())
-}
-
-/// 托盘菜单隐藏后空闲多久销毁。期间若菜单被重新显示（标记回 true）则跳过，
-/// 所以延迟只影响「彻底没有窗口」的时间点，不影响任何弹出操作。
-const TRAY_MENU_IDLE_DESTROY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// 托盘菜单创建单飞标记：托盘 Enter 预热与右键补建都可能并发触发，
-/// 同一 label 的并发 build 会互相干扰（先建者赢，后者报「已存在」），
-/// 这里保证任意时刻最多一个线程在建，其余直接返回。
-static TRAY_MENU_CREATING: AtomicBool = AtomicBool::new(false);
-
-/// 单飞创建托盘菜单（任意线程可调；与预热线程并发时直接让位）。
-fn create_tray_menu_once(app: tauri::AppHandle) {
-    if TRAY_MENU_CREATING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let result = ensure_aux_window(&app, "tray-menu");
-    TRAY_MENU_CREATING.store(false, Ordering::Release);
-    if let Err(err) = result {
-        eprintln!("[tray] create tray-menu failed: {err}");
-    }
-}
-
-/// 延迟回收隐藏着的托盘菜单实例。
-///
-/// 什么时候调：菜单隐藏（失焦）或预热实例未被使用（Leave）。直接销毁会和
-/// 「弹出」动作竞态——托盘图标的鼠标事件（Enter/Leave）与焦点事件在窗口
-/// 刚显示的几百毫秒里交错，销毁可能正好插在 show 之后，把刚弹出的菜单打掉。
-/// 延迟 + 双重条件（未被重新显示 && 当前不可见）让回收永远不与显示冲突。
-fn schedule_tray_menu_cleanup(app: tauri::AppHandle) {
-    TRAY_MENU_SHOWN.store(false, Ordering::Release);
-    std::thread::spawn(move || {
-        std::thread::sleep(TRAY_MENU_IDLE_DESTROY_DELAY);
-        if TRAY_MENU_SHOWN.load(Ordering::Acquire) {
-            return; // 期间被重新显示了，仍在使用
-        }
-        if let Some(window) = app.get_webview_window("tray-menu") {
-            // 二次确认可见性：标记可能滞后于真实状态
-            if !window.is_visible().unwrap_or(true) {
-                let _ = window.destroy();
-            }
-        }
-    });
 }
 
 #[tauri::command]
@@ -605,12 +568,6 @@ pub fn run() {
                 .icon(tray_image)
                 .tooltip("WispMusic")
                 .on_tray_icon_event(|tray, event| match event {
-                    // 预热：鼠标一进托盘图标就开始建窗口（懒创建），等真正右键时
-                    // 多半已经就绪，菜单弹出不再有建 webview 的等待
-                    TrayIconEvent::Enter { .. } => {
-                        let app = tray.app_handle().clone();
-                        std::thread::spawn(move || create_tray_menu_once(app));
-                    }
                     TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
@@ -639,6 +596,7 @@ pub fn run() {
                         position,
                         ..
                     } => {
+                        // 托盘菜单窗口常驻（启动即建、隐藏复用），这里只做定位显示
                         let app = tray.app_handle();
                         match app.get_webview_window("tray-menu") {
                             Some(window) => {
@@ -646,54 +604,8 @@ pub fn run() {
                                     eprintln!("[tray] show tray-menu failed: {err}");
                                 }
                             }
-                            // 悬停预热没赶上（比如进图标立刻就点了）：在线程里
-                            // 单飞创建，然后等它就绪再定位显示（最多等 2s）。
-                            // 主线程内建 webview 会死锁（wry#583），必须丢线程
-                            None => {
-                                let app_for_create = app.clone();
-                                std::thread::spawn(move || {
-                                    create_tray_menu_once(app_for_create.clone());
-
-                                    let deadline =
-                                        std::time::Instant::now() + std::time::Duration::from_millis(2000);
-                                    let window = loop {
-                                        if let Some(window) =
-                                            app_for_create.get_webview_window("tray-menu")
-                                        {
-                                            break Some(window);
-                                        }
-                                        if std::time::Instant::now() > deadline {
-                                            break None;
-                                        }
-                                        std::thread::sleep(
-                                            std::time::Duration::from_millis(20),
-                                        );
-                                    };
-
-                                    match window {
-                                        Some(window) => {
-                                            if let Err(err) = show_tray_menu_at(
-                                                &window,
-                                                &app_for_create,
-                                                position,
-                                            ) {
-                                                eprintln!(
-                                                    "[tray] show tray-menu failed: {err}"
-                                                );
-                                            }
-                                        }
-                                        None => eprintln!(
-                                            "[tray] tray-menu not ready after 2s, skip show"
-                                        ),
-                                    }
-                                });
-                            }
+                            None => eprintln!("[tray] tray-menu window not found"),
                         }
-                    }
-                    TrayIconEvent::Leave { .. } => {
-                        // 预热了但没点（或菜单已关）：延迟回收隐藏实例，
-                        // 保持「不使用时没有辅助窗口」的形态
-                        schedule_tray_menu_cleanup(tray.app_handle().clone());
                     }
                     _ => {}
                 })
@@ -719,12 +631,15 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            // 窗口销毁策略（懒创建 + 实例缓存 + 用完即毁）：
+            // 窗口生命周期策略：
             // · main：唯一 eager 且常驻的窗口，关闭=藏进托盘，永不销毁；
+            // · tray-menu：**常驻复用，永不销毁**——托盘右键是高频主交互，
+            //   按需创建的冷启动（首次要拉起一个新的 WebView2 渲染进程，1~3 秒）
+            //   会让首次右键无响应。所以这里只做隐藏，每次弹出时通过
+            //   tray-menu-shown 事件重置遗留的临时 UI 状态；
             // · mini-player：mini 模式期间的关闭只隐藏（托盘左击还要再呼出），
             //   退出 mini 模式（mini_restore_main）时销毁；
-            // · desktop-lyric：用户关掉（开关或 Alt+F4）即销毁；
-            // · tray-menu：失焦即用完，销毁（Enter 预热会兜住下次弹出的冷启动）。
+            // · desktop-lyric：用户关掉（开关或 Alt+F4）即销毁。
             //   销毁后下次需要时由 ensure_aux_window 按规格重建，调用方无感。
             WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "mini-player" {
@@ -743,12 +658,7 @@ pub fn run() {
                         .emit_to("main", "desktop-lyric-hidden", ());
                     return;
                 }
-                if window.label() == "tray-menu" {
-                    // 托盘菜单被系统关掉（Alt+F4）= 用户显式关闭，立即销毁
-                    TRAY_MENU_SHOWN.store(false, Ordering::Release);
-                    destroy_aux_window(window.app_handle(), "tray-menu");
-                    return;
-                }
+                // main 与 tray-menu 都不真正关闭：前者藏进托盘，后者隐藏复用
                 api.prevent_close();
                 let _ = window.emit("app-background", ());
 
@@ -761,12 +671,10 @@ pub fn run() {
                 });
             }
             WindowEvent::Focused(focused) => {
-                // 托盘菜单失焦 = 这次弹出结束：隐藏（与历史行为一致，避免与
-                // 弹出瞬间的焦点事件竞态），并调度延迟销毁把资源还回去。
-                // 3 秒内重新显示（标记回 true）则跳过销毁。
+                // 托盘菜单失焦 = 这次弹出结束：隐藏复用（窗口不销毁，
+                // 下次右键直接定位显示；临时 UI 状态由 tray-menu-shown 重置）
                 if !focused && window.label() == "tray-menu" {
                     let _ = window.hide();
-                    schedule_tray_menu_cleanup(window.app_handle().clone());
                 }
             }
             _ => {}
@@ -845,6 +753,15 @@ mod window_lifecycle_tests {
         serde_json::from_str(AUX_WINDOW_SPECS).expect("aux-windows.json 应可解析")
     }
 
+    /// 常驻窗口清单：启动即由 tauri.conf.json 创建（main 唯一可见，
+    /// tray-menu 隐藏复用——托盘右键是高频主交互，不能接受冷启动）。
+    /// main 在 tauri.conf.json 里省略 label（默认即 main），无法按字符串断言；
+    /// 这里只列显式声明了 label 的常驻窗口。
+    const STATIC_LABELED_WINDOWS: [&str; 1] = ["tray-menu"];
+
+    /// 懒创建窗口清单：首次需要时才由 ensure_aux_window 按 aux-windows.json 建
+    const LAZY_WINDOWS: [&str; 2] = ["mini-player", "desktop-lyric"];
+
     #[test]
     fn aux_windows_are_not_declared_statically() {
         // 两者互斥：静态声明就会在启动时把 webview 建出来，懒创建即失效。
@@ -859,9 +776,20 @@ mod window_lifecycle_tests {
     }
 
     #[test]
+    fn static_windows_are_declared() {
+        // 常驻窗口必须在 tauri.conf.json 里声明，缺了启动时根本不存在
+        for label in STATIC_LABELED_WINDOWS {
+            assert!(
+                TAURI_CONF.contains(&format!("\"{label}\"")),
+                "常驻窗口 {label} 未在 tauri.conf.json 声明"
+            );
+        }
+    }
+
+    #[test]
     fn known_aux_windows_have_specs() {
-        // 三个辅助窗口都必须有按需创建规格，缺了会被 ensure_aux_window 拒绝
-        for label in ["tray-menu", "mini-player", "desktop-lyric"] {
+        // 懒创建窗口必须有按需创建规格，缺了会被 ensure_aux_window 拒绝
+        for label in LAZY_WINDOWS {
             assert!(
                 aux_window_spec(label).is_some(),
                 "{label} 缺少按需创建规格"
@@ -870,9 +798,10 @@ mod window_lifecycle_tests {
     }
 
     #[test]
-    fn every_aux_window_label_is_allowed_by_capabilities() {
+    fn every_window_label_is_allowed_by_capabilities() {
         // capabilities 的 windows 数组漏配 → 该窗口的 core 命令全被 ACL 拒，
-        // 表现为窗口空白，是这套结构里最容易踩且最难排查的一环
+        // 表现为窗口空白，是这套结构里最容易踩且最难排查的一环。
+        // 常驻与懒创建的窗口都要覆盖。
         let caps: serde_json::Value =
             serde_json::from_str(CAPABILITIES).expect("capabilities/default.json 应可解析");
         let allowed: Vec<String> = caps["windows"]
@@ -882,6 +811,12 @@ mod window_lifecycle_tests {
             .filter_map(|value| value.as_str().map(str::to_string))
             .collect();
 
+        for label in STATIC_LABELED_WINDOWS {
+            assert!(
+                allowed.contains(&label.to_string()),
+                "capabilities/default.json 的 windows 缺少 {label}"
+            );
+        }
         for spec in parsed_specs().windows {
             assert!(
                 allowed.contains(&spec.label),
@@ -892,15 +827,32 @@ mod window_lifecycle_tests {
     }
 
     #[test]
-    fn aux_window_specs_keep_expected_geometry() {
-        let tray = aux_window_spec("tray-menu").expect("tray-menu 规格应存在");
-        assert_eq!((tray.width, tray.height), (200.0, 412.0));
-        assert!(tray.always_on_top, "托盘菜单需置顶");
-        assert!(tray.skip_taskbar, "托盘菜单不进任务栏");
-        assert!(tray.transparent, "托盘菜单需透明底");
-        assert!(!tray.decorations && !tray.resizable);
-        assert!(tray.window_effects.is_some(), "托盘菜单需要 acrylic 材质");
+    fn static_tray_menu_keeps_expected_geometry() {
+        let conf: serde_json::Value =
+            serde_json::from_str(TAURI_CONF).expect("tauri.conf.json 应可解析");
+        let windows = conf["app"]["windows"]
+            .as_array()
+            .expect("tauri.conf.json 应有 app.windows");
+        let tray = windows
+            .iter()
+            .find(|window| window["label"] == "tray-menu")
+            .expect("tray-menu 应静态声明在 tauri.conf.json");
 
+        assert_eq!(tray["width"], 200);
+        assert_eq!(tray["height"], 412);
+        assert_eq!(tray["alwaysOnTop"], true, "托盘菜单需置顶");
+        assert_eq!(tray["skipTaskbar"], true, "托盘菜单不进任务栏");
+        assert_eq!(tray["transparent"], true, "托盘菜单需透明底");
+        assert_eq!(tray["resizable"], false, "托盘菜单尺寸固定");
+        assert_eq!(tray["decorations"], false, "托盘菜单无系统边框");
+        assert!(
+            tray["windowEffects"]["effects"].is_array(),
+            "托盘菜单需要 acrylic 材质"
+        );
+    }
+
+    #[test]
+    fn aux_window_specs_keep_expected_geometry() {
         let mini = aux_window_spec("mini-player").expect("mini-player 规格应存在");
         assert_eq!((mini.width, mini.height), (360.0, 72.0));
         assert!(mini.always_on_top, "mini 需置顶");

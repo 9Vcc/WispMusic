@@ -61,13 +61,20 @@ export default function TrayMenu() {
 		const unlisten = listen<Partial<TrayState>>("tray-sync-state", (e) => {
 			setState((prev) => ({ ...prev, ...e.payload }));
 		});
-		// 托盘菜单现在是首次弹出时才创建的窗口：show 时刻的推送会早于本监听器
-		// 注册而丢失，等监听器真正注册完再主动要一次（复用 tray-menu-shown 链路）
+		// 托盘菜单是常驻窗口：窗口活着，但 webview 间事件不可达、主窗口看不到
+		// 它的内部状态，所以每次弹出时由 Rust 定向发 tray-menu-shown 过来重置
+		// 上一次遗留的临时 UI 状态（如展开中的播放模式子菜单）
+		const unlistenShown = listen("tray-menu-shown", () => {
+			setIsPlayModeMenuOpen(false);
+		});
+		// 启动竞态兜底：初始快照推送可能早于本监听器注册而丢失，
+		// 注册完成后再主动要一次（Rust 侧转成 tray-menu-shown 发回主窗口）
 		void unlisten.then(() => {
 			invoke("aux_window_ready", { label: "tray-menu" }).catch(console.error);
 		});
 		return () => {
 			unlisten.then((f) => f());
+			unlistenShown.then((f) => f());
 		};
 	}, []);
 

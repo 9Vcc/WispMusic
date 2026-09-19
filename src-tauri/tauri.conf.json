@@ -26,6 +26,22 @@
         "windowEffects": {
           "effects": ["acrylic", "mica", "micaLight", "micaDark"]
         }
+      },
+      {
+        "title": "TrayMenu",
+        "url": "/tray-menu",
+        "width": 200,
+        "height": 412,
+        "visible": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        },
+        "label": "tray-menu"
       }
     ],
     "security": {
