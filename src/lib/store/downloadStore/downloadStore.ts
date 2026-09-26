@@ -15,6 +15,9 @@ async function getDownloadStore() {
 	return storeInstance;
 }
 
+/** 正处在「取预览 → 入队」异步窗口内的 song_id（防连点重复下载） */
+const starting = new Set<number>();
+
 function buildFileName(song: Song, level: string, fileType: string): string {
 	const artists = song.ar.map((a) => a.name).join(", ");
 	const raw = `${song.name} - ${artists} [${level}]`;
@@ -222,44 +225,57 @@ export const useDownloadStore = create<DownloadStore>((set, get) => ({
 	startDownload: async (song, level) => {
 		const { downloadDir, activeTasks } = get();
 
-		if (activeTasks.has(song.id)) {
+		// 失败项允许重试（同 id 覆盖）；进行中的任务仍拒绝
+		const existing = activeTasks.get(song.id);
+		if (existing && existing.status !== "error") {
 			toast.info("该歌曲已在下载队列中");
 			return;
 		}
-
-		// 先临时拿一次 API，获取文件类型以确定文件名
-		const preview = await downloadMusic(song.id, level);
-		if (!preview || !preview.url) {
-			toast.error("获取下载链接失败");
+		// 预览接口返回前任务还没入队，连点两次会双双走到这里并在后端撞车
+		// （后端对同 song_id 有并发保护，第二条会被拒），用 starting 先挡住
+		if (starting.has(song.id)) {
+			toast.info("该歌曲已在下载队列中");
 			return;
 		}
-		if (preview.freeTrialPrivilege?.resConsumable) {
-			toast.error("该资源受版权保护，无法下载");
-			return;
+		starting.add(song.id);
+
+		try {
+			// 先临时拿一次 API，获取文件类型以确定文件名
+			const preview = await downloadMusic(song.id, level);
+			if (!preview || !preview.url) {
+				toast.error("获取下载链接失败");
+				return;
+			}
+			if (preview.freeTrialPrivilege?.resConsumable) {
+				toast.error("该资源受版权保护，无法下载");
+				return;
+			}
+
+			const fileName = buildFileName(song, preview.level, preview.type);
+			const savePath = `${downloadDir}\\${fileName}`;
+
+			const task: DownloadTask = {
+				songId: song.id,
+				song,
+				level,
+				status: "pending",
+				downloaded: 0,
+				total: preview.size,
+				speed: 0,
+				savePath,
+				addedAt: Date.now(),
+			};
+
+			set((s) => {
+				const next = new Map(s.activeTasks);
+				next.set(song.id, task);
+				return { activeTasks: next };
+			});
+
+			await runDownload(song, level, savePath, 0, set, get);
+		} finally {
+			starting.delete(song.id);
 		}
-
-		const fileName = buildFileName(song, preview.level, preview.type);
-		const savePath = `${downloadDir}\\${fileName}`;
-
-		const task: DownloadTask = {
-			songId: song.id,
-			song,
-			level,
-			status: "pending",
-			downloaded: 0,
-			total: preview.size,
-			speed: 0,
-			savePath,
-			addedAt: Date.now(),
-		};
-
-		set((s) => {
-			const next = new Map(s.activeTasks);
-			next.set(song.id, task);
-			return { activeTasks: next };
-		});
-
-		await runDownload(song, level, savePath, 0, set, get);
 	},
 
 	pauseDownload: async (songId) => {
