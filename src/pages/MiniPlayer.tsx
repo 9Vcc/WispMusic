@@ -34,6 +34,8 @@ const CARD_TRANSITION_MS = 240;
     缩窗是单次 IPC，可能因渲染暂停/队列卡死/热重载状态重置而失效——
     看门狗按物理尺寸兜底归位（物理尺寸是唯一可信源，ref 只是记账） */
 const COLLAPSE_WATCHDOG_MS = 700;
+/** 窗口操作队列的积压上限：单次 IPC 挂起时，后续点击只更新意图、不再往链上挂闭包 */
+const MAX_PENDING_BOUNDS_OPS = 4;
 
 const raf = () =>
 	new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -162,9 +164,26 @@ export default function MiniPlayer() {
 	const [expandUp, setExpandUp] = useState(false);
 	const expandUpRef = useRef(false);
 
-	/** 排队执行窗口操作：所有 SetWindowPos 串行化，防快速点击交错 */
+	/** 排队执行窗口操作：所有 SetWindowPos 串行化，防快速点击交错。
+	 *  入队做了两道收敛，避免单次 IPC 挂起时后续点击的闭包无限挂在链上：
+	 *  1) 同意图去重——同一函数的连续入队只留一条（操作按目标终态幂等）；
+	 *  2) 积压上限——链上未完成超过上限就只记录意图（desiredExpandedRef
+	 *     已由点击处更新，看门狗/挂载自愈仍会按物理尺寸校对归位）。
+	 *  正常交互（每次点击几十毫秒内完成）永远碰不到上限。 */
+	const lastQueuedBoundsOpRef = useRef<(() => Promise<void>) | null>(null);
+	const pendingBoundsOpsRef = useRef(0);
 	const enqueueBoundsOp = (op: () => Promise<void>) => {
-		boundsOpRef.current = boundsOpRef.current.then(op).catch(console.error);
+		if (lastQueuedBoundsOpRef.current === op) return;
+		if (pendingBoundsOpsRef.current >= MAX_PENDING_BOUNDS_OPS) return;
+		lastQueuedBoundsOpRef.current = op;
+		pendingBoundsOpsRef.current += 1;
+		boundsOpRef.current = boundsOpRef.current
+			.then(op)
+			.catch(console.error)
+			.finally(() => {
+				pendingBoundsOpsRef.current -= 1;
+				lastQueuedBoundsOpRef.current = null;
+			});
 	};
 
 	/** 读取窗口当前物理几何（位置/尺寸/缩放并行取回，一次到位） */

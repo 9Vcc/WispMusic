@@ -199,18 +199,23 @@ export function Lyric({ className, showTrans, showRoma }: LyricProps) {
 			containerRef.current.scrollTop = 0;
 		}
 		targetScrollYRef.current = 0;
+		let raf = 0;
 		if (lyric.length) {
 			const idx = findCurrentIndex(lyric);
 			setCurrentIndex(idx);
-			requestAnimationFrame(() => scrollToIndex(idx));
+			// 帧回调要在卸载/重跑时取消：切歌高频时上一拍的回调会落在
+			// 已换掉的歌词数组与旧行元素上
+			raf = requestAnimationFrame(() => scrollToIndex(idx));
 		}
+		return () => cancelAnimationFrame(raf);
 	}, [currentSong, scrollToIndex, lyric, findCurrentIndex]);
 
 	useEffect(() => {
 		if (!lyric.length) return;
 		const idx = findCurrentIndex(lyric);
 		setCurrentIndex(idx);
-		requestAnimationFrame(() => scrollToIndex(idx));
+		const raf = requestAnimationFrame(() => scrollToIndex(idx));
+		return () => cancelAnimationFrame(raf);
 	}, [lyric, scrollToIndex, findCurrentIndex]);
 
 	// 高频订阅：直接从 corePlayer 获取时间，绕过 Zustand

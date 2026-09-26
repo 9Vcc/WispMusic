@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Popover, PopoverContent, PopoverAnchor } from "../ui/popover";
 
 const CLOSE_DELAY_MS = 150;
@@ -46,6 +46,17 @@ export function HoverPopover({
 			closeTimer.current = null;
 		}, CLOSE_DELAY_MS);
 	};
+
+	// 卸载时清掉待决关闭定时器：移出后 150ms 内卸载（切页/歌单刷新重挂载）
+	// 会让回调挂在已卸载组件上
+	useEffect(() => {
+		return () => {
+			if (closeTimer.current !== null) {
+				clearTimeout(closeTimer.current);
+				closeTimer.current = null;
+			}
+		};
+	}, []);
 
 	return (
 		<Popover open={open} onOpenChange={(next) => (next ? handleOpen() : handleClose())}>
