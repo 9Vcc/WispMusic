@@ -33,6 +33,13 @@ pub struct ProcessMemoryReport {
     pub total_working_set: u64,
     /// 各进程私有提交量之和：更接近「这套进程实际占掉多少、关掉能还回多少」
     pub total_private_bytes: u64,
+    /// 本进程 Rust 堆存活字节数（全局分配器计数口径，见 alloc_stats）。
+    /// 工作集/私有量把 Rust 堆与 WebView2 运行时混在一起，流缓冲这类原生
+    /// 滞留会被淹没；这个数字单独给出「Rust 侧现在拿着多少」
+    pub rust_heap_bytes: u64,
+    /// Rust 堆历史峰值（同一口径）：稳态远低于峰值的回落、或只涨不落的
+    /// 滞留都能从这一对数字的相对变化看出来
+    pub rust_heap_peak_bytes: u64,
     /// 按工作集从大到小
     pub processes: Vec<ProcessMemoryEntry>,
 }
@@ -242,10 +249,14 @@ mod imp {
 
         processes.sort_by(|a, b| b.working_set.cmp(&a.working_set));
 
+        let (rust_heap_bytes, rust_heap_peak_bytes) = crate::alloc_stats::snapshot();
+
         Ok(ProcessMemoryReport {
             self_pid,
             total_working_set: processes.iter().map(|entry| entry.working_set).sum(),
             total_private_bytes: processes.iter().map(|entry| entry.private_bytes).sum(),
+            rust_heap_bytes,
+            rust_heap_peak_bytes,
             processes,
         })
     }
@@ -286,6 +297,13 @@ mod tests {
         assert!(own.working_set > 0, "本进程工作集应大于 0");
         assert!(own.private_bytes > 0, "本进程私有提交量应大于 0");
         assert!(!own.name.is_empty(), "进程名不应为空");
+
+        // Rust 堆计数：报告跑起来时必然已有分配，峰值不应低于当前值
+        assert!(report.rust_heap_bytes > 0, "Rust 堆存活计数应大于 0");
+        assert!(
+            report.rust_heap_peak_bytes >= report.rust_heap_bytes,
+            "峰值不应低于当前存活"
+        );
 
         // 合计与排序：合计等于各项之和，且按工作集降序
         let summed: u64 = report.processes.iter().map(|entry| entry.working_set).sum();

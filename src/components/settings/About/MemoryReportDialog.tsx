@@ -67,6 +67,9 @@ export function MemoryReportDialog({
 					`- ${process.name}${process.role ? ` [${process.role}]` : ""} (pid ${process.pid}, 父 ${process.parentPid}) 工作集 ${formatBytes(process.workingSet)} / 私有 ${formatBytes(process.privateBytes)}`,
 				);
 			}
+			lines.push(
+				`- Rust 堆（分配器计数，本进程原生分配）存活 ${formatBytes(report.processes.rustHeapBytes)} / 峰值 ${formatBytes(report.processes.rustHeapPeakBytes)}`,
+			);
 		}
 		if (report.heap) {
 			lines.push("", "## V8 堆", `- 已用 ${formatBytes(report.heap.usedJSHeapSize)}`);
@@ -228,6 +231,15 @@ function SummaryCards({ report }: { report: MemoryReport }) {
 				? formatBytes(report.processes.totalPrivateBytes)
 				: "—",
 			detail: "更接近实际占用 / 可回收量",
+		},
+		{
+			label: "Rust 堆（分配器计数）",
+			value: report.processes
+				? formatBytes(report.processes.rustHeapBytes)
+				: "—",
+			detail: report.processes
+				? `历史峰值 ${formatBytes(report.processes.rustHeapPeakBytes)} · 本进程原生分配`
+				: "不可用",
 		},
 		{
 			label: "V8 已用堆",

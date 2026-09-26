@@ -69,6 +69,10 @@ export interface ProcessMemoryReport {
 	totalWorkingSet: number;
 	/** 私有提交量之和：更接近「这套进程实际占了多少、关掉能还回多少」 */
 	totalPrivateBytes: number;
+	/** 本进程 Rust 堆存活字节数（Rust 全局分配器计数口径，不含 WebView2 渲染进程） */
+	rustHeapBytes: number;
+	/** Rust 堆历史峰值（同一口径）：稳态远低于峰值或只涨不落都能据此看出 */
+	rustHeapPeakBytes: number;
 	processes: ProcessMemoryEntry[];
 }
 

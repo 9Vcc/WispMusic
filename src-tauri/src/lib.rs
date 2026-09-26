@@ -1,3 +1,4 @@
+mod alloc_stats;
 mod audio;
 mod cache;
 mod dev_watchdog;
@@ -9,6 +10,11 @@ mod process_memory;
 mod smtc;
 mod thumbbar;
 mod unm;
+
+/// Rust 堆占用记账（诊断用，见 alloc_stats）。常态常开：内存报告要能覆盖
+/// release 构建，而 release 正是需要诊断的那个
+#[global_allocator]
+static GLOBAL_ALLOCATOR: alloc_stats::CountingAllocator = alloc_stats::CountingAllocator;
 
 use percent_encoding::percent_decode_str;
 use std::sync::atomic::{AtomicBool, Ordering};
