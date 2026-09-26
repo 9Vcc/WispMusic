@@ -78,5 +78,8 @@ tauri-plugin-updater = "2"
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# 音频/DSP 运行在实时线程上，个别路径（内嵌 soundtouch、rodio 解码器构造）
+# 仍可能 panic。用 unwind 而非 abort，让 catch_unwind 兜底把单次播放失败
+# 降级为停止当前源，而不是整个进程闪退。
+panic = "unwind"
 strip = true

@@ -8,13 +8,19 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Condvar, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::watch;
 
 use super::mp4_decoder::Mp4Decoder;
 
 pub(super) type BoxedAudioSource = Box<dyn Source<Item = i16> + Send>;
+
+/// SeekFrom::End 等待总长度（下载完成/拿到 Content-Length）的硬上限。
+/// 正常流式播放早已拿到 Content-Length 而立即返回；只有在缺长度的畸形流
+/// 叠上源站僵死时才会耗尽这段时间——宁可报错停当前源，也不能把音频回调线程
+/// 永久占住（表现为整应用卡死）。
+const STREAMING_END_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// data 预分配上限。Content-Length 已知时按它一次性预留，避免 Vec 逐次倍增
 /// 扩容在最后一次重分配时同时持有「旧 + 新」两块（≈2× 当前长度）的瞬时峰值。
@@ -341,6 +347,11 @@ impl Seek for StreamingReader {
                 let mut state = self.shared.state.lock().map_err(|_| {
                     io::Error::new(ErrorKind::Other, "streaming audio buffer poisoned")
                 })?;
+                // 等待总长度确定（下载完成或拿到 Content-Length）期间，若源站
+                // 僵死、complete 永不到来，这个循环会把调用方（音频回调线程）
+                // 永久占住 → 表现为卡死。给一个硬上限，超时后按错误退出；
+                // cancelled / error 两条早退路径本就能提前结束正常等待。
+                let deadline = Instant::now() + STREAMING_END_WAIT_TIMEOUT;
                 while !state.complete {
                     if self.is_cancelled() {
                         return Err(Self::cancelled_error());
@@ -348,7 +359,13 @@ impl Seek for StreamingReader {
                     if let Some(error) = state.error.clone() {
                         return Err(io::Error::new(ErrorKind::Other, error));
                     }
-                    let (next_state, _) = self
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            "streaming audio length wait timed out",
+                        ));
+                    }
+                    let (next_state, wait) = self
                         .shared
                         .available
                         .wait_timeout(state, Duration::from_millis(250))
@@ -356,6 +373,12 @@ impl Seek for StreamingReader {
                             io::Error::new(ErrorKind::Other, "streaming audio buffer poisoned")
                         })?;
                     state = next_state;
+                    if wait.timed_out() && Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            "streaming audio length wait timed out",
+                        ));
+                    }
                 }
                 // 落地后 total_len 已被 finish 校正为文件实际长度，
                 // 未落地时它就是 Content-Length

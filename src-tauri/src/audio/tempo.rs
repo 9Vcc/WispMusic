@@ -96,16 +96,33 @@ where
             return;
         }
         self.speed = speed;
-        self.engine.set_tempo(speed as f64);
-        // 丢弃引擎内缓存的旧速样本，避免切换后先播一段错误时长的内容；
-        // pending_out 里已产出的样本保留继续播，切换处不做无谓的断音
-        let _ = self.engine.clear();
         self.drained = false;
+        // 引擎内部（soundtouch WSOLA）有硬 assert，畸形缓冲状态下可能 panic；
+        // release 虽已改 unwind，但这里仍就地兜住：切速失败只丢引擎缓存，
+        // 让后续按当前 speed 直通产出，绝不因切速打挂整个音频线程。
+        let guard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.engine.set_tempo(speed as f64);
+            // 丢弃引擎内缓存的旧速样本，避免切换后先播一段错误时长的内容；
+            // pending_out 里已产出的样本保留继续播，切换处不做无谓的断音
+            let _ = self.engine.clear();
+        }));
+        if guard.is_err() {
+            eprintln!("[audio] soundtouch engine panicked during apply_speed({speed})");
+        }
     }
 
     /// 从 inner 拉一段交错 i16，转成 planar f32 喂给引擎，并把引擎输出
     /// 攒到 pending_out。返回是否产出样本。
+    ///
+    /// 引擎的 put/receive/flush 在 vendored soundtouch 里有 assert! 与减法回绕，
+    /// 偶现（变速 + seek/切速后缓冲稀疏的帧边界）会 panic；这里就地捕获，
+    /// 转成普通 Err，由 `Iterator::next` 优雅停止当前源而非闪退。
     fn process_chunk(&mut self) -> Result<bool, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.process_chunk_inner()))
+            .unwrap_or_else(|payload| Err(engine_panic_message(payload)))
+    }
+
+    fn process_chunk_inner(&mut self) -> Result<bool, String> {
         // 原速直通：不经过引擎，零延迟零损耗
         if (self.speed - 1.0).abs() < f32::EPSILON {
             let mut frames = 0usize;
@@ -247,11 +264,25 @@ where
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         let result = self.inner.try_seek(pos);
         // 丢弃旧位置的缓冲样本，让 seek 后立即产出新位置音频
-        let _ = self.engine.clear();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = self.engine.clear();
+        }));
         self.pending_out.clear();
         self.drained = false;
         result
     }
+}
+
+/// 把 catch_unwind 捕获的 panic payload 归一化成可读的错误字符串。
+fn engine_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    let detail = if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "unknown panic".to_string()
+    };
+    format!("soundtouch engine panicked: {detail}")
 }
 
 #[cfg(test)]

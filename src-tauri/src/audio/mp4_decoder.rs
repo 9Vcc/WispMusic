@@ -167,8 +167,10 @@ impl Mp4Decoder {
             pos.as_secs_f64().into()
         };
 
-        // 对齐帧内通道偏移，seek 后从正确的通道继续
-        let to_skip = self.current_frame_offset % self.channels() as usize;
+        // 对齐帧内通道偏移，seek 后从正确的通道继续。声道数为 0 时
+        // （探测异常的畸形流）取模会除零 panic，用 max(1) 兜底跳过 0 个通道。
+        let channels = self.channels().max(1) as usize;
+        let to_skip = self.current_frame_offset % channels;
 
         let seek_res = self
             .format

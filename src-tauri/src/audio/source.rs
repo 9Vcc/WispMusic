@@ -97,6 +97,20 @@ pub(super) async fn resolve_audio_source(
     }))
 }
 
+/// 流式下载单个分块之间的最长空转等待。CDN 偶发抖动远小于此值；超过即判定
+/// 死流，报错停止，避免下载任务被永久占住、进而饿死音频回调要的缓冲。
+const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 流式下载共用的 reqwest 客户端：只约束连接建立阶段（死地址或 DNS 挂起
+/// 会把下载任务永久占住，间接饿死音频回调要的缓冲），不设整体 `.timeout()`
+/// ——那会掐断正常的长音频流；分块级空转由读取循环里的 `tokio::time::timeout` 兜。
+fn streaming_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+}
+
 async fn resolve_remote_audio_source(
     app: &AppHandle,
     url: &str,
@@ -121,7 +135,9 @@ async fn resolve_remote_audio_source(
         return Ok(None);
     }
 
-    let response = reqwest::get(url)
+    let response = streaming_client()
+        .get(url)
+        .send()
         .await
         .map_err(|err| format!("request audio url failed: {err}"))?;
     if !response.status().is_success() {
@@ -130,10 +146,13 @@ async fn resolve_remote_audio_source(
     let content_type = content_type(response.headers());
     let content_length = content_length(response.headers());
     let mut stream = response.bytes_stream();
-    let Some(first_chunk) = stream.next().await else {
-        return Err("audio response was empty".to_string());
+    let first_chunk = match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await {
+        Ok(Some(chunk)) => {
+            chunk.map_err(|err| format!("read audio response failed: {err}"))?
+        }
+        Ok(None) => return Err("audio response was empty".to_string()),
+        Err(_) => return Err("audio response first chunk timed out".to_string()),
     };
-    let first_chunk = first_chunk.map_err(|err| format!("read audio response failed: {err}"))?;
 
     let temp_path = final_path.with_extension(format!("part-{}", unique_suffix()));
 
@@ -179,10 +198,26 @@ async fn resolve_remote_audio_source(
                         file.write_all(&first_chunk_for_file)
                             .map_err(|err| format!("write temp audio file failed: {err}"))?;
 
-                        while let Some(chunk) = stream.next().await {
+                        loop {
                             if is_stale_request(&latest_request_id_for_download, request_id) {
                                 return Err("streaming audio load cancelled".to_string());
                             }
+
+                            // 连接中途僵死时 next() 可能永不返回，让整条流式
+                            // 下载任务被永久占住；加空闲超时把死流转成普通错误
+                            let next =
+                                match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await
+                                {
+                                    Ok(next) => next,
+                                    Err(_) => {
+                                        return Err(
+                                            "streaming audio read idle timeout".to_string()
+                                        )
+                                    }
+                                };
+                            let Some(chunk) = next else {
+                                break;
+                            };
 
                             let chunk = chunk.map_err(|err| {
                                 format!("read streaming audio response failed: {err}")
@@ -444,7 +479,7 @@ async fn stream_range_into_tail(
 ) -> RangeStreamOutcome {
     use futures_util::StreamExt;
 
-    let response = match reqwest::Client::new()
+    let response = match streaming_client()
         .get(url)
         .header(reqwest::header::RANGE, format!("bytes={target}-"))
         .send()
@@ -464,7 +499,17 @@ async fn stream_range_into_tail(
     let mut stream = response.bytes_stream();
     loop {
         tokio::select! {
-            chunk = stream.next() => {
+            res = tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()) => {
+                // 半开连接下 next() 可能永不返回，超时后按失败退出，
+                // 让 reader 退回等待主顺序下载推进
+                let chunk = match res {
+                    Ok(chunk) => chunk,
+                    Err(_) => {
+                        return RangeStreamOutcome::Failed(
+                            "range stream idle timeout".to_string(),
+                        )
+                    }
+                };
                 let Some(chunk) = chunk else {
                     return RangeStreamOutcome::Finished;
                 };
