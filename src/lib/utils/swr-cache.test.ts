@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSwrLruCache } from "./swr-cache";
+import { createSwrLruCache, estimateCacheValueBytes } from "./swr-cache";
 
 /** SWR 缓存里存的是它的 state 对象，这里用最小替身 */
 const state = (data: unknown) => ({ data, isValidating: false }) as never;
@@ -57,5 +57,37 @@ describe("createSwrLruCache", () => {
 			cache.set(`new-${key}`, state(0));
 		}
 		expect(seen).toEqual(["a", "b"]);
+	});
+
+	it("字节预算：堆起多张大歌单时淘汰最旧的，而不只靠条数上限", () => {
+		const playlist = (n: number) =>
+			Array.from({ length: 50 }, (_, i) => ({
+				id: n * 100 + i,
+				name: `song-${i}`,
+				ar: "artist",
+			}));
+		// 预算按同一估算口径只装得下两条（state.data 才是被估算的部分）
+		const perEntry = estimateCacheValueBytes(playlist(0));
+		const cache = createSwrLruCache(64, perEntry * 2 + 64);
+
+		for (let i = 0; i < 5; i += 1) {
+			cache.set(`playlist-tracks-${i}`, state(playlist(i)));
+		}
+
+		expect(hit(cache, "playlist-tracks-0")).toBe(false);
+		expect(hit(cache, "playlist-tracks-1")).toBe(false);
+		expect(hit(cache, "playlist-tracks-4")).toBe(true);
+		expect([...cache.keys()].length).toBeLessThanOrEqual(2);
+	});
+
+	it("估算随数据规模增长：同一结构的 500 首应远大于 1 首", () => {
+		const song = (i: number) => ({ id: i, name: `song-${i}`, ar: "artist" });
+		const one = estimateCacheValueBytes([song(0)]);
+		const many = estimateCacheValueBytes(
+			Array.from({ length: 500 }, (_, i) => song(i)),
+		);
+
+		expect(one).toBeGreaterThan(0);
+		expect(many).toBeGreaterThan(one * 50);
 	});
 });

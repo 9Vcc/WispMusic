@@ -20,6 +20,69 @@ import { createLruCache } from "./lru";
 export const SWR_CACHE_LIMIT = 64;
 
 /**
+ * 缓存总字节预算（估算口径）。条数上限对「单条可以很大」的 key 不够用：
+ * `playlist-tracks-<id>` 一张千首歌单就是 1MB 量级，深挖几十张大歌单能压到
+ * 数十 MB。24MB 比正常浏览的峰值（当前页 + 首页区块 + 侧边栏十几条）宽松得多，
+ * 只在真的堆起多张大歌单时才开始淘汰最旧的那张。
+ */
+export const SWR_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+
+const ESTIMATE_SCALAR_BYTES = 8;
+const ESTIMATE_CONTAINER_BYTES = 24;
+/** 单条估算的节点上限：大歌单不整棵走完，估算只用于淘汰，偏差几成不影响结论 */
+const ESTIMATE_NODE_BUDGET = 20000;
+const ESTIMATE_MAX_DEPTH = 6;
+
+/**
+ * 估算一条缓存值占的字节数（估算口径，供 [[createLruCache]] 的字节预算使用）：
+ * 字符串按 UTF-16 长度、标量按 8 字节、对象/数组加固定开销，节点数与深度有上限。
+ */
+export function estimateCacheValueBytes(value: unknown): number {
+	return estimateNode(value, ESTIMATE_MAX_DEPTH, {
+		nodes: ESTIMATE_NODE_BUDGET,
+	});
+}
+
+function estimateNode(
+	value: unknown,
+	depth: number,
+	budget: { nodes: number },
+): number {
+	if (budget.nodes <= 0) return 0;
+	budget.nodes -= 1;
+
+	if (value === null || value === undefined) return ESTIMATE_SCALAR_BYTES;
+	switch (typeof value) {
+		case "string":
+			return value.length * 2 + ESTIMATE_SCALAR_BYTES;
+		case "number":
+		case "boolean":
+		case "bigint":
+			return ESTIMATE_SCALAR_BYTES;
+		case "function":
+		case "symbol":
+			return 0;
+	}
+
+	if (depth <= 0) return ESTIMATE_CONTAINER_BYTES;
+	if (Array.isArray(value)) {
+		let total = ESTIMATE_CONTAINER_BYTES;
+		for (const item of value) {
+			total += estimateNode(item, depth - 1, budget);
+			if (budget.nodes <= 0) break;
+		}
+		return total;
+	}
+
+	let total = ESTIMATE_CONTAINER_BYTES;
+	for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+		total += key.length * 2 + estimateNode(item, depth - 1, budget);
+		if (budget.nodes <= 0) break;
+	}
+	return total;
+}
+
+/**
  * 最近一次创建的缓存实例（provider 在根部只调用一次）。
  * 仅供调试面板做归因——除了读键与取值不做别的事，也不常驻任何引用。
  */
@@ -28,8 +91,12 @@ let activeCache: ReturnType<typeof createLruCache<string, State<unknown>>> | nul
 
 export function createSwrLruCache(
 	limit: number = SWR_CACHE_LIMIT,
+	maxBytes: number = SWR_CACHE_MAX_BYTES,
 ): Cache<unknown> {
-	const store = createLruCache<string, State<unknown>>(limit);
+	const store = createLruCache<string, State<unknown>>(limit, {
+		estimateSize: (state) => estimateCacheValueBytes(state?.data),
+		maxBytes,
+	});
 	activeCache = store;
 
 	return {

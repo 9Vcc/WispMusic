@@ -16,14 +16,43 @@ export interface LruCache<K, V> {
 	keys(): K[];
 }
 
-export function createLruCache<K, V>(limit: number): LruCache<K, V> {
-	const max = Math.max(1, Math.floor(limit));
-	const store = new Map<K, V>();
+export interface LruCacheOptions<V> {
+	/** 估算单条值占的字节数。与 maxBytes 一起给出时，总量超预算也会从最旧淘汰 */
+	estimateSize?: (value: V) => number;
+	/** 总字节预算（estimateSize 的口径）。条数上限对「单条可以很大」的缓存不够用
+	 *  （如整张歌单），字节预算才是真正贴近内存的那个上限 */
+	maxBytes?: number;
+}
 
-	// 先删后插把 key 推到队尾，使其成为「最近使用」
-	const touch = (key: K, value: V) => {
+export function createLruCache<K, V>(
+	limit: number,
+	options: LruCacheOptions<V> = {},
+): LruCache<K, V> {
+	const max = Math.max(1, Math.floor(limit));
+	const { estimateSize, maxBytes } = options;
+	const store = new Map<K, V>();
+	const sizes = new Map<K, number>();
+	let totalBytes = 0;
+
+	const forget = (key: K) => {
+		totalBytes -= sizes.get(key) ?? 0;
+		sizes.delete(key);
 		store.delete(key);
-		store.set(key, value);
+	};
+
+	const evictWhileOver = () => {
+		while (store.size > max) {
+			const oldest = store.keys().next().value;
+			if (oldest === undefined) break;
+			forget(oldest);
+		}
+		// 字节预算下至少保留最新一条：单条本身就超预算时不能把它自己淘汰掉，
+		// 否则每次写入都被立刻清空，读侧永远 miss 并反复重取
+		while (maxBytes !== undefined && totalBytes > maxBytes && store.size > 1) {
+			const oldest = store.keys().next().value;
+			if (oldest === undefined) break;
+			forget(oldest);
+		}
 	};
 
 	return {
@@ -33,22 +62,27 @@ export function createLruCache<K, V>(limit: number): LruCache<K, V> {
 		get(key) {
 			const value = store.get(key);
 			if (value === undefined) return undefined;
-			touch(key, value);
+			// 命中只调整顺序，不重新估算：约定值不可变（SWR 每次写入新 state
+			// 对象），估算在 set 时算一次即可，避免大对象在每次读取时全量走一遍
+			store.delete(key);
+			store.set(key, value);
 			return value;
 		},
 		has(key) {
 			return store.has(key);
 		},
 		set(key, value) {
-			touch(key, value);
-			while (store.size > max) {
-				const oldest = store.keys().next().value;
-				if (oldest === undefined) break;
-				store.delete(oldest);
-			}
+			forget(key);
+			store.set(key, value);
+			const size = estimateSize ? Math.max(0, estimateSize(value)) : 0;
+			sizes.set(key, size);
+			totalBytes += size;
+			evictWhileOver();
 		},
 		delete(key) {
-			return store.delete(key);
+			const existed = store.has(key);
+			forget(key);
+			return existed;
 		},
 		keys() {
 			return [...store.keys()];
