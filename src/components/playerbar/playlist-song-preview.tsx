@@ -105,19 +105,29 @@ export const PlaylistSongPreview = memo(
 							{song.name}
 						</span>
 						<div className="line-clamp-1">
-							{song.ar.map((ar, idx) => (
-								<Link
-									to={`/detail/artist/${ar.id}`}
-									key={`${song.id}-${ar.id}-${idx}`}
-									onClick={() => setOpen(false)}
-									className={cn(
-										"text-sm text-foreground/60 hover:text-foreground/80",
-										artistStyle,
-									)}
-								>
-									{ar.name} {idx < song.ar.length - 1 && "、"}
-								</Link>
-							))}
+							{song.ar.map((ar, idx) =>
+								ar.id ? (
+									<Link
+										to={`/detail/artist?id=${ar.id}`}
+										key={`${song.id}-${ar.id}-${idx}`}
+										draggable={false}
+										onClick={() => setOpen(false)}
+										className={cn(
+											"text-sm text-foreground/60 hover:text-foreground/80",
+											artistStyle,
+										)}
+									>
+										{ar.name} {idx < song.ar.length - 1 && "、"}
+									</Link>
+								) : (
+									<span
+										key={`${song.id}-${ar.name}`}
+										className={cn("text-sm text-foreground/60", artistStyle)}
+									>
+										{ar.name} {idx < song.ar.length - 1 && "、"}
+									</span>
+								),
+							)}
 						</div>
 					</div>
 				</div>
