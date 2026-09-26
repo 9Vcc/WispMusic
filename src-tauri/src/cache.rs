@@ -14,8 +14,12 @@ pub struct CacheState {
     pub downloading: Arc<Mutex<HashSet<String>>>,
 }
 
-const UNSET_CACHE_LIMIT_BYTES: u64 = u64::MAX;
-static AUDIO_CACHE_LIMIT_BYTES: AtomicU64 = AtomicU64::new(UNSET_CACHE_LIMIT_BYTES);
+/// 默认缓存上限（10 GiB，与前端的默认设置一致）。此前默认 `u64::MAX` 表示
+/// 「前端设限命令到达前永不清理」，启动早期或设置水合失败时缓存即无上限增长；
+/// 现在默认值本身就是兜底，前端随后按用户设置覆盖。
+const DEFAULT_AUDIO_CACHE_LIMIT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+static AUDIO_CACHE_LIMIT_BYTES: AtomicU64 =
+    AtomicU64::new(DEFAULT_AUDIO_CACHE_LIMIT_BYTES);
 
 struct CacheFile {
     path: PathBuf,
@@ -79,13 +83,21 @@ fn collect_cache_files(dir: PathBuf, label: &str) -> Result<Vec<CacheFile>, Stri
             continue;
         };
         if metadata.is_file() {
+            // 淘汰序的时间键取 accessed 与 modified 的较大者：Windows/NTFS
+            // 默认关闭最后访问时间更新，accessed 常年停在文件创建时刻，
+            // 单用它等于让淘汰顺序变成 read_dir 的任意序（可能删掉刚播过的歌）；
+            // modified 至少反映“何时写入缓存”，取较大者即可在能追踪访问时间的
+            // 环境退化成真 LRU，在不能追踪的环境退化成 FIFO
+            let accessed = metadata
+                .accessed()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             files.push(CacheFile {
                 path,
                 size: metadata.len(),
-                accessed: metadata
-                    .accessed()
-                    .or_else(|_| metadata.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                accessed: accessed.max(modified),
             });
         }
     }
@@ -140,10 +152,6 @@ pub(crate) fn enforce_configured_audio_cache_limit_excluding(
     preserve_path: &Path,
 ) -> Result<(), String> {
     let max_bytes = AUDIO_CACHE_LIMIT_BYTES.load(Ordering::Relaxed);
-    if max_bytes == UNSET_CACHE_LIMIT_BYTES {
-        return Ok(());
-    }
-
     enforce_audio_cache_limit_impl(app, max_bytes, Some(preserve_path))
 }
 
@@ -254,4 +262,33 @@ pub fn enforce_audio_cache_limit(app: AppHandle, max_bytes: u64) -> Result<(), S
 pub fn set_audio_cache_limit(app: AppHandle, max_bytes: u64) -> Result<(), String> {
     AUDIO_CACHE_LIMIT_BYTES.store(max_bytes, Ordering::Relaxed);
     enforce_audio_cache_limit_impl(&app, max_bytes, None)
+}
+
+/// 启动清扫孤儿临时文件，两个缓存目录各扫一遍：
+/// · `native_audio/*.part-*`：原生音频流式落盘的中间文件（下载中途切歌/进程
+///   被强退即残留，此后无人回收）；
+/// · `audio_cache/*.tmp`：旧缓存路径的中间文件（写失败或崩溃时残留）。
+/// 应用单实例，启动时刻不可能有进行中的下载，遇到即删。
+pub(crate) fn cleanup_orphan_temp_files(app: &AppHandle) {
+    let mut removed = 0usize;
+    for dir in [get_native_cache_dir(app), get_cache_dir(app)]
+        .into_iter()
+        .flatten()
+    {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains(".part-") || name.ends_with(".tmp") {
+                if std::fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("[cache] 启动清扫孤儿临时文件 {removed} 个");
+    }
 }

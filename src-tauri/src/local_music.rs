@@ -23,6 +23,46 @@ pub struct LocalTrack {
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg", "aac"];
 
+/// 封面缓存 TTL（30 天）。封面按内容哈希落盘（save_cover_art），删曲/换曲后
+/// 没有任何引用信息可比对，只能按时间淘汰：启动清扫删除超过 TTL 未写入的封面。
+/// 文件按需重建（下次扫描从音频文件重新提取），属纯缓存，删掉只损失一次提取。
+const COVER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+/// 封面缓存目录（app_data/covers）
+fn covers_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|dir| dir.join("covers"))
+}
+
+/// 启动清扫过期封面（见 COVER_CACHE_TTL）。放在启动早期、前端本地曲库扫描之前，
+/// 避免清扫删掉本次扫描刚写出的封面
+pub(crate) fn cleanup_stale_covers(app: &tauri::AppHandle) {
+    let Some(dir) = covers_dir(app) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age > COVER_CACHE_TTL && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        eprintln!("[LocalMusicScanner] 清扫过期封面缓存 {removed} 个");
+    }
+}
+
 #[tauri::command]
 pub fn scan_local_music(app: tauri::AppHandle, dir: String) -> Result<Vec<LocalTrack>, String> {
     let path = Path::new(&dir);

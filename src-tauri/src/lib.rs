@@ -555,6 +555,15 @@ pub fn run() {
             // 避免终端侧结束 dev 后留下孤儿实例。release 下是空实现。
             dev_watchdog::spawn_watchdog(app.handle().clone());
 
+            // 启动后台清扫磁盘缓存：孤儿临时文件（下载中途切歌/强退残留的
+            // .part-* 与 .tmp）与过期封面缓存。放后台线程，不拖慢启动；
+            // 封面清扫要赶在前端本地曲库扫描之前跑（见 cleanup_stale_covers）
+            let cleanup_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                cache::cleanup_orphan_temp_files(&cleanup_handle);
+                local_music::cleanup_stale_covers(&cleanup_handle);
+            });
+
             // 主窗口 visible: false 启动，由前端在首帧就绪后显示；
             // 这里兜底：前端异常未能显示时 5s 后强制显示，避免应用"隐形"
             if let Some(window) = app.get_webview_window("main") {
