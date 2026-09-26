@@ -291,12 +291,30 @@ async fn resolve_remote_audio_source(
     file.write_all(&first_chunk)
         .map_err(|err| format!("write temp audio file failed: {err}"))?;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
         if is_stale_request(&latest_request_id, request_id) {
             drop(file);
             let _ = std::fs::remove_file(&temp_path);
             return Ok(None);
         }
+
+        // 与流式分支同样兜住半开连接：next() 可能永不返回，否则任务连同
+        // File 句柄与 .part 文件会被死连接永久占住
+        let next = match tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                drop(file);
+                let _ = std::fs::remove_file(&temp_path);
+                return if is_stale_request(&latest_request_id, request_id) {
+                    Ok(None)
+                } else {
+                    Err("read audio response idle timeout".to_string())
+                };
+            }
+        };
+        let Some(chunk) = next else {
+            break;
+        };
 
         let chunk = match chunk {
             Ok(chunk) => chunk,

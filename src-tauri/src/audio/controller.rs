@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    mpsc, Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use tauri::AppHandle;
@@ -11,15 +14,25 @@ use super::snapshot::{current_snapshot, duration_secs};
 use super::source::{probe_source_duration, resolve_audio_source};
 pub use super::types::{AudioSnapshot, PreloadResult};
 
+/// 命令队列容量。音频线程逐个串行执行命令（一次 seek/切设备可能占住数秒），
+/// 期间 UI 命令只入队；不设上限时拖动类操作可无限堆积。256 条远高于正常
+/// 突发（单条仅百字节量级），只在音频线程已被长操作占住时才有意义地生效。
+const AUDIO_COMMAND_QUEUE_CAPACITY: usize = 256;
+
+/// 等待音频线程回包的上限。与流式读取的空闲超时同量级：seek 在僵死流上
+/// 最坏要等约 20s 才报错。超时后不再让调用方（blocking 池任务）无限 park，
+/// 而是尽快返回错误——UI 靠 250ms 快照事件自会校正状态。
+const AUDIO_COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
+
 pub struct AudioState {
-    tx: mpsc::Sender<AudioCommand>,
+    tx: mpsc::SyncSender<AudioCommand>,
     snapshot: Arc<Mutex<AudioSnapshot>>,
     latest_request_id: Arc<AtomicU64>,
 }
 
 impl AudioState {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(AUDIO_COMMAND_QUEUE_CAPACITY);
         let snapshot = Arc::new(Mutex::new(AudioSnapshot::idle(0.7, 0)));
         let snapshot_for_thread = Arc::clone(&snapshot);
 
@@ -244,11 +257,22 @@ where
     F: FnOnce(ResponseTx) -> AudioCommand,
 {
     let (respond_to, response) = mpsc::channel();
-    state
-        .tx
-        .send(build(respond_to))
-        .map_err(|_| "audio thread is not available".to_string())?;
+    // 队列满说明音频线程已被长操作占住且积压到上限：直接拒绝这条新命令，
+    // 而不是让调用方（blocking 池任务）park 在 send 上继续堆积
+    state.tx.try_send(build(respond_to)).map_err(|err| match err {
+        mpsc::TrySendError::Full(_) => {
+            "audio command queue is full, request dropped".to_string()
+        }
+        mpsc::TrySendError::Disconnected(_) => "audio thread is not available".to_string(),
+    })?;
     response
-        .recv()
-        .map_err(|_| "audio thread dropped response".to_string())?
+        .recv_timeout(AUDIO_COMMAND_RESPONSE_TIMEOUT)
+        .map_err(|err| match err {
+            mpsc::RecvTimeoutError::Timeout => {
+                "audio thread did not respond in time".to_string()
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                "audio thread dropped response".to_string()
+            }
+        })?
 }
