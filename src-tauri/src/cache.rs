@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
 pub struct CacheState {
@@ -204,7 +205,13 @@ pub async fn cache_audio(
 
         let temp_path = path.with_extension("tmp");
 
-        let client = Client::new();
+        // 旧缓存路径的单条下载：只约束连接建立与分块之间空转，不设整体超时
+        // （会掐断正常的大文件下载）。此前无任何超时——死流会让任务、缓存
+        // 内的 downloading 标记与 .tmp 文件一起永久挂住
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
         let res = client.get(&url).send().await.map_err(|e| e.to_string())?;
 
         if !res.status().is_success() {
@@ -214,11 +221,35 @@ pub async fn cache_audio(
         let mut file = File::create(&temp_path).map_err(|e| e.to_string())?;
         let mut stream = res.bytes_stream();
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
-            file.write_all(&chunk).map_err(|e| e.to_string())?;
+        loop {
+            let next = match tokio::time::timeout(Duration::from_secs(20), stream.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    // 必须先关句柄再删：Windows 上打开着的文件删不掉
+                    drop(file);
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err("缓存下载空闲超时".to_string());
+                }
+            };
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(err.to_string());
+                }
+            };
+            if let Err(err) = file.write_all(&chunk) {
+                drop(file);
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(err.to_string());
+            }
         }
 
+        drop(file);
         std::fs::rename(temp_path, &path).map_err(|e| e.to_string())?;
         enforce_configured_audio_cache_limit_excluding(&app, &path)?;
         Ok(())
