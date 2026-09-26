@@ -18,7 +18,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Weak,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -182,7 +182,7 @@ async fn resolve_remote_audio_source(
                 // 位置发起新的范围请求灌入 tail，避免顺序等待整段下载数据
                 tauri::async_runtime::spawn(run_fast_forward_watch(
                     url.to_string(),
-                    Arc::clone(&shared),
+                    Arc::downgrade(&shared),
                     Arc::clone(&latest_request_id),
                     request_id,
                 ));
@@ -425,13 +425,27 @@ enum RangeStreamOutcome {
 /// 监听 reader 的快进请求并向源站发起 Range 请求，把目标位置之后的数据
 /// 灌入 StreamingBuffer 的 tail 区域。原顺序下载不受影响，继续写落盘缓存，
 /// 因此缓存文件始终完整有效。
+///
+/// 只持缓冲的 `Weak`：本任务 park 在 `rx.changed()` 期间绝不能是强持有者。
+/// watch 的 Sender 就住在 StreamingBuffer 内部，若任务同时持有 Arc 与 Receiver，
+/// 会形成自环——Sender 永不被 drop，`rx.changed()` 也永不返回 Err；切歌后
+/// reader 与下载任务都已退出，本任务却永久 park，把整份流缓冲（data 预留
+/// 最多 24MB + tail 最多 32MB）钉死在堆上，表现为越切歌内存越高。
+/// 用 Weak 后：reader 与下载任务都释放时缓冲被 drop → Sender 随之 drop →
+/// `rx.changed()` 立即返回 Err → 本任务退出并释放 url 等自身持有。
+/// 需要写缓冲时再临时 `upgrade()`，用完即放，短时强引用不会阻塞回收。
 async fn run_fast_forward_watch(
     url: String,
-    shared: Arc<super::streaming::StreamingBuffer>,
+    shared: Weak<super::streaming::StreamingBuffer>,
     latest_request_id: Arc<AtomicU64>,
     request_id: u64,
 ) {
-    let mut rx = shared.fast_forward_receiver();
+    let Some(buffer) = shared.upgrade() else {
+        return;
+    };
+    let mut rx = buffer.fast_forward_receiver();
+    drop(buffer);
+
     loop {
         if is_stale_request(&latest_request_id, request_id) {
             return;
@@ -442,12 +456,15 @@ async fn run_fast_forward_watch(
         let Some(target) = *rx.borrow_and_update() else {
             continue;
         };
+        let Some(buffer) = shared.upgrade() else {
+            return;
+        };
 
-        shared.reset_tail(target);
+        buffer.reset_tail(target);
         let outcome = stream_range_into_tail(
             &url,
             target,
-            &shared,
+            &buffer,
             &mut rx,
             &latest_request_id,
             request_id,
@@ -459,13 +476,16 @@ async fn run_fast_forward_watch(
             RangeStreamOutcome::Failed(err) => {
                 // Range 不可用（源站不支持/网络错误）：标记 tail 结束，
                 // reader 退回等待主顺序下载推进，行为与旧版一致
-                shared.tail_finished();
+                buffer.tail_finished();
                 if is_stale_request(&latest_request_id, request_id) {
                     return;
                 }
                 let _ = err;
             }
         }
+        // 回到 park 前必须放掉强引用（迭代末尾本会自动 drop，显式写出防止
+        // 后续重构把 await 移到作用域内又造出自环）
+        drop(buffer);
     }
 }
 

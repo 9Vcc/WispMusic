@@ -100,7 +100,8 @@ impl StreamingBuffer {
         if !state.tail_data.is_empty() {
             let tail_end = state.tail_start + state.tail_data.len() as u64;
             if state.data.len() as u64 >= tail_end {
-                state.tail_data.clear();
+                // 同上：换掉整个 Vec 归还容量，而不是 clear() 留着
+                state.tail_data = Vec::new();
                 state.tail_done = true;
                 // tail 已无用，取消后台 Range 流
                 self.fast_forward_tx
@@ -138,6 +139,11 @@ impl StreamingBuffer {
         if let Ok(mut state) = self.state.lock() {
             state.error = Some(message);
             state.complete = true;
+            // data 内容保留（reader 可能还在播已缓冲的部分），但把按
+            // Content-Length 预留的容量归还——下载既然失败/被取消，未下载到的
+            // 那部分预留（最多 24MB）就是纯占位。shrink_to_fit 不动 len，
+            // 只换一块实际大小的分配，reader 读到的字节不变。
+            state.data.shrink_to_fit();
             self.available.notify_all();
         }
     }
@@ -166,7 +172,10 @@ impl StreamingBuffer {
     pub(super) fn reset_tail(&self, start: u64) {
         if let Ok(mut state) = self.state.lock() {
             state.tail_start = start;
-            state.tail_data.clear();
+            // 用 take 换掉整个 Vec 而不是 clear()：clear 会保留上一次快进的
+            // 容量（tail 上限 32MB），而这轮新目标通常远用不到那么多；
+            // 换成空 Vec 把上次的容量真正还给分配器
+            state.tail_data = Vec::new();
             state.tail_done = false;
             self.available.notify_all();
         }
@@ -214,6 +223,15 @@ impl StreamingBuffer {
             .lock()
             .map(|state| state.file.is_some())
             .unwrap_or(false)
+    }
+
+    /// 内存容量快照 (data 容量, tail 容量)，测试断言「容量已归还」用
+    #[cfg(test)]
+    pub(super) fn debug_capacities(&self) -> (usize, usize) {
+        self.state
+            .lock()
+            .map(|state| (state.data.capacity(), state.tail_data.capacity()))
+            .unwrap_or((0, 0))
     }
 }
 
@@ -624,6 +642,7 @@ fn looks_like_iso_bmff(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::FutureExt;
     use std::io::Write;
 
     fn temp_stream_file(name: &str, bytes: &[u8]) -> PathBuf {
@@ -905,5 +924,67 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// 回归：快进监视任务靠「缓冲被 drop → Sender 随之 drop → rx.changed()
+    /// 返回 Err」退出。若这条链路不成立（例如任务又改成持强引用自环），
+    /// 任务会永久 park 并把整份流缓冲钉在堆上。
+    #[test]
+    fn dropping_buffer_closes_fast_forward_channel() {
+        let mut rx = {
+            let shared = StreamingBuffer::new(Some(4096), None);
+            let mut rx = shared.fast_forward_receiver();
+            // 发送端仍在（缓冲存活）时 changed() 挂起
+            assert!(
+                rx.changed().now_or_never().is_none(),
+                "缓冲存活时 changed() 不应就绪"
+            );
+            // 最后一个强引用离开（reader 与下载任务都退出）→ 缓冲 drop
+            drop(shared);
+            rx
+        };
+        assert!(
+            matches!(rx.changed().now_or_never(), Some(Err(_))),
+            "缓冲 drop 后 changed() 必须立即返回 Err（任务退出路径）"
+        );
+    }
+
+    /// 回归：fail() 后按 Content-Length 预留的 data 容量必须归还
+    /// （未下载到的部分不该继续占位）
+    #[test]
+    fn fail_releases_reserved_data_capacity() {
+        let shared = StreamingBuffer::new(Some(DATA_RESERVE_MAX_BYTES), None);
+        shared.append(&[0u8; 128]).expect("append should succeed");
+        assert!(
+            shared.debug_capacities().0 >= DATA_RESERVE_MAX_BYTES as usize,
+            "构造时应已按 Content-Length 预留"
+        );
+
+        shared.fail("network died".to_string());
+
+        let (data_capacity, _) = shared.debug_capacities();
+        assert!(
+            data_capacity < DATA_RESERVE_MAX_BYTES as usize / 2,
+            "fail() 必须归还未使用的预留容量，实际 {data_capacity}"
+        );
+    }
+
+    /// 回归：reset_tail 换新快进目标时要把上一轮 tail 的容量真正还掉
+    #[test]
+    fn reset_tail_returns_previous_tail_capacity() {
+        let shared = StreamingBuffer::new(None, None);
+        shared.reset_tail(1024);
+        shared
+            .append_tail(&vec![0u8; 512 * 1024])
+            .expect("append_tail should succeed");
+        assert!(
+            shared.debug_capacities().1 >= 512 * 1024,
+            "tail 应已增长到 512KB 量级"
+        );
+
+        shared.reset_tail(2048);
+
+        let (_, tail_capacity) = shared.debug_capacities();
+        assert_eq!(tail_capacity, 0, "reset_tail 必须归还上一轮的 tail 容量");
     }
 }
