@@ -319,18 +319,28 @@ export default function DesktopLyric() {
 	}, []);
 
 	// rAF 插值：播放中按锚点 + 本机流逝时间推进；暂停时停在锚点。
-	// 歌词时间 = 播放进度 × 1000 + 偏移（偏移只进时钟的约定与歌词页一致）
+	// 歌词时间 = 播放进度 × 1000 + 偏移（偏移只进时钟的约定与歌词页一致）。
+	// 暂停时不跑帧循环：时钟本就停在锚点，以 60fps 重复 set 同一个值只会白白
+	// 触发每帧的整表行扫描。恢复播放时进度推送会翻转 isPlaying 并重启循环。
 	useEffect(() => {
+		if (!isPlaying) {
+			const { time } = anchorRef.current;
+			currentTimeMotion.set(time * 1000 + full.offsetMs);
+			return;
+		}
 		let raf = 0;
 		const tick = () => {
-			const { time, at, playing } = anchorRef.current;
-			const elapsed = playing ? (Date.now() - at) / 1000 : 0;
-			currentTimeMotion.set((time + elapsed) * 1000 + full.offsetMs);
+			// 窗口被隐藏（JS 仍活着）时不推进，可见后下一帧自会补上
+			if (!document.hidden) {
+				const { time, at } = anchorRef.current;
+				const elapsed = (Date.now() - at) / 1000;
+				currentTimeMotion.set((time + elapsed) * 1000 + full.offsetMs);
+			}
 			raf = requestAnimationFrame(tick);
 		};
 		raf = requestAnimationFrame(tick);
 		return () => cancelAnimationFrame(raf);
-	}, [currentTimeMotion, full.offsetMs]);
+	}, [isPlaying, currentTimeMotion, full.offsetMs]);
 
 	// 行索引跟踪（与歌词页同算法：最后一条 lineStart ≤ 当前歌词时间的行）
 	const [currentIndex, setCurrentIndex] = useState(-1);

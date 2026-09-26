@@ -381,6 +381,9 @@ export default function MiniPlayer() {
 	}, [state.currentTime]);
 	useEffect(() => {
 		const timer = setInterval(() => {
+			// 窗口隐藏（关闭按钮只隐藏、不销毁）时跳过重渲染：下一次可见后的
+			// 首个 tick 会按锚点重新算出正确时间，不会残留旧值
+			if (document.hidden) return;
 			const { time, at } = syncRef.current;
 			if (!state.isPlaying) {
 				setLocalTime(time);

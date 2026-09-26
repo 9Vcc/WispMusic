@@ -61,6 +61,11 @@ async function pauseNative() {
 export function initMediaSession() {
 	const unsubscribes: Array<() => void> = [];
 
+	// mini 窗口是否可见（mini-entered / mini-hidden 记账）。不可见时一律不推：
+	// 从未开过 mini、或已关闭/退出 mini 时，进度订阅每 500ms 的推送都无人接收，
+	// 白白付出 invoke + serde + emit_to 的开销（窗口销毁后还落一次报错日志）
+	let miniActive = false;
+
 	// 托盘菜单状态推送：经 Rust 定向转发到 tray-menu 窗口。
 	// 不直接用 JS emit 广播——webview 间 JS 事件在部分环境下不可达，
 	// 而 invoke 命令链路已被验证可靠（退出按钮等即走该链路）。
@@ -83,8 +88,9 @@ export function initMediaSession() {
 
 	// mini 播放器状态推送：同走 Rust 定向转发链路。
 	// full = true 时附带播放列表（歌曲切换/列表变化/mini 窗口刚显示时），
-	// 进度走增量推送。
+	// 进度走增量推送。mini 窗口不可见时不推（见 miniActive）
 	function pushMiniState(full: boolean) {
+		if (!miniActive) return;
 		const s = usePlayerStore.getState();
 		const p = useProgressStore.getState();
 		const state: Record<string, unknown> = {
@@ -193,10 +199,20 @@ export function initMediaSession() {
 
 	// mini 窗口显示：立即推送一次完整快照（含播放列表），避免显示旧状态
 	const unlistenMiniEntered = listen("mini-entered", () => {
+		miniActive = true;
 		pushMiniState(true);
 	});
 	unsubscribes.push(() => {
 		unlistenMiniEntered.then((f) => f());
+	});
+
+	// mini 窗口隐藏（关闭按钮 / Alt+F4 / 托盘显示主窗口）或退出 mini 模式销毁：
+	// 之后的推送无人接收，直接停掉
+	const unlistenMiniHidden = listen("mini-hidden", () => {
+		miniActive = false;
+	});
+	unsubscribes.push(() => {
+		unlistenMiniHidden.then((f) => f());
 	});
 
 	// 播放列表订阅：列表内容/当前曲目的变化同步到 mini 窗口

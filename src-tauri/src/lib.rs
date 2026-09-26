@@ -140,6 +140,8 @@ fn tray_show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     }
     if let Some(mini) = app.get_webview_window("mini-player") {
         let _ = mini.hide();
+        // 主窗口据此停止 mini 状态推送（重新进入 mini 时 mini_enter 再发 mini-entered）
+        let _ = app.emit_to("main", "mini-hidden", ());
     }
     Ok(())
 }
@@ -233,6 +235,8 @@ fn mini_restore_main(app: tauri::AppHandle) -> Result<(), String> {
     // 下次进 mini 模式由 mini_enter 按规格重建（ Destroyed 前窗口内的状态本就
     // 不需要保留，重新显示时会由 aux_window_ready 重新拿一次完整快照）。
     destroy_aux_window(&app, "mini-player");
+    // 主窗口据此停止 mini 状态推送；重新进入 mini 时 mini_enter 会再发 mini-entered
+    let _ = app.emit_to("main", "mini-hidden", ());
     Ok(())
 }
 
@@ -470,6 +474,8 @@ fn mini_close(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(mini) = app.get_webview_window("mini-player") {
         mini.hide().map_err(|e| e.to_string())?;
     }
+    // 主窗口据此停止 mini 状态推送（隐藏不等于销毁，但推送已无人接收）
+    let _ = app.emit_to("main", "mini-hidden", ());
     Ok(())
 }
 
@@ -647,6 +653,8 @@ pub fn run() {
                     // 托盘左击可再次呼出
                     api.prevent_close();
                     let _ = window.hide();
+                    // 与 mini_close 同：通知主窗口停止 mini 状态推送
+                    let _ = window.app_handle().emit_to("main", "mini-hidden", ());
                     return;
                 }
                 if window.label() == "desktop-lyric" {
