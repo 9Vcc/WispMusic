@@ -17,7 +17,7 @@ mod unm;
 static GLOBAL_ALLOCATOR: alloc_stats::CountingAllocator = alloc_stats::CountingAllocator;
 
 use percent_encoding::percent_decode_str;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -30,6 +30,22 @@ use tauri::{
 /// 激活期间：托盘左击呼出 mini 窗口而非主窗口；mini 窗口被"关闭"仅隐藏，
 /// 主窗口保持隐藏，托盘可再次呼出。
 static MINI_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 主窗口是否显示过（前端 show 成功后主动上报，或 Rust 侧任一呼出路径）。
+///
+/// 唯一用途是给启动兜底线程一个**语义正确**的判据。兜底要解决的是「前端首帧
+/// 异常，窗口从头到尾没出现过」，而不是「此刻窗口不可见」。主窗口的关闭语义是
+/// 「藏进托盘」——CloseRequested 里 prevent_close + 延迟 hide，此时窗口本来就
+/// 不可见；若兜底只看可见性，启动 5s 内关掉窗口就会把它重新显示出来，而这时
+/// App 已收到 app-background、渲染的是空 div，桌面上就留下一块空白材质窗口。
+static MAIN_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// 主窗口显示代号：每次「呼出主窗口」或「主窗口转入后台」都自增。
+///
+/// CloseRequested 里的隐藏挂在 50ms 后的独立线程上（先把内容切成空 div 再 hide），
+/// 这 50ms 内用户完全可能又通过托盘/二次启动把窗口呼出来。延迟线程记住自己发起
+/// 时的代号、hide 前比对：不一致说明这次隐藏已过期，跳过，否则会把刚呼出的窗口打掉。
+static MAIN_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// 按需创建的辅助窗口规格（mini-player / desktop-lyric）。
 /// 它们不在 tauri.conf.json 里静态声明，否则启动时每个都会建一个 webview
@@ -88,6 +104,37 @@ fn destroy_aux_window(app: &tauri::AppHandle, label: &str) {
     }
 }
 
+/// 呼出主窗口：推进显示代号 → show → 聚焦 → 定向通知前端回到前台态。
+///
+/// **所有呼出主窗口的路径都必须走这里**：代号是延迟隐藏判断自己是否过期的唯一
+/// 依据（见 MAIN_EPOCH），漏掉一条路径就会出现「刚呼出又被上一次关闭的延迟 hide
+/// 打掉」的反向故障。app-foreground 定向发给 main 而不是广播，与 app-background
+/// 对称（广播会惊动 mini / tray-menu 窗口）。
+///
+/// `focus = false` 用于启动兜底：窗口首次出现不该抢走用户当前正在用的窗口焦点。
+fn show_main_window(app: &tauri::AppHandle, focus: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
+
+    MAIN_EPOCH.fetch_add(1, Ordering::AcqRel);
+    MAIN_SHOWN.store(true, Ordering::Release);
+
+    window.show().map_err(|err| err.to_string())?;
+    if focus {
+        let _ = window.set_focus();
+    }
+    let _ = app.emit_to("main", "app-foreground", ());
+    Ok(())
+}
+
+/// 前端主窗口显示成功后上报：给启动兜底线程「启动显示已完成」的信号。
+/// 前端异常时不会调用，兜底仍会按 5s 把窗口显示出来（原有用途不变）。
+#[tauri::command]
+fn main_mark_shown() {
+    MAIN_SHOWN.store(true, Ordering::Release);
+}
+
 /// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
 ///
 /// 托盘菜单窗口**常驻**（启动即建、隐藏复用、不销毁）：托盘右键是高频主交互，
@@ -119,13 +166,22 @@ fn show_tray_menu_at(
     window
         .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
         .map_err(|err| err.to_string())?;
-    window.show().map_err(|err| err.to_string())?;
-    window.set_focus().map_err(|err| err.to_string())?;
 
     // 通知托盘菜单自身重置上一次遗留的临时 UI 状态（如展开中的子菜单），
-    // 并通知主窗口推送最新播放器状态，否则菜单只会显示初始默认值
+    // 并通知主窗口推送最新播放器状态。两件事都要赶在 show 之前：show 之后才发，
+    // 会先亮出一帧上一次遗留的子菜单/旧播放状态
     let _ = app.emit_to("tray-menu", "tray-menu-shown", ());
     let _ = app.emit_to("main", "tray-menu-shown", ());
+
+    window.show().map_err(|err| err.to_string())?;
+
+    // 聚焦失败（Windows 前台锁 / 被其它进程抢焦点）必须把窗口藏回去：
+    // 托盘菜单唯一的自动隐藏入口是失焦事件（见 on_window_event 的 Focused 分支），
+    // 而没拿到焦点的窗口永远不会失焦——一个 alwaysOnTop 的菜单会永久挂在桌面上。
+    if let Err(err) = window.set_focus() {
+        let _ = window.hide();
+        return Err(err.to_string());
+    }
     Ok(())
 }
 
@@ -139,11 +195,7 @@ fn greet(name: &str) -> String {
 fn tray_show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     // 从托盘菜单显式要求主窗口时，退出 mini 模式
     MINI_MODE_ACTIVE.store(false, Ordering::Release);
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-        let _ = window.emit("app-foreground", ());
-    }
+    let _ = show_main_window(&app, true);
     if let Some(mini) = app.get_webview_window("mini-player") {
         let _ = mini.hide();
         // 主窗口据此停止 mini 状态推送（重新进入 mini 时 mini_enter 再发 mini-entered）
@@ -229,14 +281,8 @@ async fn mini_enter(app: tauri::AppHandle) -> Result<(), String> {
 /// 退出 mini 模式：恢复主窗口并隐藏 mini 窗口
 #[tauri::command]
 fn mini_restore_main(app: tauri::AppHandle) -> Result<(), String> {
-    let main = app
-        .get_webview_window("main")
-        .ok_or("main window not found")?;
-
     MINI_MODE_ACTIVE.store(false, Ordering::Release);
-    main.show().map_err(|e| e.to_string())?;
-    let _ = main.set_focus();
-    let _ = main.emit("app-foreground", ());
+    show_main_window(&app, true)?;
     // 退出 mini 模式 = mini 窗口不再使用：销毁而不是隐藏，把渲染进程还回去。
     // 下次进 mini 模式由 mini_enter 按规格重建（ Destroyed 前窗口内的状态本就
     // 不需要保留，重新显示时会由 aux_window_ready 重新拿一次完整快照）。
@@ -510,11 +556,7 @@ pub fn run() {
                 }
                 return;
             }
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-                let _ = window.emit("app-foreground", ());
-            }
+            let _ = show_main_window(app, true);
         }))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -571,15 +613,19 @@ pub fn run() {
             });
 
             // 主窗口 visible: false 启动，由前端在首帧就绪后显示；
-            // 这里兜底：前端异常未能显示时 5s 后强制显示，避免应用"隐形"
-            if let Some(window) = app.get_webview_window("main") {
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    if !window.is_visible().unwrap_or(true) {
-                        let _ = window.show();
-                    }
-                });
-            }
+            // 这里兜底：前端异常未能显示时 5s 后强制显示，避免应用"隐形"。
+            //
+            // 判据是 MAIN_SHOWN（启动显示是否发生过），**不是「此刻是否可见」**：
+            // 主窗口的关闭语义是「藏进托盘」，只看可见性会把用户刚关掉的窗口
+            // 重新显示到桌面上——而此时内容已被 app-background 清空，结果就是
+            // 桌面上留下一块空白的材质窗口（transparent + acrylic）。
+            let fallback_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if !MAIN_SHOWN.load(Ordering::Acquire) {
+                    let _ = show_main_window(&fallback_handle, false);
+                }
+            });
 
             // 托盘显式用 128×128 源图：default_window_icon 只有 32×32，
             // 高 DPI 托盘槽位（150%~250% 需要 24~40px）会放大导致模糊
@@ -605,11 +651,7 @@ pub fn run() {
                             }
                             return;
                         }
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                            let _ = window.emit("app-foreground", ());
-                        }
+                        let _ = show_main_window(app, true);
                     }
                     TrayIconEvent::Click {
                         button: MouseButton::Right,
@@ -683,12 +725,30 @@ pub fn run() {
                 }
                 // main 与 tray-menu 都不真正关闭：前者藏进托盘，后者隐藏复用
                 api.prevent_close();
-                let _ = window.emit("app-background", ());
 
+                if window.label() != "main" {
+                    // 托盘菜单只需隐藏（它的显隐本就由失焦事件驱动，这里是兜底）
+                    let _ = window.hide();
+                    return;
+                }
+
+                // 只有主窗口转入后台才需要清空内容，而且必须**定向**发给 main：
+                // 早期这里用的是广播版本，结果「对 tray-menu 按 Alt+F4」也会把可见的
+                // 主窗口清空成空白窗口。与 app-foreground 的定向发送保持对称。
+                let epoch = MAIN_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+                let _ = window.app_handle().emit_to("main", "app-background", ());
+
+                // 延迟 50ms 再隐藏：先让前端把内容切成空 div，避免隐藏瞬间还挂着完整 UI
+                // （任务栏缩略图与合成器仍会抓上一帧）。这段延迟让「隐藏」与「呼出」可能
+                // 并发，所以 hide 前比对自己发起时的代号：过期说明期间又被呼出过，跳过，
+                // 否则会把刚显示的窗口打掉（反向故障：窗口不见了但前端处于前台态）。
                 std::thread::spawn({
                     let window = window.clone();
                     move || {
                         std::thread::sleep(std::time::Duration::from_millis(50));
+                        if MAIN_EPOCH.load(Ordering::Acquire) != epoch {
+                            return;
+                        }
                         let _ = window.hide();
                     }
                 });
@@ -718,6 +778,7 @@ pub fn run() {
             mini_close,
             mini_set_bounds,
             aux_window_ready,
+            main_mark_shown,
             desktop_lyric_show,
             desktop_lyric_hide,
             desktop_lyric_resize,
@@ -725,6 +786,7 @@ pub fn run() {
             desktop_lyric_command,
             ncm::ncm_fetch,
             unm::unm_match,
+            unm::unm_warmup,
             smtc::smtc_update_metadata,
             smtc::smtc_update_playback,
             cache::check_audio_cache,
@@ -889,5 +951,63 @@ mod window_lifecycle_tests {
         assert!(lyric.resizable, "桌面歌词需系统边缘缩放");
         assert!(lyric.always_on_top && lyric.skip_taskbar && lyric.transparent);
         assert!(!lyric.shadow, "桌面歌词不要系统投影");
+    }
+
+    const LIB_SRC: &str = include_str!("lib.rs");
+
+    /// 去掉本测试模块之后的源码：断言里写下的模式字符串本身就在 lib.rs 里，
+    /// 不切掉的话「源码中不存在 X」这类断言会被断言自己的字符串满足
+    fn production_source() -> &'static str {
+        LIB_SRC
+            .split("mod window_lifecycle_tests")
+            .next()
+            .unwrap_or(LIB_SRC)
+    }
+
+    /// 「关闭窗口后桌面残留空白窗口」的回归锁（源码级断言，不需要真实窗口）。
+    ///
+    /// 四条不变量各自对应一个已修的缺陷，任何一条被改回去都会在这里失败：
+    /// 1. app-background / app-foreground 必须定向发送——广播版本会让「关掉
+    ///    tray-menu」连带把**可见的**主窗口清空成空白窗口；
+    /// 2. 启动兜底的判据必须是「显示过」（MAIN_SHOWN）而不是「此刻可见」——
+    ///    主窗口关闭 = 藏进托盘，只看可见性会把用户刚关掉的窗口重新显示出来；
+    /// 3. 延迟隐藏必须比对称号，否则会打掉延迟期间被呼出的窗口；
+    /// 4. 托盘菜单聚焦失败必须回滚隐藏——它的自动隐藏只由失焦事件驱动，
+    ///    没拿到焦点的 alwaysOnTop 菜单会永久挂在桌面上。
+    #[test]
+    fn blank_window_regressions_are_guarded() {
+        let src = production_source();
+
+        assert!(
+            src.contains("emit_to(\"main\", \"app-background\""),
+            "app-background 必须定向发送给 main"
+        );
+        assert!(
+            !src.contains("emit(\"app-background\""),
+            "app-background 禁止广播：关掉 tray-menu 会把可见的主窗口清空成空白窗口"
+        );
+        assert_eq!(
+            src.matches("\"app-background\"").count(),
+            1,
+            "app-background 只应出现在那一处定向 emit_to 里"
+        );
+        assert_eq!(
+            src.matches("\"app-foreground\"").count(),
+            1,
+            "app-foreground 只应出现在 show_main_window 的定向发送里，与 app-background 对称"
+        );
+
+        assert!(
+            src.contains("if !MAIN_SHOWN.load("),
+            "启动兜底必须由 MAIN_SHOWN（是否显示过）把关，而不是当前的可见性"
+        );
+        assert!(
+            src.contains("MAIN_EPOCH.load(Ordering::Acquire) != epoch"),
+            "延迟隐藏前必须比对称号，否则会打掉延迟期间刚被呼出的主窗口"
+        );
+        assert!(
+            src.contains("if let Err(err) = window.set_focus()"),
+            "托盘菜单聚焦失败必须 hide() 回滚，否则永不失焦、永不自动隐藏"
+        );
     }
 }

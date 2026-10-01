@@ -158,26 +158,45 @@ export function initDesktopLyricSync() {
 
 	// —— 窗口几何 ——
 
-	async function showWindow() {
-		const { direction, fontSize } = getDesktopLyricSettings();
-		const { width, height } = computeDesktopLyricGeometry(direction, fontSize);
-		try {
-			await invoke("desktop_lyric_show", { width, height });
-			// Rust 侧 show 成功后会 emit desktop-lyric-shown，全量补给在
-			// shown 监听里统一做（单点触发，避免双份歌词快照）
-			windowActive = true;
-		} catch (error) {
-			console.error("[DesktopLyric] 显示窗口失败:", error);
-		}
-	}
+	// 窗口显隐用「最新意图 + 单条串行链」：show/hide 都是 async 命令，而 show
+	// 内部还可能现场创建窗口（Rust 侧 ensure_aux_window）。直接 void 调用会在
+	// 快速开关时逆序——hide 先到达时窗口还没建出来，destroy 找不到东西直接 no-op，
+	// 随后 show 完成，留下一个已显示、但 windowActive=false 因而再无状态推送的
+	// 空窗口（transparent 所以肉眼看不见，但仍然占着一个置顶窗口吃点击）。
+	// 这里只记录「最新想要的状态」，由一条串行链把实际状态追平过去：任意次数的
+	// 快速开关最终都收敛到最后一次设置值（show/hide 在 Rust 侧都是幂等的）。
+	let desiredWindowVisible: boolean | null = null;
+	let windowPump: Promise<void> = Promise.resolve();
 
-	async function hideWindow() {
-		windowActive = false;
-		try {
-			await invoke("desktop_lyric_hide");
-		} catch (error) {
-			console.error("[DesktopLyric] 隐藏窗口失败:", error);
-		}
+	function setWindowVisible(visible: boolean): Promise<void> {
+		desiredWindowVisible = visible;
+		windowPump = windowPump.then(async () => {
+			// 循环直到没有更新的意图：期间若又翻转了设置，紧接着再追平一次
+			while (desiredWindowVisible !== null) {
+				const target = desiredWindowVisible;
+				desiredWindowVisible = null;
+				try {
+					if (target) {
+						const { direction, fontSize } = getDesktopLyricSettings();
+						const { width, height } = computeDesktopLyricGeometry(
+							direction,
+							fontSize,
+						);
+						await invoke("desktop_lyric_show", { width, height });
+						// Rust 侧 show 成功后会 emit desktop-lyric-shown，全量补给在
+						// shown 监听里统一做（单点触发，避免双份歌词快照）
+						windowActive = true;
+					} else {
+						// 先停推送再销毁：销毁途中推过来的状态没有接收方
+						windowActive = false;
+						await invoke("desktop_lyric_hide");
+					}
+				} catch (error) {
+					console.error("[DesktopLyric] 同步窗口显隐失败:", error);
+				}
+			}
+		});
+		return windowPump;
 	}
 
 	// 方向/字号变化：窗口可见时保持中心点原子缩放（Rust 侧钳制在屏内）
@@ -203,8 +222,8 @@ export function initDesktopLyricSync() {
 		prevDesktopLyric = next;
 
 		if (next.enabled !== prev.enabled) {
-			if (next.enabled) void showWindow();
-			else void hideWindow();
+			// 串行链内部会追平到最新值，这里不需要也不应该 await
+			void setWindowVisible(next.enabled);
 			return;
 		}
 		if (next.direction !== prev.direction || next.fontSize !== prev.fontSize) {
@@ -344,7 +363,7 @@ export function initDesktopLyricSync() {
 			});
 		}
 		if (getDesktopLyricSettings().enabled) {
-			await showWindow();
+			await setWindowVisible(true);
 		}
 	})();
 
