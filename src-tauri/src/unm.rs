@@ -349,6 +349,18 @@ pub async fn unm_match(
     }
 }
 
+/// 渲染进程预热入口：只把 sidecar 拉起来并等健康检查通过，**不发起任何匹配**。
+///
+/// 首次播放灰色歌曲的等待里，「Node 进程冷启动 + require 解灰引擎（十几个 provider）
+/// + release 首次解压内嵌运行时」这部分是可以提前付的：应用启动后在空闲时调一次，
+/// 真正播放时 unm_match 命中 State 缓存直接可用（见 ensure_started 的复用分支）。
+/// 幂等：已启动时立即返回；真实匹配的网络往返不在预热范围内，那部分只能等。
+#[tauri::command]
+pub async fn unm_warmup(app: AppHandle) -> Result<u16, String> {
+    let process = ensure_started(&app).await?;
+    Ok(process.port)
+}
+
 #[cfg(all(test, not(debug_assertions)))]
 mod tests {
     use super::*;

@@ -7,6 +7,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { QUALITY_BY_KEY, type QualityKey } from "../constants/song";
+import { createLruCache } from "../utils/lru";
 import { fetchViaRust, type NcmFetchResponse } from "./fetch";
 
 export interface UnblockMatchResult {
@@ -306,6 +307,51 @@ async function matchBySource(
 	return source.match(id, quality);
 }
 
+// —— 解灰结果缓存 ——
+
+/**
+ * 解灰结果会话级缓存。
+ *
+ * 解灰一次要拉起本地引擎、依次打若干第三方音源，整链常常 1~5s；而同一首歌在
+ * 切歌来回、单曲循环里会被反复请求。缓存掉重复的解灰，收益比预热更持久。
+ *
+ * · 只缓存成功结果——失败不缓存，音源是外部服务，一次超时不代表下次也不行；
+ * · 带 TTL——拿到的是第三方 CDN 直链，可能有时效，过期就重新解一次；
+ * · key 覆盖所有影响结果的输入（音源名单、无损/顺序优先、两个 Cookie、音质偏好），
+ *   用户改了设置 key 就变，不会把旧设置下解出来的地址当成新设置的结果。
+ */
+const MATCH_CACHE_LIMIT = 60;
+const MATCH_CACHE_TTL_MS = 30 * 60 * 1000;
+
+const matchCache = createLruCache<
+	string,
+	{ result: UnblockMatchResult; at: number }
+>(MATCH_CACHE_LIMIT);
+
+async function matchCacheKey(id: string, sourceNames: string[]) {
+	const settings = await getNetworkUnblockSettings();
+	const preferQuality = await getPreferQualityKey();
+	return [
+		id,
+		sourceNames.join(","),
+		settings.enableFlac ? "flac" : "no-flac",
+		settings.orderFirst ? "order-first" : "speed-first",
+		settings.qqCookie,
+		settings.jooxCookie,
+		preferQuality ?? "",
+	].join("|");
+}
+
+function readMatchCache(key: string): UnblockMatchResult | undefined {
+	const hit = matchCache.get(key);
+	if (!hit) return undefined;
+	if (Date.now() - hit.at >= MATCH_CACHE_TTL_MS) {
+		matchCache.delete(key);
+		return undefined;
+	}
+	return hit.result;
+}
+
 export async function matchID(
 	id: string,
 	source?: string | null,
@@ -320,6 +366,22 @@ export async function matchID(
 		.map((s) => s.trim().toLowerCase())
 		.filter(Boolean);
 
+	const cacheKey = await matchCacheKey(id, sourceNames);
+	const cached = readMatchCache(cacheKey);
+	if (cached) return cached;
+
+	const result = await resolveMatch(id, sourceNames);
+	if (result.data) {
+		matchCache.set(cacheKey, { result, at: Date.now() });
+	}
+	return result;
+}
+
+/** 真正发起匹配的两条分支（自动模式 / 指定音源），由 matchID 负责缓存 */
+async function resolveMatch(
+	id: string,
+	sourceNames: string[],
+): Promise<UnblockMatchResult> {
 	// 自动模式：本地 unm 引擎优先（可解无损），失败回退全部纯 HTTP 音源
 	if (sourceNames.length === 0) {
 		const unmResult = await matchViaUnm(id);
