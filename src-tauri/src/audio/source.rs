@@ -78,12 +78,19 @@ pub(super) async fn resolve_audio_source(
     }
 
     if let Some(source) = source.strip_prefix("unblock:") {
+        // 解灰地址同样允许流式起播。此前恒为 false → 必须整首下完才出声，第三方
+        // CDN 通常只有几百 KB/s，一首无损要等十几到几十秒（转圈久的主因之一）。
+        // 三条前提让它可以安全打开：格式判定看魔数优先于 URL 扩展名
+        // （`detect_stream_format`，第三方地址的扩展名经常与实际内容不符）；
+        // 源站不支持 Range 时快进请求会退回顺序等待（`stream_range_into_tail`
+        // 只认 206）；读等待本身已有停滞上限，卡不住音频线程。
+        // 代价是流被中途掐断时用户会听到断，而不是"没起来"——换取的是秒开。
         return resolve_remote_audio_source(
             app,
             source,
             latest_request_id,
             request_id,
-            false,
+            true,
             song_id,
             level,
         )
