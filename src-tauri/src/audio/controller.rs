@@ -44,6 +44,17 @@ impl AudioState {
             latest_request_id: Arc::new(AtomicU64::new(0)),
         }
     }
+
+    /// 音频载入代次（见过的最大 requestId）。
+    ///
+    /// 供前端在**载入后**取作本地计数的基线：这个值活在应用进程里，而
+    /// `corePlayer.playRequestId` 活在 WebView 文档里。页面重新加载后本地计数
+    /// 从 1 重新数、进程侧却停在旧值，此后每一次 `player_load` 都会被
+    /// `is_stale_request` 判成迟到的旧请求而丢弃（音源不解析、命令不下发），
+    /// 表现为点歌没反应、加载转圈不落幕。
+    pub fn latest_request_id(&self) -> u64 {
+        self.latest_request_id.load(Ordering::SeqCst)
+    }
 }
 
 /// 载入并起播一个音源。
@@ -62,11 +73,13 @@ pub async fn player_load(
     volume: Option<f32>,
     speed: Option<f32>,
 ) -> Result<AudioSnapshot, String> {
-    // 代次只增不减：前端 requestId 单调递增，但两条 player_load 的 IPC 到达
-    // 顺序不保证与调用顺序一致。若这里直接 store，一条迟到的旧请求（较小的
-    // requestId）会把代次倒拨回旧值，随后 is_stale_request 便会把**真正最新**
-    // 的那次请求误判成「被取代」而丢弃——表现为快速切歌后卡在加载、音频仍停在
-    // 更早那首歌上。用 fetch_max 保证代次永远取到见过的最大值。
+    // 代次只增不减：前端 requestId 单调递增（前提见 latest_request_id 的注释——
+    // 页面重载后前端必须先取本进程代次作基线，否则新计数永远追不上 epoch），
+    // 但两条 player_load 的 IPC 到达顺序不保证与调用顺序一致。若这里直接 store，
+    // 一条迟到的旧请求（较小的 requestId）会把代次倒拨回旧值，随后
+    // is_stale_request 便会把**真正最新**的那次请求误判成「被取代」而丢弃——
+    // 表现为快速切歌后卡在加载、音频仍停在更早那首歌上。用 fetch_max 保证
+    // 代次永远取到见过的最大值。
     state.latest_request_id.fetch_max(request_id, Ordering::SeqCst);
 
     let _ = send_command(state, |respond_to| AudioCommand::BeginLoad {

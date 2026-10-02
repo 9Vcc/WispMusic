@@ -176,3 +176,10 @@ pub async fn player_stop(app: AppHandle) -> Result<AudioSnapshot, String> {
 pub fn player_get_state(state: State<'_, AudioState>) -> Result<AudioSnapshot, String> {
     controller::player_get_state(&state)
 }
+
+/// 音频载入代次（本进程见过的最大 requestId），只读一次原子量，无需 blocking 池。
+/// 前端在首次 `player_load` 前取它作本地计数基线，原因见 `AudioState::latest_request_id`。
+#[tauri::command]
+pub fn player_latest_request_id(state: State<'_, AudioState>) -> u64 {
+    state.latest_request_id()
+}

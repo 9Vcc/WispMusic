@@ -662,6 +662,24 @@ mod tests {
         assert!(!(2 < inner.request_id));
     }
 
+    /// WebView 重新加载后前端本地计数从 1 重新开始，而音频线程的代次停在旧值：
+    /// 此后**每一条**命令都命中迟到防护被丢弃（音源不解析、Load 不下发），
+    /// 表现为点歌全无反应、加载转圈永不落幕。以原生代次作基线后首个点击即可受理。
+    #[test]
+    fn reloaded_webview_must_seed_its_counter_from_the_native_epoch() {
+        let mut inner = AudioThreadInner::new();
+        begin_load_inner(&mut inner, 12).expect("begin 12");
+
+        // 重载后从头计数：1 落后于代次 12 → 被当成迟到命令，播放器永久失灵
+        assert!(should_ignore_stale_command(1, inner.request_id));
+
+        // 取原生代次作基线后继续递增：本次点击被受理
+        let seeded = inner.request_id + 1;
+        assert!(!should_ignore_stale_command(seeded, inner.request_id));
+        // 而对齐期间到达的迟到命令仍然照丢弃
+        assert!(should_ignore_stale_command(1, seeded));
+    }
+
     /// 正常前进方向不受影响。
     #[test]
     fn newer_request_always_advances_epoch() {
