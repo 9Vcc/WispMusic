@@ -8,6 +8,15 @@ use std::sync::OnceLock;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
+/// 总超时。这条通道的调用方是 JS 侧 `await invoke("ncm_fetch")`，而 Tauri IPC
+/// 不可取消（渲染进程的 AbortController 根本接不进来），所以超时**只能**设在这里：
+/// 没有它，一个半开连接（对方 accept 之后不再回数据——第三方解灰 API 的常态）
+/// 就让那个 await 永远不返回，`playSong` 卡在音源解析上，加载转圈永不落幕。
+/// 内置 API 的 JSON 请求正常都在 1~3s，20s 足够容下慢成功又能保证「最坏有结论」。
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// 建连超时：对端 IP 不通/被墙时快速失败，不必等满总超时
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NcmFetchResponse {
@@ -24,6 +33,8 @@ fn follow_client() -> &'static Client {
         Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(10))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("failed to build reqwest follow client")
     })
@@ -35,6 +46,8 @@ fn no_follow_client() -> &'static Client {
         Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("failed to build reqwest no-follow client")
     })
