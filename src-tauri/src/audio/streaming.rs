@@ -22,6 +22,25 @@ pub(super) type BoxedAudioSource = Box<dyn Source<Item = i16> + Send>;
 /// 永久占住（表现为整应用卡死）。
 const STREAMING_END_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `read` 等待下一段数据的停滞上限。
+///
+/// 与上面那条同理由，但影响面大得多：`read` 的调用方是**音频线程**（解码器在
+/// `rebuild_sink` 里同步读它）。没有这个上限时，只要出现「缓冲既没有新数据、也没被
+/// 标成失败、又没下载完」的状态，这条循环就永远转下去，音频线程被这一条命令占死：
+/// 命令队列整体停摆，此后每条 `player_*` 都要等满回包超时（20s）才报错，切歌再也不
+/// 出声——实测正是「快速切歌后卡住」的最终形态。
+///
+/// 取 25s 的依据：生产侧自己的空闲超时是 20s（`audio/source.rs` 的 CHUNK_IDLE_TIMEOUT），
+/// 真死的流会先由它报错、走上层的正常失败路径；只有**生产任务本身被饿死**（例如
+/// runtime worker 被并发切歌占满，没人再轮询它）时，才轮到这条上限兜底。
+const STREAMING_READ_STALL_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// 本轮读等待是否已经超预算。拆成纯函数是为了能把「到点必须退出」这条不变量
+/// 单测锁死——让测试真的等 25s 既不现实也不可取。
+fn read_wait_timed_out(deadline: Instant, now: Instant) -> bool {
+    now >= deadline
+}
+
 /// data 预分配上限。Content-Length 已知时按它一次性预留，避免 Vec 逐次倍增
 /// 扩容在最后一次重分配时同时持有「旧 + 新」两块（≈2× 当前长度）的瞬时峰值。
 /// 取 24MB 是个折中：常见 mp3/m4a 单曲都在此之内 → 全程零重分配；超大无损
@@ -300,6 +319,10 @@ impl Read for StreamingReader {
             return Ok(read_len);
         }
 
+        // 本次读请求的停滞上限（见 STREAMING_READ_STALL_TIMEOUT）：一次成功的读会
+        // 立刻 return，所以这个时限管的正是「一直没有数据可取」那种情况
+        let stall_deadline = Instant::now() + STREAMING_READ_STALL_TIMEOUT;
+
         loop {
             if self.is_cancelled() {
                 return Err(Self::cancelled_error());
@@ -344,6 +367,15 @@ impl Read for StreamingReader {
             // 目标越过已下载边界：请求 Range 快进，等待主缓冲或 tail 覆盖
             if self.position > data_len {
                 self.shared.request_fast_forward(self.position);
+            }
+
+            // 兜底：数据、错误、完结三种信号都没来，且当前请求仍是最新（没被取消）
+            // 时，绝不能继续等下去——占用的是音频线程，整条命令队列都会停摆
+            if read_wait_timed_out(stall_deadline, Instant::now()) {
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "streaming audio data wait timed out",
+                ));
             }
 
             let (next_state, _) = self
@@ -708,6 +740,32 @@ mod tests {
         let latest_request_id = Arc::new(AtomicU64::new(1));
         let reader = StreamingReader::new(shared, latest_request_id, 1);
         assert_eq!(reader.byte_len(), Some(6));
+    }
+
+    /// 快速切歌后「彻底没声」的实测根因，是音频线程被一条 `read` 占死、命令队列整体
+    /// 停摆。这条等待必须有硬上限：这里锁死上限存在，以及它与生产侧空转超时的相对
+    /// 关系（生产侧 20s 自己会先报错，25s 这条只兜「没人再负责这条流」的情况）。
+    #[test]
+    fn streaming_read_wait_has_a_stall_ceiling() {
+        let started = Instant::now();
+        let deadline = started + STREAMING_READ_STALL_TIMEOUT;
+
+        assert!(!read_wait_timed_out(deadline, started));
+        assert!(!read_wait_timed_out(
+            deadline,
+            started + STREAMING_READ_STALL_TIMEOUT - Duration::from_millis(1)
+        ));
+        assert!(read_wait_timed_out(
+            deadline,
+            started + STREAMING_READ_STALL_TIMEOUT
+        ));
+        assert!(read_wait_timed_out(
+            deadline,
+            started + STREAMING_READ_STALL_TIMEOUT * 2
+        ));
+
+        // 短于它就越过「生产侧先报错」的正常路径，把慢流误判成死流
+        assert!(STREAMING_READ_STALL_TIMEOUT > Duration::from_secs(20));
     }
 
     #[test]
