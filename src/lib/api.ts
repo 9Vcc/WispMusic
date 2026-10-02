@@ -98,7 +98,14 @@ async function http<T>(path: string, options: RequestOptions = {}): Promise<T> {
 	}
 
 	if (baseUrl === EMBEDDED_API_URL) {
-		return embeddedApiRequest<T>(path, requestParams, rest.body ?? null);
+		// signal 必须一起传下去：内置 API 不经过 fetch，不接就等于「切歌时取消请求」
+		// 这条语义在最常用的路径上完全失效
+		return embeddedApiRequest<T>(
+			path,
+			requestParams,
+			rest.body ?? null,
+			rest.signal ?? undefined,
+		);
 	}
 
 	let url = `${baseUrl}${path}`;
