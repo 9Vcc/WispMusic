@@ -78,18 +78,21 @@ pub(super) async fn resolve_audio_source(
     }
 
     if let Some(source) = source.strip_prefix("unblock:") {
-        // 解灰地址同样允许流式起播。此前恒为 false → 必须整首下完才出声，第三方
-        // CDN 通常只有几百 KB/s，一首无损要等十几到几十秒（转圈久的主因之一）。
-        // 三条前提让它可以安全打开：格式判定看魔数优先于 URL 扩展名
-        // （`detect_stream_format`，第三方地址的扩展名经常与实际内容不符）；
-        // 源站不支持 Range 时快进请求会退回顺序等待（`stream_range_into_tail`
-        // 只认 206）；读等待本身已有停滞上限，卡不住音频线程。
-        // 代价是流被中途掐断时用户会听到断，而不是"没起来"——换取的是秒开。
+        // 解灰地址允许流式起播，但要先确认源站认 Range（第三个参数）。第三方 CDN 里
+        // 有一批根本不认 Range：这种源一旦流式起播，用户拖进度就只能等顺序下载爬到那个
+        // 字节偏移（几十秒），等于「起播快一次、之后每下都拖不动」，不划算。
+        //
+        // 此前恒为 false → 必须整首下完才出声，而第三方 CDN 通常只有几百 KB/s，一首无损
+        // 要等十几到几十秒（灰歌转圈久的主因）。另外两条前提也已核实：格式判定看魔数
+        // 优先于 URL 扩展名（`detect_stream_format`，第三方地址的扩展名经常与实际内容
+        // 不符）；读等待有停滞上限，卡不住音频线程。
+        // 代价：流被中途掐断时用户会听到「断了」而不是「没起来」，换来的是秒开且可拖。
         return resolve_remote_audio_source(
             app,
             source,
             latest_request_id,
             request_id,
+            true,
             true,
             song_id,
             level,
@@ -104,6 +107,7 @@ pub(super) async fn resolve_audio_source(
             latest_request_id,
             request_id,
             true,
+            false,
             song_id,
             level,
         )
@@ -149,12 +153,31 @@ fn remote_final_path(
     }
 }
 
+/// 探测源站是否真的认 Range：发一个 `bytes=0-0`，只接受 206。
+///
+/// 不看 `Accept-Ranges` 响应头——不少 CDN 声称支持却对 Range 请求回 200 全量，也有
+/// 不带头但正常响应 206 的；只有真发一次才作数。成本是一次 RTT（几十到几百毫秒），
+/// 只在「缓存没命中、又打算流式起播」时付，且 3s 内没结果就当不支持。
+async fn remote_supports_range(url: &str) -> bool {
+    let probe = shared_client()
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await;
+    matches!(
+        probe,
+        Ok(response) if response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+    )
+}
+
 async fn resolve_remote_audio_source(
     app: &AppHandle,
     url: &str,
     latest_request_id: Arc<AtomicU64>,
     request_id: u64,
     allow_streaming: bool,
+    probe_range_before_streaming: bool,
     song_id: Option<i64>,
     level: Option<&str>,
 ) -> Result<Option<AudioSource>, String> {
@@ -201,6 +224,11 @@ async fn resolve_remote_audio_source(
             // 走完整下载路径（文件路径可从 metadata 拿到长度）
             let streamable = !matches!(stream_format, StreamFormat::M4a | StreamFormat::Mp4)
                 || content_length.is_some();
+            // 需要先探测的源（解灰地址）在这一步确认能随机跳转才允许流式起播。
+            // 放在这里而不是解析入口处，是为了不打断已经建立的主请求：无论探针结果
+            // 如何，first_chunk 与 stream 都照原样交给下面的完整下载路径。
+            let streamable = streamable
+                && (!probe_range_before_streaming || remote_supports_range(url).await);
             if streamable {
                 // 把最终落盘路径交给缓冲：顺序下载完成后它会打开该文件接管读取，
                 // 释放整份内存副本（见 StreamingBuffer::finish）

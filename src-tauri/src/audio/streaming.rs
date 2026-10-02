@@ -41,6 +41,22 @@ fn read_wait_timed_out(deadline: Instant, now: Instant) -> bool {
     now >= deadline
 }
 
+/// 拖动后的目标位置离已下载边界超过这个字节数、且快进已确认不可用时，直接放弃等待。
+/// 按最慢的正常播放码率折算，256KB 已经是好几秒的音频；等顺序下载爬过去毫无意义。
+const UNREACHABLE_GAP_BYTES: u64 = 256 * 1024;
+
+/// 上面那种情况用的短上限（远小于 25s 的通用停滞上限）。
+const UNREACHABLE_GAP_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 该把这次等待按「够不着的位置」处理吗。
+///
+/// 源站不认 Range 时（`stream_range_into_tail` 只接受 206，否则把 tail 标记结束），
+/// 拖到未下载的位置就只能等顺序下载自己爬过去——几十秒很常见，用户看到的是「拖了没
+/// 反应」。紧贴下载边界的小缺口是正常播放的常态（缓冲总领先播放一点点），不能误伤。
+fn should_tighten_wait_for_unreachable_gap(gap_bytes: u64, fast_forward_finished: bool) -> bool {
+    fast_forward_finished && gap_bytes > UNREACHABLE_GAP_BYTES
+}
+
 /// data 预分配上限。Content-Length 已知时按它一次性预留，避免 Vec 逐次倍增
 /// 扩容在最后一次重分配时同时持有「旧 + 新」两块（≈2× 当前长度）的瞬时峰值。
 /// 取 24MB 是个折中：常见 mp3/m4a 单曲都在此之内 → 全程零重分配；超大无损
@@ -322,6 +338,7 @@ impl Read for StreamingReader {
         // 本次读请求的停滞上限（见 STREAMING_READ_STALL_TIMEOUT）：一次成功的读会
         // 立刻 return，所以这个时限管的正是「一直没有数据可取」那种情况
         let stall_deadline = Instant::now() + STREAMING_READ_STALL_TIMEOUT;
+        let mut gap_deadline: Option<Instant> = None;
 
         loop {
             if self.is_cancelled() {
@@ -371,10 +388,25 @@ impl Read for StreamingReader {
 
             // 兜底：数据、错误、完结三种信号都没来，且当前请求仍是最新（没被取消）
             // 时，绝不能继续等下去——占用的是音频线程，整条命令队列都会停摆
-            if read_wait_timed_out(stall_deadline, Instant::now()) {
+            let now = Instant::now();
+            if gap_deadline.is_none()
+                && should_tighten_wait_for_unreachable_gap(
+                    self.position.saturating_sub(data_len),
+                    state.tail_done,
+                )
+            {
+                // 只收紧一次：每轮重新计时会让这个短上限永远到不了点
+                gap_deadline = Some(now + UNREACHABLE_GAP_WAIT_TIMEOUT);
+            }
+            let wait_deadline = gap_deadline.unwrap_or(stall_deadline);
+            if read_wait_timed_out(wait_deadline, now) {
                 return Err(io::Error::new(
                     ErrorKind::TimedOut,
-                    "streaming audio data wait timed out",
+                    if gap_deadline.is_some() {
+                        "streaming audio seek position is unreachable"
+                    } else {
+                        "streaming audio data wait timed out"
+                    },
                 ));
             }
 
@@ -740,6 +772,28 @@ mod tests {
         let latest_request_id = Arc::new(AtomicU64::new(1));
         let reader = StreamingReader::new(shared, latest_request_id, 1);
         assert_eq!(reader.byte_len(), Some(6));
+    }
+
+    /// 拖到够不着的位置、又快进已确认不可用时，绝不能让音频线程等顺序下载爬过去。
+    /// 同时不能误伤正常播放——播放位置本来就总比下载边界落后一点点，那点缺口是常态。
+    #[test]
+    fn unreachable_seek_position_fails_fast_instead_of_crawling() {
+        assert!(should_tighten_wait_for_unreachable_gap(
+            UNREACHABLE_GAP_BYTES + 1,
+            true
+        ));
+        assert!(!should_tighten_wait_for_unreachable_gap(
+            UNREACHABLE_GAP_BYTES + 1,
+            false
+        ));
+        assert!(!should_tighten_wait_for_unreachable_gap(
+            UNREACHABLE_GAP_BYTES - 1,
+            true
+        ));
+        assert!(!should_tighten_wait_for_unreachable_gap(0, true));
+
+        // 短上限必须明显短于通用停滞上限，否则这条收紧没有意义
+        assert!(UNREACHABLE_GAP_WAIT_TIMEOUT < STREAMING_READ_STALL_TIMEOUT);
     }
 
     /// 快速切歌后「彻底没声」的实测根因，是音频线程被一条 `read` 占死、命令队列整体
