@@ -11,9 +11,7 @@ const { storeState, subscribers } = vi.hoisted(() => ({
 	subscribers: [] as Array<{ listener: (isLoading: boolean) => void }>,
 }));
 
-const { abandonPendingLoad } = vi.hoisted(() => ({
-	abandonPendingLoad: vi.fn(),
-}));
+const { nativeLoading } = vi.hoisted(() => ({ nativeLoading: { value: false } }));
 
 vi.mock("./playerStore", () => ({
 	usePlayerStore: {
@@ -33,7 +31,7 @@ vi.mock("./playerStore", () => ({
 }));
 
 vi.mock("@/lib/player/corePlayer", () => ({
-	corePlayer: { abandonPendingLoad },
+	corePlayer: { isLoading: () => nativeLoading.value },
 }));
 
 /** 模拟 zustand subscribeWithSelector：选中值变化时带新值回调监听器 */
@@ -49,9 +47,11 @@ describe("initLoadingWatchdog", () => {
 		vi.useFakeTimers();
 		vi.clearAllMocks();
 		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(console, "debug").mockImplementation(() => {});
 		subscribers.length = 0;
 		storeState.isLoadingMusic = false;
 		storeState.isPlaying = true;
+		nativeLoading.value = false;
 	});
 
 	afterEach(() => {
@@ -59,7 +59,7 @@ describe("initLoadingWatchdog", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("加载态滞留超过阈值时按无结论清除，并丢弃在途标记", () => {
+	it("无在途载入却仍显示加载时，超时按无结论清除", () => {
 		const dispose = initLoadingWatchdog();
 
 		emitLoading(true);
@@ -69,8 +69,23 @@ describe("initLoadingWatchdog", () => {
 		vi.advanceTimersByTime(2);
 		expect(storeState.isLoadingMusic).toBe(false);
 		expect(storeState.isPlaying).toBe(false);
-		// 不清 corePlayer 的在途标记，togglePlay 会永久早退：转圈没了但点也没用
-		expect(abandonPendingLoad).toHaveBeenCalledTimes(1);
+
+		dispose();
+	});
+
+	it("原生载入仍在途中时不误清，改为重新计时", () => {
+		const dispose = initLoadingWatchdog();
+		// 解灰音源要把整首下完才出声，几十秒是正常量级
+		nativeLoading.value = true;
+
+		emitLoading(true);
+		vi.advanceTimersByTime(STUCK_MS * 3);
+		expect(storeState.isLoadingMusic).toBe(true);
+
+		// 原生侧一旦给出结论（这里体现为不再在途），下一轮计时就收尾
+		nativeLoading.value = false;
+		vi.advanceTimersByTime(STUCK_MS + 1);
+		expect(storeState.isLoadingMusic).toBe(false);
 
 		dispose();
 	});
@@ -83,7 +98,6 @@ describe("initLoadingWatchdog", () => {
 		emitLoading(false);
 		vi.advanceTimersByTime(STUCK_MS);
 
-		expect(abandonPendingLoad).not.toHaveBeenCalled();
 		expect(storeState.isPlaying).toBe(true);
 
 		dispose();
@@ -114,6 +128,5 @@ describe("initLoadingWatchdog", () => {
 		vi.advanceTimersByTime(STUCK_MS * 2);
 
 		expect(storeState.isLoadingMusic).toBe(true);
-		expect(abandonPendingLoad).not.toHaveBeenCalled();
 	});
 });

@@ -130,12 +130,6 @@ class CorePlayer {
 		return this.requestBaselinePromise;
 	}
 
-	/** 上层判定本次载入不会再有结论时调用：丢弃在途标记，
-	 *  否则 togglePlay 会一直以为「加载正在路上」而早退，用户点什么都没反应。 */
-	abandonPendingLoad() {
-		this._isLoading = false;
-	}
-
 	private ensureEventListener() {
 		if (this.unlistenPromise) return;
 
