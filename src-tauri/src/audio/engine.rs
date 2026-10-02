@@ -177,6 +177,12 @@ fn begin_load_inner(
     inner: &mut AudioThreadInner,
     request_id: u64,
 ) -> Result<AudioSnapshot, String> {
+    // 迟到防护：本次 BeginLoad/Stop 的代次已落后于音频线程见过的最新代次，
+    // 说明用户又点了更靠后的歌（详见 should_ignore_stale_command 的注释）。
+    if should_ignore_stale_command(request_id, inner.request_id) {
+        return Ok(snapshot_inner(inner));
+    }
+
     let has_playing_sink = inner.sink.is_some()
         && inner
             .track
@@ -205,6 +211,18 @@ fn begin_load_inner(
 /// 上限不能太长：「点歌后旧歌还在唱」在慢网络上会被误读成没点中，
 /// 且这段时间里用户听到的和 UI 显示的（加载中）是矛盾的。
 const HANDOFF_GRACE: Duration = Duration::from_millis(1500);
+
+/// 迟到的旧命令是否该被丢弃（不得据此改写代次）。
+///
+/// command 队列按**入队顺序**串行执行，而入队顺序**不等于**前端调用顺序：
+/// 快速切歌「先点 A 再点 B」时，A 的 `player_load` 完全可能晚于 B 才把
+/// `BeginLoad` / `Stop` 排进队列。若这些命令无条件写 `inner.request_id`，
+/// 代次就会被倒拨回 A，随后 B 真正的 `Load`（判据 `request_id < inner.request_id`）
+/// 被当成过期丢弃——**最终选中的 B 永远进不了播放**，前端停在加载转圈、
+/// 音频仍是更早那首。代次必须单调不减，落后的命令直接忽略。
+fn should_ignore_stale_command(request_id: u64, current_request_id: u64) -> bool {
+    request_id < current_request_id
+}
 
 /// 宽限期到点后是否该主动停掉旧歌。
 ///
@@ -256,7 +274,7 @@ fn load_source(
     // 请求在网络解析里耗了一段时间后，它的 Load 仍可能排进命令队列——若照常
     // 执行会重建管线、把 inner.request_id 倒拨回旧值，与随后真正的新请求
     // 抢 sink，表现为偶发闪断/状态串味。直接丢弃即可，当前状态照常返回。
-    if request_id < inner.request_id {
+    if should_ignore_stale_command(request_id, inner.request_id) {
         return Ok(snapshot_inner(inner));
     }
 
@@ -517,6 +535,13 @@ fn set_crossfade_inner(
 }
 
 fn stop_inner(inner: &mut AudioThreadInner, request_id: u64) -> Result<AudioSnapshot, String> {
+    // 与 begin_load_inner 同源的迟到防护：迟到的旧 Stop 不得把代次倒拨，
+    // 否则它会把已经属于新请求的管线/音轨按旧代号清掉（或让新请求的 Load 变"过期"）。
+    // 丢弃这条命令、原样返回当前状态即可。
+    if should_ignore_stale_command(request_id, inner.request_id) {
+        return Ok(snapshot_inner(inner));
+    }
+
     inner.request_id = request_id;
     inner.handoff_deadline = None;
     if let Some(sink) = inner.sink.take() {
@@ -596,6 +621,57 @@ fn should_mark_ended(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 快速切歌的核心不变量：迟到的旧命令（BeginLoad / Stop）必须被忽略，
+    /// 不得把音频线程的代次倒拨。
+    ///
+    /// 复现「先点 A 再点 B，而 A 的 player_load 晚于 B 才入队」：
+    /// command 队列按入队顺序串行，因此 A 的命令会在 B 之后执行。
+    /// 若无条件写 inner.request_id，代次被倒拨回 A，随后 B 真正的 Load
+    /// （判据 `request_id < inner.request_id`）被当成过期丢弃
+    /// ——最终选中的 B 永远不播，前端停在加载转圈。这正是本次要修的根因。
+    #[test]
+    fn stale_command_is_ignored_so_epoch_never_reverts() {
+        // B(2) 已执行、代次为 2：迟到的 A(1) 必须被忽略
+        assert!(should_ignore_stale_command(1, 2));
+        // B(2) 自身不得被忽略
+        assert!(!should_ignore_stale_command(2, 2));
+        // 前进方向照常受理
+        assert!(!should_ignore_stale_command(3, 2));
+        // 首次请求（代次 0）永远受理
+        assert!(!should_ignore_stale_command(1, 0));
+    }
+
+    /// 端到端：迟到命令不得倒拨代次，最新请求仍能被受理。
+    #[test]
+    fn late_begin_and_stop_do_not_revert_epoch() {
+        let mut inner = AudioThreadInner::new();
+
+        // B 先执行
+        begin_load_inner(&mut inner, 2).expect("begin 2");
+        assert_eq!(inner.request_id, 2);
+        // A 迟到
+        begin_load_inner(&mut inner, 1).expect("stale begin ignored");
+        assert_eq!(inner.request_id, 2, "迟到 BeginLoad 不得倒拨代次");
+
+        // 迟到的旧 Stop 同样不得倒拨
+        stop_inner(&mut inner, 1).expect("stale stop ignored");
+        assert_eq!(inner.request_id, 2, "迟到 Stop 不得倒拨代次");
+
+        // 最新请求 B 的 Load 判据不应命中（不会被视为过期）
+        assert!(!(2 < inner.request_id));
+    }
+
+    /// 正常前进方向不受影响。
+    #[test]
+    fn newer_request_always_advances_epoch() {
+        let mut inner = AudioThreadInner::new();
+        begin_load_inner(&mut inner, 1).expect("begin 1");
+        begin_load_inner(&mut inner, 5).expect("begin 5");
+        assert_eq!(inner.request_id, 5);
+        stop_inner(&mut inner, 9).expect("stop 9");
+        assert_eq!(inner.request_id, 9);
+    }
 
     #[test]
     fn normalizes_crossfade_duration() {
