@@ -216,8 +216,17 @@ class CorePlayer {
 			speed: options.speed,
 		})
 			.then((snapshot) => {
+				// 已被更新的一次 play() 取代：
+				// 只把「加载中」交给更晚那次调用负责，自己不再改动状态，
+				// 也绝不回调 onPlay/onError（否则会用旧歌的结论覆盖新歌）。
 				if (requestId !== this.playRequestId) return;
-				if (!this.applySnapshot(snapshot)) return;
+				// 本次是当前请求、但快照被 requestId 校验挡下（例如原生把过期
+				// 请求正常返回了一个「非本代次」的快照）：仍须落幕加载态，
+				// 否则 _isLoading 永远为 true，转圈再也不会消失。
+				if (!this.applySnapshot(snapshot)) {
+					this._isLoading = false;
+					return;
+				}
 				onPlay(this._duration);
 			})
 			.catch((error) => {

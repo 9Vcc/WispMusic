@@ -28,6 +28,19 @@ const NEXT_SONG_PRELOAD_LEAD_SECONDS = 10;
 const MAX_CONSECUTIVE_PLAY_ERRORS = 5;
 let consecutivePlayErrors = 0;
 
+/**
+ * 正在执行的 playSong 调用代号。每次进入 playSong 自增，异步等待之后
+ * 用它判断「我这次调用是否已被更新的一次取代」。
+ *
+ * 为什么单靠 AbortController 不够：abort 只能中断**解析阶段**的 fetch，
+ * 而 fast 切歌真正会卡住 UI 的是**状态写入**——旧那次调用的 await 在被打断后
+ * 仍会返回（fetch 抛 AbortError 被 catch 吞掉，或原生侧把过期请求当成
+ * 「被取代」正常返回快照），于是它继续往下跑 `set({ isLoadingMusic: true })`
+ * 之类的写操作，把新歌刚设好的状态again覆盖回「加载中」。
+ * 因此凡是 await 之后、且会影响播放/加载状态的写入，都要先用代号校验。
+ */
+let playSessionToken = 0;
+
 function resetPlayErrorCount() {
 	consecutivePlayErrors = 0;
 }
@@ -132,6 +145,10 @@ export const createPlayerControlSlice: StateCreator<
 		currentPlayAbortController = new AbortController();
 
 		const { signal } = currentPlayAbortController;
+		// 本次调用的代号：任何 await 之后要写「播放/加载」状态前都先比一次，
+		// 被取代的旧调用一律不再改 store（详见 playSessionToken 的注释）。
+		const sessionToken = ++playSessionToken;
+		const isSuperseded = () => sessionToken !== playSessionToken;
 		let naturalCrossfadeStarted = false;
 		let nextSongPreloadStarted = false;
 		const updatePlaybackProgress = (currentTime: number) => {
@@ -189,11 +206,15 @@ export const createPlayerControlSlice: StateCreator<
 					url,
 					() => get().next(),
 					(duration) => {
+						// 已被更新的一次点歌取代：不要用旧歌的起播回调
+						// 把新歌的加载态清掉/覆盖播放状态
+						if (isSuperseded()) return;
 						resetPlayErrorCount();
 						set({ isPlaying: true, isLoadingMusic: false, duration });
 					},
 					updatePlaybackProgress,
 					() => {
+						if (isSuperseded()) return;
 						console.error("本地歌曲播放错误");
 						set({ isPlaying: false, isLoadingMusic: false });
 						if (shouldSkipToNextOnError()) get().next();
@@ -238,6 +259,9 @@ export const createPlayerControlSlice: StateCreator<
 					getKnownMaxQualityKey(song),
 					signal,
 				);
+				// 解析期间又被点了一首：本次调用已作废，直接退出，
+				// 否则下面的 set 会把新歌的加载状态覆盖掉
+				if (isSuperseded()) return;
 				url = resolved?.url;
 				levelKey = resolved?.levelKey;
 
@@ -255,6 +279,7 @@ export const createPlayerControlSlice: StateCreator<
 				// 解灰结果带缓存：同一首灰歌的二次播放不必再付一次 /match 往返
 				try {
 					const unblocked = await resolveUnblockedSource(song.id, signal);
+					if (isSuperseded()) return;
 					if (unblocked) {
 						url = unblocked.url;
 						// 解灰音源用固定档位名，让它的缓存也落在稳定 key 上
@@ -265,6 +290,8 @@ export const createPlayerControlSlice: StateCreator<
 					console.error("尝试解锁歌曲出错", e);
 				}
 			}
+
+			if (isSuperseded()) return;
 
 			if (!url) {
 				// 全部解析途径都拿不到地址且未抛异常：必须复位加载态，
@@ -279,9 +306,12 @@ export const createPlayerControlSlice: StateCreator<
 				corePlayer.play(
 					url,
 					() => {
+						if (isSuperseded()) return;
 						get().next();
 					},
 					(duration) => {
+						// 旧歌的 loaded 回调不得改写新歌的状态
+						if (isSuperseded()) return;
 						resetPlayErrorCount();
 						// 加载态在真正起播时才清除：提前清会出现「按钮已是
 						// 播放态、实际还在等网络」的假状态；就绪前硬切保证这
@@ -290,6 +320,7 @@ export const createPlayerControlSlice: StateCreator<
 					},
 					updatePlaybackProgress,
 					async () => {
+						if (isSuperseded()) return;
 						console.error("远程歌曲播放错误，尝试恢复");
 						// 解灰地址失效时立刻剔除缓存，避免下次又拿着同一个坏地址起播
 						if (levelKey === "unlock") invalidateUnblockCache(song.id);
@@ -308,6 +339,9 @@ export const createPlayerControlSlice: StateCreator<
 									},
 								);
 
+								// 查缓存期间用户又切歌了：本次错误恢复已无意义
+								if (isSuperseded()) return;
+
 								if (cachedPath) {
 									console.log(
 										"[CACHE] 发现已缓存文件，从缓存恢复播放:",
@@ -317,6 +351,7 @@ export const createPlayerControlSlice: StateCreator<
 										cachedPath,
 										() => get().next(),
 										(duration) => {
+											if (isSuperseded()) return;
 											if (duration > 0) {
 												corePlayer.seek(currentTime / duration);
 											}
@@ -329,6 +364,7 @@ export const createPlayerControlSlice: StateCreator<
 										},
 										updatePlaybackProgress,
 										() => {
+											if (isSuperseded()) return;
 											console.error("缓存歌曲恢复播放仍然失败，跳过");
 											set({
 												isPlaying: false,
@@ -366,7 +402,7 @@ export const createPlayerControlSlice: StateCreator<
 				// 详情与歌词在音频启动后并行获取，不再阻塞出声
 				getSongMusicDetail(song.id, signal)
 					.then((musicDetail) => {
-						if (!signal.aborted && musicDetail) {
+						if (!signal.aborted && !isSuperseded() && musicDetail) {
 							set({ currentSongMusicDetail: musicDetail });
 						}
 					})
@@ -376,7 +412,9 @@ export const createPlayerControlSlice: StateCreator<
 
 				getSongLyric(song.id, signal)
 					.then((musicLyric) => {
-						if (!signal.aborted) set({ currentSongLyrics: musicLyric });
+						if (!signal.aborted && !isSuperseded()) {
+							set({ currentSongLyrics: musicLyric });
+						}
 					})
 					.catch((err) => {
 						if (!signal.aborted) console.error("获取歌词失败:", err);
@@ -387,6 +425,8 @@ export const createPlayerControlSlice: StateCreator<
 				console.log("播放被中断");
 				return;
 			}
+			// 已被更新的一次点歌取代：这次调用的失败不该复位新歌的加载态
+			if (isSuperseded()) return;
 			console.error("播放歌曲失败:", err);
 			set({ isLoadingMusic: false });
 		}
@@ -463,7 +503,12 @@ export const createPlayerControlSlice: StateCreator<
 			// 这里若照旧走 playSong，会先把在途请求 abort 掉再从 URL 解析
 			// 重新来一遍——旧加载的 Rust 侧工作全部作废，转圈时间翻倍，
 			// 这正是「暂停后再次播放要转圈等待」的一类来源。
-			if (get().isLoadingMusic) return;
+			//
+			// 兜底：正常情况下 corePlayer 与 store 的加载态同步推进，但若
+			// isLoadingMusic 因异常路径滞留在 true（例如某次切歌的加载被原生
+			// 判为过期、回调不再到达），这里会永久早退、用户怎么点都唤不醒。
+			// 因此以原生侧的真实加载态为准：原生已不再加载就直接重新起播。
+			if (get().isLoadingMusic && corePlayer.isLoading()) return;
 			playSong(currentSong, isFmMode);
 			return;
 		}

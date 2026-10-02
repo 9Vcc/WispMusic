@@ -62,7 +62,12 @@ pub async fn player_load(
     volume: Option<f32>,
     speed: Option<f32>,
 ) -> Result<AudioSnapshot, String> {
-    state.latest_request_id.store(request_id, Ordering::SeqCst);
+    // 代次只增不减：前端 requestId 单调递增，但两条 player_load 的 IPC 到达
+    // 顺序不保证与调用顺序一致。若这里直接 store，一条迟到的旧请求（较小的
+    // requestId）会把代次倒拨回旧值，随后 is_stale_request 便会把**真正最新**
+    // 的那次请求误判成「被取代」而丢弃——表现为快速切歌后卡在加载、音频仍停在
+    // 更早那首歌上。用 fetch_max 保证代次永远取到见过的最大值。
+    state.latest_request_id.fetch_max(request_id, Ordering::SeqCst);
 
     let _ = send_command(state, |respond_to| AudioCommand::BeginLoad {
         app: app.clone(),
@@ -292,4 +297,49 @@ where
                 "audio thread dropped response".to_string()
             }
         })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 快速切歌的竞态复现：两条 player_load 的 IPC 到达顺序可能与调用顺序相反。
+    /// 代次必须是**单调不减**的，否则一条迟到的旧请求会把代次倒拨，
+    /// 导致真正最新的那次请求被 is_stale_request 误判为「被取代」而丢弃——
+    /// 表现即「卡在加载转圈、听到的还是更早那首歌」。
+    #[test]
+    fn late_arriving_older_request_must_not_revert_epoch() {
+        let epoch = AtomicU64::new(0);
+
+        // 新请求 B（request_id=2）先到
+        epoch.fetch_max(2, Ordering::SeqCst);
+        assert!(!is_stale_request(&epoch, 2), "最新的请求不应被判为过期");
+
+        // 迟到的是更早的请求 A（request_id=1）：不得把代次倒拨
+        epoch.fetch_max(1, Ordering::SeqCst);
+        assert!(
+            !is_stale_request(&epoch, 2),
+            "迟到的旧请求不得让最新请求变成「过期」"
+        );
+        assert!(
+            is_stale_request(&epoch, 1),
+            "迟到的旧请求自身应被判为过期而丢弃"
+        );
+    }
+
+    /// store 的旧行为（无 fetch_max）会在此断言上失败——保留作对照说明为什么要改。
+    #[test]
+    fn fetch_max_is_what_keeps_epoch_monotonic() {
+        let epoch = AtomicU64::new(0);
+        epoch.fetch_max(5, Ordering::SeqCst);
+        epoch.fetch_max(3, Ordering::SeqCst);
+        epoch.fetch_max(4, Ordering::SeqCst);
+        assert_eq!(epoch.load(Ordering::SeqCst), 5);
+        // 对照：若改用 store，这里会退化到 4（被迟到的较小代次覆盖）
+        let naive = AtomicU64::new(0);
+        naive.store(5, Ordering::SeqCst);
+        naive.store(3, Ordering::SeqCst);
+        naive.store(4, Ordering::SeqCst);
+        assert_eq!(naive.load(Ordering::SeqCst), 4);
+    }
 }
