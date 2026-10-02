@@ -251,6 +251,15 @@ fn load_source(
     volume: Option<f32>,
     speed: Option<f32>,
 ) -> Result<AudioSnapshot, String> {
+    // 迟到防护：本次 Load 的代次已落后于音频线程见过的最新代次，说明期间
+    // 用户又点了别的歌（新的 BeginLoad/Stop 已把 request_id 推进）。被放弃的
+    // 请求在网络解析里耗了一段时间后，它的 Load 仍可能排进命令队列——若照常
+    // 执行会重建管线、把 inner.request_id 倒拨回旧值，与随后真正的新请求
+    // 抢 sink，表现为偶发闪断/状态串味。直接丢弃即可，当前状态照常返回。
+    if request_id < inner.request_id {
+        return Ok(snapshot_inner(inner));
+    }
+
     inner.request_id = request_id;
     // 新音源已就位：宽限期兜底不再需要
     inner.handoff_deadline = None;
@@ -540,9 +549,12 @@ fn tick_progress(
         .as_ref()
         .map(|track| track.is_playing)
         .unwrap_or(false);
-    let is_near_duration =
-        snapshot.duration <= 0.0 || snapshot.current_time + 0.25 >= snapshot.duration;
-    let ended = sink_empty && is_playing && snapshot.current_time > 0.25 && is_near_duration;
+    let ended = should_mark_ended(
+        sink_empty,
+        is_playing,
+        snapshot.current_time,
+        snapshot.duration,
+    );
 
     if ended {
         if let Some(track) = inner.track.as_mut() {
@@ -562,6 +574,23 @@ fn tick_progress(
         store_snapshot(snapshot_state, snapshot.clone());
         emit_snapshot(app, "progress", snapshot);
     }
+}
+
+/// 心跳里判定「自然播放结束」。
+///
+/// `duration <= 0`（时长未知）时**绝不**判结束：错误终止的流（网络中断、
+/// 解码失败）同样表现为 sink 变空，若时长未知也照判 ended，会被误当成放完
+/// 而自动跳歌——用户感知是「恢复播放后莫名转圈然后切到下一首」。
+fn should_mark_ended(
+    sink_empty: bool,
+    is_playing: bool,
+    current_time: f64,
+    duration: f64,
+) -> bool {
+    if !sink_empty || !is_playing || current_time <= 0.25 || duration <= 0.0 {
+        return false;
+    }
+    current_time + 0.25 >= duration
 }
 
 #[cfg(test)]
@@ -594,5 +623,26 @@ mod tests {
         assert!(!should_expire_handoff(deadline, after, None, 8));
         // 没有挂起交接（普通 Stop / 首次载入）：永不触发
         assert!(!should_expire_handoff(None, after, Some(7), 8));
+    }
+
+    #[test]
+    fn marks_ended_only_when_sink_empty_near_known_duration() {
+        // 正常自然结束：sink 空 + 播放中 + 接近已知时长
+        assert!(should_mark_ended(true, true, 219.9, 220.0));
+        assert!(should_mark_ended(true, true, 220.0, 220.0));
+
+        // sink 还有数据 / 未在播放：不算结束
+        assert!(!should_mark_ended(false, true, 219.9, 220.0));
+        assert!(!should_mark_ended(true, false, 219.9, 220.0));
+
+        // 离结尾还远：错误终止的流（网络中断）不得被判成放完
+        assert!(!should_mark_ended(true, true, 30.0, 220.0));
+
+        // 时长未知（duration <= 0）：一律不判结束——错误终止与正常结束
+        // 在 sink 层不可区分，误判会触发自动跳歌
+        assert!(!should_mark_ended(true, true, 100.0, 0.0));
+
+        // 刚起播就断流：位置过小不判
+        assert!(!should_mark_ended(true, true, 0.1, 220.0));
     }
 }
