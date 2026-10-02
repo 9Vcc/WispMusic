@@ -46,12 +46,21 @@ impl AudioState {
     }
 }
 
+/// 载入并起播一个音源。
+///
+/// `song_id` / `level` 是播放缓存键（会透传给音源解析，决定落盘文件名）；
+/// `volume` / `speed` 随本次载入一起下发，避免起播后再补两条命令。
+#[allow(clippy::too_many_arguments)]
 pub async fn player_load(
     app: AppHandle,
     state: &AudioState,
     source: String,
     autoplay: bool,
     request_id: u64,
+    song_id: Option<i64>,
+    level: Option<String>,
+    volume: Option<f32>,
+    speed: Option<f32>,
 ) -> Result<AudioSnapshot, String> {
     state.latest_request_id.store(request_id, Ordering::SeqCst);
 
@@ -66,6 +75,8 @@ pub async fn player_load(
         source,
         Arc::clone(&state.latest_request_id),
         request_id,
+        song_id,
+        level.as_deref(),
     )
     .await;
     let Some(source) = (match resolved_source {
@@ -93,6 +104,8 @@ pub async fn player_load(
         source,
         autoplay,
         request_id,
+        volume,
+        speed,
         respond_to,
     })
 }
@@ -102,12 +115,16 @@ pub async fn player_preload(
     state: &AudioState,
     source: String,
     request_id: u64,
+    song_id: Option<i64>,
+    level: Option<String>,
 ) -> Result<PreloadResult, String> {
     let Some(source) = resolve_audio_source(
         &app,
         source,
         Arc::clone(&state.latest_request_id),
         request_id,
+        song_id,
+        level.as_deref(),
     )
     .await?
     else {

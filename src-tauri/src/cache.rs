@@ -1,5 +1,4 @@
 use futures_util::StreamExt;
-use reqwest::Client;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
@@ -60,14 +59,33 @@ fn get_cache_file_path(app: &AppHandle, song_id: i64, level: &str, ext: &str) ->
     Some(dir)
 }
 
+/// `audio_cache/{songId}_{level}.{ext}`——播放缓存的主键。
+///
+/// 键里**不能放 URL**：播放地址带签名与时效（`expi`），同一首歌每次解析出来的
+/// 字符串都可能不同，用 URL 做键等于每次播放都算作一个全新文件，缓存永远不
+/// 命中，也就永远退化成「重新拉整首流」。歌曲 + 音质是稳定且唯一的。
+pub(crate) fn song_audio_cache_path(
+    app: &AppHandle,
+    song_id: i64,
+    level: &str,
+    url: &str,
+) -> Result<PathBuf, String> {
+    get_cache_file_path(app, song_id, level, crate::audio::remote_cache_ext(url))
+        .ok_or_else(|| "No cache dir".to_string())
+}
+
+/// `native_audio/{url hash}.{ext}`——URL 维度的原生缓存。
+///
+/// 仅用于调用方没给出 songId/level 的情况，以及兼容改造前落下的原生缓存文件。
+pub(crate) fn url_audio_cache_path(app: &AppHandle, url: &str) -> Result<PathBuf, String> {
+    let mut dir = get_native_cache_dir(app).ok_or("No cache dir")?;
+    let _ = std::fs::create_dir_all(&dir);
+    dir.push(crate::audio::remote_cache_file_name(url));
+    Ok(dir)
+}
+
 fn extract_ext(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
-    if let Some(ext) = path.rsplit('.').next() {
-        if ["mp3", "flac", "m4a", "wav", "ogg", "aac"].contains(&ext.to_lowercase().as_str()) {
-            return ext.to_lowercase();
-        }
-    }
-    "mp3".to_string()
+    crate::audio::remote_cache_ext(url).to_string()
 }
 
 fn collect_cache_files(dir: PathBuf, label: &str) -> Result<Vec<CacheFile>, String> {
@@ -159,21 +177,28 @@ pub(crate) fn enforce_configured_audio_cache_limit_excluding(
 #[tauri::command]
 pub fn check_audio_cache(
     app: AppHandle,
-    state: State<'_, CacheState>,
     song_id: i64,
     level: String,
     url: String,
 ) -> Option<String> {
-    let ext = extract_ext(&url);
-    if let Some(path) = get_cache_file_path(&app, song_id, &level, &ext) {
+    // 主键：歌曲 + 音质。命中的文件只可能是完整下载后 rename 进来的，
+    // 因此不存在「读到半截文件」的情况，无需再查 downloading 标记。
+    if let Ok(path) = song_audio_cache_path(&app, song_id, &level, &url) {
         if path.exists() {
-            let key = format!("{}_{}", song_id, level);
-            if state.downloading.lock().unwrap().contains(&key) {
-                return None;
-            }
             return Some(path.to_string_lossy().to_string());
         }
     }
+
+    // 兼容 URL 维度命名（改造前由原生流式下载落下）：给出 URL 时一并查，
+    // 避免这些已经下好的整首文件被判为未缓存而重新拉流。
+    if !url.is_empty() {
+        if let Ok(path) = url_audio_cache_path(&app, &url) {
+            if path.exists() {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+    }
+
     None
 }
 
@@ -205,13 +230,9 @@ pub async fn cache_audio(
 
         let temp_path = path.with_extension("tmp");
 
-        // 旧缓存路径的单条下载：只约束连接建立与分块之间空转，不设整体超时
-        // （会掐断正常的大文件下载）。此前无任何超时——死流会让任务、缓存
-        // 内的 downloading 标记与 .tmp 文件一起永久挂住
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
+        // 与播放流共用同一个客户端（连接池复用）；只约束连接建立与分块之间
+        // 空转，不设整体超时（会掐断正常的大文件下载）
+        let client = crate::http_client::shared_client();
         let res = client.get(&url).send().await.map_err(|e| e.to_string())?;
 
         if !res.status().is_success() {

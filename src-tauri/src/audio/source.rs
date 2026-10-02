@@ -1,9 +1,9 @@
 use super::mp4_decoder::{is_iso_bmff, Mp4Decoder};
 use super::streaming::{
     content_length, content_type, decode_streaming_reader, decode_with_panic_guard,
-    detect_stream_format, remote_cache_file_name, BoxedAudioSource, StreamFormat,
-    StreamingBuffer, StreamingReader,
+    detect_stream_format, BoxedAudioSource, StreamFormat, StreamingBuffer, StreamingReader,
 };
+use crate::http_client::shared_client;
 use futures_util::StreamExt;
 use lofty::{
     file::TaggedFileExt,
@@ -61,24 +61,46 @@ pub(super) struct ReplayGainInfo {
     pub(super) peak: Option<f32>,
 }
 
+/// 解析音源。`song_id` / `level` 是**播放缓存的键**（歌曲 + 音质）：
+/// 给出时远程音源会落到 `audio_cache/{songId}_{level}.{ext}`，与 `check_audio_cache`
+/// 的查询口径一致——两处键不一致会让同一首歌被反复完整下载。
+/// 本地文件与 `unblock:` 前缀的调用方可传 `None`，此时退回 URL 维度命名。
 pub(super) async fn resolve_audio_source(
     app: &AppHandle,
     source: String,
     latest_request_id: Arc<AtomicU64>,
     request_id: u64,
+    song_id: Option<i64>,
+    level: Option<&str>,
 ) -> Result<Option<AudioSource>, String> {
     if is_stale_request(&latest_request_id, request_id) {
         return Ok(None);
     }
 
     if let Some(source) = source.strip_prefix("unblock:") {
-        return resolve_remote_audio_source(app, source, latest_request_id, request_id, false)
-            .await;
+        return resolve_remote_audio_source(
+            app,
+            source,
+            latest_request_id,
+            request_id,
+            false,
+            song_id,
+            level,
+        )
+        .await;
     }
 
     if source.starts_with("http://") || source.starts_with("https://") {
-        return resolve_remote_audio_source(app, &source, latest_request_id, request_id, true)
-            .await;
+        return resolve_remote_audio_source(
+            app,
+            &source,
+            latest_request_id,
+            request_id,
+            true,
+            song_id,
+            level,
+        )
+        .await;
     }
 
     let path = decode_source_path(&source);
@@ -101,14 +123,23 @@ pub(super) async fn resolve_audio_source(
 /// 死流，报错停止，避免下载任务被永久占住、进而饿死音频回调要的缓冲。
 const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 流式下载共用的 reqwest 客户端：只约束连接建立阶段（死地址或 DNS 挂起
-/// 会把下载任务永久占住，间接饿死音频回调要的缓冲），不设整体 `.timeout()`
-/// ——那会掐断正常的长音频流；分块级空转由读取循环里的 `tokio::time::timeout` 兜。
-fn streaming_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
+/// 远程音源的落盘目标路径。
+///
+/// 给了 songId + level 就用稳定的「歌曲 + 音质」键——播放地址每次解析都可能
+/// 带不同的签名/时效参数，URL 维度命名会让同一首歌每次都算作新文件；
+/// 没有歌曲上下文的调用方（直接播一个原始地址）才退回 URL 维度命名。
+fn remote_final_path(
+    app: &AppHandle,
+    url: &str,
+    song_id: Option<i64>,
+    level: Option<&str>,
+) -> Result<PathBuf, String> {
+    match (song_id, level.filter(|level| !level.is_empty())) {
+        (Some(song_id), Some(level)) => {
+            crate::cache::song_audio_cache_path(app, song_id, level, url)
+        }
+        _ => crate::cache::url_audio_cache_path(app, url),
+    }
 }
 
 async fn resolve_remote_audio_source(
@@ -117,12 +148,11 @@ async fn resolve_remote_audio_source(
     latest_request_id: Arc<AtomicU64>,
     request_id: u64,
     allow_streaming: bool,
+    song_id: Option<i64>,
+    level: Option<&str>,
 ) -> Result<Option<AudioSource>, String> {
-    let dir = native_audio_cache_dir(app)?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| format!("create native audio cache dir failed: {err}"))?;
+    let final_path = remote_final_path(app, url, song_id, level)?;
 
-    let final_path = dir.join(remote_cache_file_name(url));
     if final_path.exists() && final_path.metadata().map(|m| m.len()).unwrap_or(0) > 0 {
         return Ok(Some(AudioSource::File {
             replay_gain: read_replay_gain(&final_path),
@@ -135,7 +165,7 @@ async fn resolve_remote_audio_source(
         return Ok(None);
     }
 
-    let response = streaming_client()
+    let response = shared_client()
         .get(url)
         .send()
         .await
@@ -263,15 +293,11 @@ async fn resolve_remote_audio_source(
                     }
                 });
 
-                if let Err(err) =
-                    prepare_streaming_decode(reader.clone(), stream_format, url.to_string()).await
-                {
-                    if is_stale_request(&latest_request_id, request_id) {
-                        return Ok(None);
-                    }
-                    return Err(err);
-                }
-
+                // 这里不再预建一次解码器做校验：那次构造（含 m4a 的 moov 解析、
+                // 可能触发的 Range 快进）建完就丢，而真正播放用的解码器会在
+                // rebuild_sink 里再建一次——同一首歌白白付两遍解码器初始化。
+                // 格式与实际内容不符时由 rebuild_sink 报错，错误照样能回到前端
+                // （controller 会补发 Stop），只是发生时机后移了。
                 if is_stale_request(&latest_request_id, request_id) {
                     return Ok(None);
                 }
@@ -414,25 +440,6 @@ pub(super) fn decode_file_source(path: &std::path::Path) -> Result<BoxedAudioSou
     Ok(decoder)
 }
 
-async fn prepare_streaming_decode(
-    reader: StreamingReader,
-    format: StreamFormat,
-    label: String,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        decode_streaming_reader(reader, format)
-            .map(|_| ())
-            .map_err(|err| {
-                format!(
-                    "prepare streaming {} audio {label} failed: {err}",
-                    format.label()
-                )
-            })
-    })
-    .await
-    .map_err(|err| format!("prepare streaming audio task failed: {err}"))?
-}
-
 #[derive(Debug)]
 enum RangeStreamOutcome {
     Finished,
@@ -517,7 +524,7 @@ async fn stream_range_into_tail(
 ) -> RangeStreamOutcome {
     use futures_util::StreamExt;
 
-    let response = match streaming_client()
+    let response = match shared_client()
         .get(url)
         .header(reqwest::header::RANGE, format!("bytes={target}-"))
         .send()

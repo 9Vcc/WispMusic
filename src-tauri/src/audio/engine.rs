@@ -27,6 +27,15 @@ pub(super) fn run_audio_thread(
         match rx.recv_timeout(PROGRESS_INTERVAL) {
             Ok(command) => handle_command(command, &mut inner, &snapshot_state, &mut last_app),
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // 就绪前硬切的兜底：新音源超时未到位时把还在响的旧歌停掉，
+                // 否则网络挂死会让旧歌一直唱下去、看起来像点歌没生效。
+                // 与是否已有 app 句柄无关，心跳里每次都要检查。
+                if let Some(snapshot) = expire_pending_handoff(&mut inner) {
+                    store_snapshot(&snapshot_state, snapshot.clone());
+                    if let Some(app) = last_app.as_ref() {
+                        emit_snapshot(app, "state", snapshot);
+                    }
+                }
                 if let Some(app) = last_app.as_ref() {
                     tick_progress(app, &mut inner, &snapshot_state);
                 }
@@ -57,10 +66,12 @@ fn handle_command(
             source,
             autoplay,
             request_id,
+            volume,
+            speed,
             respond_to,
         } => {
             *last_app = Some(app.clone());
-            let result = load_source(inner, source, autoplay, request_id);
+            let result = load_source(inner, source, autoplay, request_id, volume, speed);
             respond_and_emit(&app, "loaded", result, respond_to, snapshot_state);
         }
         AudioCommand::Play { app, respond_to } => {
@@ -173,12 +184,63 @@ fn begin_load_inner(
             .map(|track| track.is_playing)
             .unwrap_or(false);
 
-    if inner.crossfade_duration.is_zero() || !has_playing_sink {
+    // 有正在出声的旧歌就**不立刻停**：让它在解析新音源的整段时间里继续响，
+    // 直到 rebuild_sink 把新 sink 建好并 append 完成才停旧 sink（见 pipeline.rs）。
+    // 旧实现在这里无条件 stop，于是「点歌 → 出声」的全部耗时都落在静音窗口里，
+    // 网络稍慢就能听见一段空白。crossfade 时长与是否硬切无关，硬切只是
+    // should_crossfade=false 的那条路径，同样在就绪后停旧源。
+    //
+    // 代价是并发多出一个 sink（最多持续 HANDOFF_GRACE），换来的是切歌全程有声。
+    if !has_playing_sink {
         return stop_inner(inner, request_id);
     }
 
     inner.request_id = request_id;
+    inner.handoff_deadline = Some(Instant::now() + HANDOFF_GRACE);
     Ok(idle_snapshot(inner, request_id))
+}
+
+/// 新音源迟迟不到时旧歌可以继续响的宽限期。
+///
+/// 上限不能太长：「点歌后旧歌还在唱」在慢网络上会被误读成没点中，
+/// 且这段时间里用户听到的和 UI 显示的（加载中）是矛盾的。
+const HANDOFF_GRACE: Duration = Duration::from_millis(1500);
+
+/// 宽限期到点后是否该主动停掉旧歌。
+///
+/// 判据是 `track.request_id`：`Load` 会把这个音轨整条换成新代号，因此
+/// 「track 仍是旧代号」精确等价于「本次 BeginLoad 对应的新音源尚未就位」。
+/// 只看指针是否为空是不够的——用户期间又点了别的歌时，管线已归新请求所有。
+fn should_expire_handoff(
+    deadline: Option<Instant>,
+    now: Instant,
+    track_request_id: Option<u64>,
+    current_request_id: u64,
+) -> bool {
+    let Some(deadline) = deadline else {
+        return false;
+    };
+    if now < deadline {
+        return false;
+    }
+    matches!(track_request_id, Some(id) if id != current_request_id)
+}
+
+/// 在音频线程的 250ms 心跳里检查宽限期（不额外起定时任务，也就不会与
+/// 命令处理产生竞态）。返回需要广播的状态快照。
+fn expire_pending_handoff(inner: &mut AudioThreadInner) -> Option<AudioSnapshot> {
+    let track_request_id = inner.track.as_ref().map(|track| track.request_id);
+    if !should_expire_handoff(
+        inner.handoff_deadline,
+        Instant::now(),
+        track_request_id,
+        inner.request_id,
+    ) {
+        return None;
+    }
+
+    inner.handoff_deadline = None;
+    stop_inner(inner, inner.request_id).ok()
 }
 
 fn load_source(
@@ -186,8 +248,26 @@ fn load_source(
     source: AudioSource,
     autoplay: bool,
     request_id: u64,
+    volume: Option<f32>,
+    speed: Option<f32>,
 ) -> Result<AudioSnapshot, String> {
     inner.request_id = request_id;
+    // 新音源已就位：宽限期兜底不再需要
+    inner.handoff_deadline = None;
+
+    // 音量 / 倍速必须在重建管线**之前**落定：rebuild_sink 建 sink 时就用
+    // inner.volume 与 inner.speed 决定首帧音量、并把 TempoSource 按该倍率装配。
+    // 放在起播之后再补命令的话，首帧总是先按旧值出声，随后才被纠正（听感上
+    // 是"起播瞬间音量/语速不对然后跳一下"）。
+    if let Some(volume) = volume {
+        inner.volume = volume.clamp(0.0, 1.5);
+    }
+    if let Some(speed) = speed {
+        let speed = speed.clamp(super::tempo::MIN_SPEED, super::tempo::MAX_SPEED);
+        // 新 track 从 0 起播，无需像 set_speed_inner 那样先按旧速度结算位置
+        inner.speed = speed;
+        inner.speed_control.request(speed);
+    }
 
     inner.track = Some(TrackState {
         source,
@@ -429,6 +509,7 @@ fn set_crossfade_inner(
 
 fn stop_inner(inner: &mut AudioThreadInner, request_id: u64) -> Result<AudioSnapshot, String> {
     inner.request_id = request_id;
+    inner.handoff_deadline = None;
     if let Some(sink) = inner.sink.take() {
         sink.stop();
     }
@@ -494,5 +575,24 @@ mod tests {
             normalize_crossfade_duration(Duration::from_secs(30)),
             CROSSFADE_MAX_DURATION
         );
+    }
+
+    #[test]
+    fn expires_handoff_only_after_grace_with_new_source_pending() {
+        let now = Instant::now();
+        let deadline = Some(now + HANDOFF_GRACE);
+        let before = now + Duration::from_millis(100);
+        let after = now + HANDOFF_GRACE + Duration::from_millis(250);
+
+        // 未到宽限期：旧歌继续响，不干预
+        assert!(!should_expire_handoff(deadline, before, Some(7), 8));
+        // 到点且 Load 还没把音轨换成新代号：停掉旧歌
+        assert!(should_expire_handoff(deadline, after, Some(7), 8));
+        // 到点但新音源已就位：不得误停刚起播的新歌
+        assert!(!should_expire_handoff(deadline, after, Some(8), 8));
+        // 没有在播的音轨：没有可停的对象
+        assert!(!should_expire_handoff(deadline, after, None, 8));
+        // 没有挂起交接（普通 Stop / 首次载入）：永不触发
+        assert!(!should_expire_handoff(None, after, Some(7), 8));
     }
 }

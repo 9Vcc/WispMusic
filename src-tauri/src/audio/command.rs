@@ -16,6 +16,10 @@ pub(super) enum AudioCommand {
         source: AudioSource,
         autoplay: bool,
         request_id: u64,
+        /// 随载入一起下发的音量/倍速。为 None 表示沿用当前值——起播后再补
+        /// 两条独立命令会让首帧先按旧值出声，且多两次命令往返。
+        volume: Option<f32>,
+        speed: Option<f32>,
         respond_to: ResponseTx,
     },
     Play {

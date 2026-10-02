@@ -18,6 +18,10 @@ use tauri::{AppHandle, Manager, State};
 pub use controller::AudioState;
 use types::{AudioSnapshot, PreloadResult};
 
+/// 缓存文件命名规则的唯一来源，供 crate 根部的 cache 模块复用：
+/// 写入方与查询方必须算出同一个文件名，否则缓存永不命中。
+pub(crate) use streaming::{remote_cache_ext, remote_cache_file_name};
+
 /// 同步命令的 send_command 会阻塞等音频线程回包（seek 期间还包含 demuxer
 /// 定位耗时），统一放到 spawn_blocking 执行，避免卡住 Tauri 的调用线程。
 async fn run_audio_command<F>(app: AppHandle, command: F) -> Result<AudioSnapshot, String>
@@ -33,14 +37,22 @@ where
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn player_load(
     app: AppHandle,
     state: State<'_, AudioState>,
     source: String,
     autoplay: bool,
     request_id: u64,
+    song_id: Option<i64>,
+    level: Option<String>,
+    volume: Option<f32>,
+    speed: Option<f32>,
 ) -> Result<AudioSnapshot, String> {
-    controller::player_load(app, &state, source, autoplay, request_id).await
+    controller::player_load(
+        app, &state, source, autoplay, request_id, song_id, level, volume, speed,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -49,8 +61,10 @@ pub async fn player_preload(
     state: State<'_, AudioState>,
     source: String,
     request_id: u64,
+    song_id: Option<i64>,
+    level: Option<String>,
 ) -> Result<PreloadResult, String> {
-    controller::player_preload(app, &state, source, request_id).await
+    controller::player_preload(app, &state, source, request_id, song_id, level).await
 }
 
 #[tauri::command]

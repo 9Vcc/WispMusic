@@ -47,6 +47,9 @@ pub(super) struct AudioThreadInner {
     pub(super) fading_sinks: Vec<FadingSink>,
     pub(super) fade_in: Option<FadeInState>,
     pub(super) request_id: u64,
+    /// 「就绪前硬切」的宽限截止时刻：BeginLoad 保留旧 sink 等待新音源时挂上，
+    /// 到点仍没等到对应的 Load 就主动停掉旧歌（见 engine::expire_pending_handoff）。
+    pub(super) handoff_deadline: Option<Instant>,
     pub(super) selected_device_id: Option<String>,
 }
 
@@ -67,6 +70,7 @@ impl AudioThreadInner {
             fading_sinks: Vec::new(),
             fade_in: None,
             request_id: 0,
+            handoff_deadline: None,
             selected_device_id: Option::None,
         }
     }

@@ -567,7 +567,7 @@ pub(super) fn detect_stream_format(
     None
 }
 
-pub(super) fn remote_cache_file_name(url: &str) -> String {
+pub(crate) fn remote_cache_file_name(url: &str) -> String {
     use std::{
         collections::hash_map::DefaultHasher,
         hash::{Hash, Hasher},
@@ -576,10 +576,23 @@ pub(super) fn remote_cache_file_name(url: &str) -> String {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
     let hash = hasher.finish();
-    format!("{hash:016x}.{}", extract_remote_ext(url))
+    format!("{hash:016x}.{}", remote_cache_ext(url))
 }
 
-fn extract_remote_ext(url: &str) -> &str {
+/// 缓存文件名使用的扩展名（不含点），未知扩展名回落 `mp3`。
+///
+/// 落盘的写入方（原生流式下载）与查询方（`check_audio_cache`）必须用同一份
+/// 映射：两边算出的文件名只要差一个字符，缓存就永远不命中，表现为「明明下过
+/// 了却每次重新拉流」。`extract_remote_ext` 对未知扩展名返回 `audio`（供格式
+/// 探测判断「认不出来」），这里再折成具体后缀。
+pub(crate) fn remote_cache_ext(url: &str) -> &'static str {
+    match extract_remote_ext(url) {
+        "audio" => "mp3",
+        ext => ext,
+    }
+}
+
+fn extract_remote_ext(url: &str) -> &'static str {
     let path = url.split('?').next().unwrap_or(url);
     let ext = path.rsplit('.').next().unwrap_or("audio");
     match ext.to_ascii_lowercase().as_str() {

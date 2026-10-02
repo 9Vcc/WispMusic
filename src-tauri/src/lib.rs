@@ -3,6 +3,7 @@ mod audio;
 mod cache;
 mod dev_watchdog;
 mod download;
+mod http_client;
 mod local_lyric;
 mod local_music;
 mod ncm;
