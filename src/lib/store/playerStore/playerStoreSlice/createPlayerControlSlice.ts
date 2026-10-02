@@ -273,7 +273,9 @@ export const createPlayerControlSlice: StateCreator<
 				return;
 			}
 
-			{
+			if (url) {
+				// isLoadingMusic 不在此处清除：它要到 onPlay（loaded 事件）才落幕，
+				// 期间旧歌继续响（就绪后硬切），转圈是对「等新歌就绪」的诚实反馈。
 				corePlayer.play(
 					url,
 					() => {
@@ -361,15 +363,8 @@ export const createPlayerControlSlice: StateCreator<
 					},
 				);
 
-				set({ isLoadingMusic: false });
-
-				// 详			);
-
-			// isLoadingMusic 此处不再清除：它要到 onPlay（loaded 事件）才落幕，
-			// 期间旧歌继续响（就绪后硬切），转圈是对「等新歌就绪」的诚实反馈。
-
-			// 详情与歌词在音频启动后并行获取，不再阻塞出声
-			getSongMusicDetail(song.id, signal)
+				// 详情与歌词在音频启动后并行获取，不再阻塞出声
+				getSongMusicDetail(song.id, signal)
 					.then((musicDetail) => {
 						if (!signal.aborted && musicDetail) {
 							set({ currentSongMusicDetail: musicDetail });
