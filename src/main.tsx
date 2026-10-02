@@ -23,14 +23,40 @@ settingsReady.then(() => initGlobalShortcuts());
  * 只在解灰开关打开时预热——关掉解灰的用户白开一个 Node 进程不划算。
  * 失败静默：真正播放时 unm_match 会再走一次完整的按需拉起流程。
  */
+let warmupStarted = false;
+
 async function warmupUnblock() {
+	if (warmupStarted) return;
 	// 等设置水合：解灰开关是用户设置，水合前读到的是默认值
 	await settingsReady.catch(() => undefined);
 	const { useSettingStore } = await import(
 		"./lib/store/settingStore/settingStore"
 	);
 	if (!useSettingStore.getState().network.unblockEnabled) return;
+	// 两个入口（空闲 + 首次交互）可能并发进入，这里再确认一次
+	if (warmupStarted) return;
+	warmupStarted = true;
 	await invoke("unm_warmup");
+}
+
+function runWarmupQuietly() {
+	void warmupUnblock().catch((error) => {
+		console.warn("[unm] 解灰引擎预热失败（首次播放时会按需重试）:", error);
+	});
+}
+
+/**
+ * 空闲回调可能被启动期的重活推后（同一个回调里还有本地曲库水合），
+ * 于是补一个入口：用户第一次交互就把 sidecar 拉起来，不用等真点了灰歌才现开进程。
+ */
+function registerWarmupOnFirstInteraction() {
+	const trigger = () => {
+		window.removeEventListener("pointerdown", trigger);
+		window.removeEventListener("keydown", trigger);
+		runWarmupQuietly();
+	};
+	window.addEventListener("pointerdown", trigger, { passive: true });
+	window.addEventListener("keydown", trigger);
 }
 
 if (isTauri() && getCurrentWindow().label === "main") {
@@ -41,10 +67,11 @@ if (isTauri() && getCurrentWindow().label === "main") {
 			? window.requestIdleCallback(() => cb())
 			: setTimeout(cb, 200);
 	idle(() => {
+		// 先发起预热再水合本地曲库：水合是同步重活，反过来会把 sidecar 的
+		// 拉起动作堵在它后面（预热本身是异步的，先发起即可后台并行）
+		runWarmupQuietly();
+		registerWarmupOnFirstInteraction();
 		initLocalMusic();
-		void warmupUnblock().catch((error) => {
-			console.warn("[unm] 解灰引擎预热失败（首次播放时会按需重试）:", error);
-		});
 	});
 
 	// 主窗口以 visible: false 启动，待设置（主题/材质）随首帧应用后再显示；

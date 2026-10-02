@@ -6,6 +6,7 @@ import {
 } from "@fluentui/react-icons";
 import type React from "react";
 import { Link } from "react-router-dom";
+import { useSongPrefetchOnHover } from "@/lib/player/prefetch";
 import { useContextMenuStore } from "@/lib/store/contextMenuStore/contextMenuStore";
 import { usePlayerStore } from "@/lib/store/playerStore/playerStore";
 import type { Song } from "@/lib/types";
@@ -55,11 +56,19 @@ export function SongListItem({
 	const coverUrl = song.al.picUrl;
 	const isLocalMusic = song.localFilePath !== undefined;
 
+	// 悬停驻留即预取：命中后点歌只剩本地解码耗时。已在播放的这一行不需要预取。
+	const {
+		onMouseEnter: handlePrefetchEnter,
+		onMouseLeave: handlePrefetchLeave,
+	} = useSongPrefetchOnHover(song, !isPlaying);
+
 	return (
 		<WispListRow
 			index={index}
 			className={cn("w-full", className)}
 			onDoubleClick={() => playSong(song)}
+			onMouseEnter={handlePrefetchEnter}
+			onMouseLeave={handlePrefetchLeave}
 			onDragStart={(e) => e.preventDefault()}
 			onContextMenu={handleContextMenu}
 		>
