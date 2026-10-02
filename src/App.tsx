@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import RootLayout from "./layouts/RootLayout";
 import { initDesktopLyricSync } from "./lib/store/playerStore/desktopLyricSync";
+import { initLoadingWatchdog } from "./lib/store/playerStore/loadingWatchdog";
 import { initMediaSession } from "./lib/store/playerStore/mediaSessionSync";
 import ErrorPage from "./pages/ErrorPage";
 import HomePage from "./pages/HomePage";
@@ -113,9 +114,11 @@ export default function App() {
 		if (getCurrentWindow().label === "main") {
 			const unlistenMedia = initMediaSession();
 			const unlistenDesktopLyric = initDesktopLyricSync();
+			const unlistenLoadingWatchdog = initLoadingWatchdog();
 			return () => {
 				unlistenMedia();
 				unlistenDesktopLyric();
+				unlistenLoadingWatchdog();
 			};
 		}
 	}, []);

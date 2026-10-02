@@ -49,7 +49,12 @@ async function playNativeOrCurrentSong() {
 	if (!snapshot.isReady) {
 		// 与 togglePlay 同一防抖语义：加载正在路上时静默等待，
 		// 别把它 abort 掉从 URL 解析重新来一遍
-		if (usePlayerStore.getState().isLoadingMusic) return;
+		//
+		// 同样以原生侧的真实加载态为准：只看 isLoadingMusic 时，只要它因某次
+		// 载入「没有结论」而滞留，媒体键/SMTC 就和播放按钮一起失灵（点多少下
+		// 都没反应），而 corePlayer 早已不在加载途中
+		if (usePlayerStore.getState().isLoadingMusic && corePlayer.isLoading())
+			return;
 		store.playSong(store.currentSong, store.isFmMode);
 		return;
 	}
