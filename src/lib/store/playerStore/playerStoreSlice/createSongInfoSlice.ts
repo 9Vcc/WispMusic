@@ -93,9 +93,14 @@ export const createSongInfoSlice: StateCreator<
 						set({ isLoadingMusic: false });
 					},
 					getSongDurationSeconds(currentSong),
+					{
+						// 切换音质后缓存键随之改变（歌曲 + 新音质），与播放路径一致
+						songId,
+						level: key,
+						volume: get().volume,
+						speed: get().playbackRate,
+					},
 				);
-				corePlayer.setVolume(get().volume);
-				corePlayer.setSpeed(get().playbackRate);
 			} catch (err) {
 				if (!isActiveRequest()) return;
 				console.log("切换音质失败", err);

@@ -35,6 +35,15 @@ interface PreloadResult {
 	duration: number;
 }
 
+/** 随载入一起下发的参数。`songId`/`level` 决定播放缓存键（歌曲 + 音质），
+ *  `volume`/`speed` 让首帧就用正确音量与倍率出声，省掉起播后的两条补发命令。 */
+export interface CorePlayOptions {
+	songId?: number;
+	level?: string;
+	volume?: number;
+	speed?: number;
+}
+
 export interface AudioDeviceInfo {
 	id: string;
 	name: string;
@@ -168,6 +177,7 @@ class CorePlayer {
 		onProgress?: (currentTime: number) => void,
 		onError?: () => void,
 		fallbackDuration = 0,
+		options: CorePlayOptions = {},
 	) {
 		this.ensureEventListener();
 		this.stopProgressLoop();
@@ -192,6 +202,10 @@ class CorePlayer {
 			source: url,
 			autoplay: true,
 			requestId,
+			songId: options.songId,
+			level: options.level,
+			volume: options.volume,
+			speed: options.speed,
 		})
 			.then((snapshot) => {
 				if (requestId !== this.playRequestId) return;
@@ -330,11 +344,13 @@ class CorePlayer {
 		return this._speed;
 	}
 
-	preload(url: string) {
+	preload(url: string, songId?: number, level?: string) {
 		const requestId = this.playRequestId;
 		invoke<PreloadResult>("player_preload", {
 			source: url,
 			requestId,
+			songId,
+			level,
 		}).catch((error) => {
 			if (requestId !== this.playRequestId) return;
 			console.warn("[CorePlayer] native preload skipped:", error);

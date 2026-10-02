@@ -1,30 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { StateCreator } from "zustand";
 import { REPEAT_MODE_BY_TYPE } from "@/lib/constants/player";
-import {
-	needsDowngrade,
-	QUALITY_BY_KEY,
-	QUALITY_BY_LEVEL,
-	type QualityKey,
-} from "@/lib/constants/song";
+import type { QualityKey } from "@/lib/constants/song";
 import { corePlayer } from "@/lib/player/corePlayer";
+import { prefetchSong } from "@/lib/player/prefetch";
+import {
+	getKnownMaxQualityKey,
+	invalidateUnblockCache,
+	resolveSongUrlWithQuality,
+	resolveUnblockedSource,
+} from "@/lib/player/song-source";
 import { getAlbum } from "@/lib/services/album";
 import { getArtistAllSongs } from "@/lib/services/artist";
 import { getPlaylistAllTrack } from "@/lib/services/playlist";
 import { fmTrash, getPersonalFm } from "@/lib/services/recommend";
-import {
-	getSongLyric,
-	getSongMusicDetail,
-	getSongUrl,
-	unblockMusic,
-} from "@/lib/services/song";
+import { getSongLyric, getSongMusicDetail } from "@/lib/services/song";
 import type { Song } from "@/lib/types";
 import type { PlayerControlSlice, SharedPlayerState } from "@/lib/types/player";
 import { useSettingStore } from "../../settingStore/settingStore";
 import { useProgressStore } from "../progressStore";
 
 let currentPlayAbortController: AbortController | null = null;
-const UNBLOCK_SOURCE_PREFIX = "unblock:";
+/** 当前曲剩余多少秒时开始预取下一首。悬停预取（prefetch.ts）覆盖"用户主动点"的
+ *  那条路径，这里是"自然放完接下一首"的兜底提前量。 */
 const NEXT_SONG_PRELOAD_LEAD_SECONDS = 10;
 // 连续播放失败的上限：超过后停止自动跳歌，避免全列表不可播时无限循环
 const MAX_CONSECUTIVE_PLAY_ERRORS = 5;
@@ -40,10 +38,6 @@ function shouldSkipToNextOnError() {
 	return consecutivePlayErrors < MAX_CONSECUTIVE_PLAY_ERRORS;
 }
 
-function toUnblockSource(url: string) {
-	return `${UNBLOCK_SOURCE_PREFIX}${url}`;
-}
-
 function getSongDurationSeconds(song: Song) {
 	const localDuration = song.localOriginalMetadata?.durationSecs ?? 0;
 	if (localDuration > 0) return localDuration;
@@ -54,95 +48,6 @@ function getSongDurationSeconds(song: Song) {
 	if (duration <= 0) return 0;
 
 	return duration > 10000 ? duration / 1000 : duration;
-}
-
-function getKnownMaxQualityKey(song: Song): QualityKey | undefined {
-	const maxBrLevel = song.privilege?.maxBrLevel;
-	if (!maxBrLevel) return undefined;
-	return QUALITY_BY_LEVEL[maxBrLevel as keyof typeof QUALITY_BY_LEVEL]?.key;
-}
-
-/**
- * 按设置音质请求歌曲 URL。
- * 优先请求 preferKey（与手动切换音质行为一致，privilege.maxBrLevel 可能低于实际可用音质）；
- * 仅当无 URL 或返回试听片段(freeTrialInfo)时，才降级到 privilege 标记的最大可用音质重试。
- */
-async function resolveSongUrlWithQuality(
-	songId: number | string,
-	preferKey: QualityKey,
-	knownMaxKey: QualityKey | undefined,
-	signal: AbortSignal,
-): Promise<{ url: string; levelKey: QualityKey } | undefined> {
-	const attempts: QualityKey[] = [preferKey];
-	if (
-		knownMaxKey &&
-		knownMaxKey !== preferKey &&
-		needsDowngrade(preferKey, knownMaxKey)
-	) {
-		attempts.push(knownMaxKey);
-	}
-
-	for (const key of attempts) {
-		const res = await getSongUrl(
-			[songId.toString()],
-			QUALITY_BY_KEY[key].level,
-			false,
-			signal,
-		);
-		const item = res?.[0];
-		if (item?.url && !item.freeTrialInfo) {
-			return {
-				url: item.url,
-				levelKey:
-					QUALITY_BY_LEVEL[item.level as keyof typeof QUALITY_BY_LEVEL]?.key ??
-					key,
-			};
-		}
-	}
-
-	return undefined;
-}
-
-async function resolvePreloadUrl(song: Song, signal: AbortSignal) {
-	if (song.localFilePath) return song.localFilePath;
-
-	const preferMusicLevel = useSettingStore.getState().audio.preferQuality;
-	let url: string | undefined;
-
-	const canPlay = song.privilege
-		? song.privilege.st >= 0 && song.privilege.pl > 0
-		: true;
-
-	if (canPlay) {
-		const resolved = await resolveSongUrlWithQuality(
-			song.id,
-			preferMusicLevel,
-			getKnownMaxQualityKey(song),
-			signal,
-		);
-		url = resolved?.url;
-
-		if (url && resolved) {
-			const cachedPath = await invoke<string | null>("check_audio_cache", {
-				songId: song.id,
-				level: resolved.levelKey,
-				url,
-			});
-			return cachedPath ?? url;
-		}
-	}
-
-	const unblockRes = await requestUnblock(song.id, signal);
-	return typeof unblockRes?.data === "string" && unblockRes.data
-		? toUnblockSource(unblockRes.data)
-		: undefined;
-}
-
-// 按设置读取解灰开关与音源；关闭时直接放弃，音源留空（自动）时不传 source 让后端依次尝试
-async function requestUnblock(id: number, signal?: AbortSignal) {
-	const { unblockEnabled, unblockSource } = useSettingStore.getState().network;
-	if (!unblockEnabled) return undefined;
-	return unblockMusic(id, signal, unblockSource || undefined);
 }
 
 function getPredictableNextSong(state: SharedPlayerState) {
@@ -159,20 +64,13 @@ function getPredictableNextSong(state: SharedPlayerState) {
 	return undefined;
 }
 
-function preloadNextSong(get: () => SharedPlayerState, signal: AbortSignal) {
+function preloadNextSong(get: () => SharedPlayerState) {
 	const nextSong = getPredictableNextSong(get());
 	if (!nextSong) return false;
 
-	resolvePreloadUrl(nextSong, signal)
-		.then((url) => {
-			if (!signal.aborted && url) corePlayer.preload(url);
-		})
-		.catch((error) => {
-			if (!signal.aborted) {
-				console.debug("[PLAYER] Preload next song skipped:", error);
-			}
-		});
-
+	// urgent：这是"自然放完接下一首"的关键提前量，不该被悬停预取的节流挡住；
+	// 若这首歌已经因悬停预热过，prefetch.ts 内部的去重会直接跳过，不会重复下载
+	prefetchSong(nextSong, true);
 	return true;
 }
 
@@ -248,7 +146,7 @@ export const createPlayerControlSlice: StateCreator<
 				!nextSongPreloadStarted &&
 				shouldPreloadNextSong(state, currentTime, duration)
 			) {
-				nextSongPreloadStarted = preloadNextSong(get, signal);
+				nextSongPreloadStarted = preloadNextSong(get);
 			}
 
 			if (
@@ -301,10 +199,9 @@ export const createPlayerControlSlice: StateCreator<
 						if (shouldSkipToNextOnError()) get().next();
 					},
 					fallbackDuration,
+					// 音量与倍速随载入下发，起播首帧就是正确值
+					{ volume: get().volume, speed: get().playbackRate },
 				);
-
-				corePlayer.setVolume(get().volume);
-				corePlayer.setSpeed(get().playbackRate);
 
 				set({
 					isLoadingMusic: false,
@@ -330,6 +227,7 @@ export const createPlayerControlSlice: StateCreator<
 
 			// 先检查歌曲是否可用
 			let url: string | undefined;
+			let levelKey: QualityKey | undefined;
 			const canPlay = song.privilege
 				? song.privilege.st >= 0 && song.privilege.pl > 0
 				: true; // 默认尝试当做可用处理
@@ -342,11 +240,16 @@ export const createPlayerControlSlice: StateCreator<
 					signal,
 				);
 				url = resolved?.url;
+				levelKey = resolved?.levelKey;
 
 				if (url && resolved) {
 					set({ currentMusicLevelKey: resolved.levelKey });
 
 					try {
+						// 已完整落盘的整首文件直接本地播放，省掉原生侧的 HTTP 请求。
+						// 这里不再顺手发起 cache_audio 后台下载：原生流式播放本身就会把
+						// 同一首写到同一个缓存 key 上，两边各下一遍等于首播时让后台下载
+						// 和播放流互相抢带宽——越抢，首块到得越晚。
 						const cachedPath = await invoke<string | null>(
 							"check_audio_cache",
 							{
@@ -359,13 +262,6 @@ export const createPlayerControlSlice: StateCreator<
 						if (cachedPath) {
 							console.log("[CACHE] 使用本地缓存音频:", cachedPath);
 							url = cachedPath;
-						} else {
-							// 触发后台下载缓存
-							invoke("cache_audio", {
-								songId: song.id,
-								level: resolved.levelKey,
-								url,
-							}).catch((e) => console.error("[CACHE] 后台缓存音频失败:", e));
 						}
 					} catch (e) {
 						console.error("[CACHE] 检查缓存状态失败:", e);
@@ -374,15 +270,15 @@ export const createPlayerControlSlice: StateCreator<
 			}
 
 			if (!url) {
-				// 尝试解锁灰色歌曲，或弥补普通请求失败的歌曲
+				// 尝试解锁灰色歌曲，或弥补普通请求失败的歌曲。
+				// 解灰结果带缓存：同一首灰歌的二次播放不必再付一次 /match 往返
 				try {
-					const unblockRes = await requestUnblock(song.id, signal);
-				url =
-					typeof unblockRes?.data === "string" && unblockRes.data
-						? toUnblockSource(unblockRes.data)
-						: undefined;
-					if (url) {
-						set({ currentMusicLevelKey: "unlock" });
+					const unblocked = await resolveUnblockedSource(song.id, signal);
+					if (unblocked) {
+						url = unblocked.url;
+						// 解灰音源用固定档位名，让它的缓存也落在稳定 key 上
+						levelKey = unblocked.levelKey;
+						set({ currentMusicLevelKey: unblocked.levelKey });
 					}
 				} catch (e) {
 					console.error("尝试解锁歌曲出错", e);
@@ -402,6 +298,8 @@ export const createPlayerControlSlice: StateCreator<
 					updatePlaybackProgress,
 					async () => {
 						console.error("远程歌曲播放错误，尝试恢复");
+						// 解灰地址失效时立刻剔除缓存，避免下次又拿着同一个坏地址起播
+						if (levelKey === "unlock") invalidateUnblockCache(song.id);
 						const currentTime = useProgressStore.getState().currentTime;
 						const { currentSong, currentMusicLevelKey } = get();
 
@@ -439,6 +337,10 @@ export const createPlayerControlSlice: StateCreator<
 											if (shouldSkipToNextOnError()) get().next();
 										},
 										fallbackDuration,
+										{
+											volume: get().volume,
+											speed: get().playbackRate,
+										},
 									);
 									return; // 恢复成功，不再执行下面逻辑
 								}
@@ -451,9 +353,15 @@ export const createPlayerControlSlice: StateCreator<
 						if (shouldSkipToNextOnError()) get().next();
 					},
 					fallbackDuration,
+					{
+						// 缓存键（歌曲 + 音质）交付给原生侧，让它把整首文件写到
+						// 与 check_audio_cache 一致的位置；音量与倍速一起下发
+						songId: song.id,
+						level: levelKey,
+						volume: get().volume,
+						speed: get().playbackRate,
+					},
 				);
-				corePlayer.setVolume(get().volume);
-				corePlayer.setSpeed(get().playbackRate);
 
 				set({ isLoadingMusic: false });
 
