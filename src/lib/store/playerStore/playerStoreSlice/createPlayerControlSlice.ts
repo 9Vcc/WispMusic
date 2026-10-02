@@ -190,12 +190,12 @@ export const createPlayerControlSlice: StateCreator<
 					() => get().next(),
 					(duration) => {
 						resetPlayErrorCount();
-						set({ isPlaying: true, duration });
+						set({ isPlaying: true, isLoadingMusic: false, duration });
 					},
 					updatePlaybackProgress,
 					() => {
 						console.error("本地歌曲播放错误");
-						set({ isPlaying: false });
+						set({ isPlaying: false, isLoadingMusic: false });
 						if (shouldSkipToNextOnError()) get().next();
 					},
 					fallbackDuration,
@@ -204,7 +204,6 @@ export const createPlayerControlSlice: StateCreator<
 				);
 
 				set({
-					isLoadingMusic: false,
 					currentSongMusicDetail: undefined,
 					currentSongLyrics: null,
 					currentMusicLevelKey: "local",
@@ -244,28 +243,10 @@ export const createPlayerControlSlice: StateCreator<
 
 				if (url && resolved) {
 					set({ currentMusicLevelKey: resolved.levelKey });
-
-					try {
-						// 已完整落盘的整首文件直接本地播放，省掉原生侧的 HTTP 请求。
-						// 这里不再顺手发起 cache_audio 后台下载：原生流式播放本身就会把
-						// 同一首写到同一个缓存 key 上，两边各下一遍等于首播时让后台下载
-						// 和播放流互相抢带宽——越抢，首块到得越晚。
-						const cachedPath = await invoke<string | null>(
-							"check_audio_cache",
-							{
-								songId: song.id,
-								level: resolved.levelKey,
-								url,
-							},
-						);
-
-						if (cachedPath) {
-							console.log("[CACHE] 使用本地缓存音频:", cachedPath);
-							url = cachedPath;
-						}
-					} catch (e) {
-						console.error("[CACHE] 检查缓存状态失败:", e);
-					}
+					// 这里不再查 check_audio_cache 替换本地路径：原生 player_load 的
+					// resolve_audio_source 用同样的 songId+level 键查同一个缓存文件，
+					// 命中即直接 File 播放。多出的这跳 IPC 串行在出声路径上，
+					// 只会让每次点歌白等一次往返。
 				}
 			}
 
@@ -285,7 +266,14 @@ export const createPlayerControlSlice: StateCreator<
 				}
 			}
 
-			if (url) {
+			if (!url) {
+				// 全部解析途径都拿不到地址且未抛异常：必须复位加载态，
+				// 否则 isLoadingMusic 停在 true、播放按钮永远转圈
+				set({ isLoadingMusic: false, isPlaying: false });
+				return;
+			}
+
+			{
 				corePlayer.play(
 					url,
 					() => {
@@ -293,7 +281,10 @@ export const createPlayerControlSlice: StateCreator<
 					},
 					(duration) => {
 						resetPlayErrorCount();
-						set({ isPlaying: true, duration });
+						// 加载态在真正起播时才清除：提前清会出现「按钮已是
+						// 播放态、实际还在等网络」的假状态；就绪前硬切保证这
+						// 段等待里旧歌继续响，用户不会被卡在静音里
+						set({ isPlaying: true, isLoadingMusic: false, duration });
 					},
 					updatePlaybackProgress,
 					async () => {
@@ -328,12 +319,19 @@ export const createPlayerControlSlice: StateCreator<
 												corePlayer.seek(currentTime / duration);
 											}
 											resetPlayErrorCount();
-											set({ isPlaying: true, duration });
+											set({
+												isPlaying: true,
+												isLoadingMusic: false,
+												duration,
+											});
 										},
 										updatePlaybackProgress,
 										() => {
 											console.error("缓存歌曲恢复播放仍然失败，跳过");
-											set({ isPlaying: false });
+											set({
+												isPlaying: false,
+												isLoadingMusic: false,
+											});
 											if (shouldSkipToNextOnError()) get().next();
 										},
 										fallbackDuration,
@@ -349,7 +347,7 @@ export const createPlayerControlSlice: StateCreator<
 							}
 						}
 
-						set({ isPlaying: false });
+						set({ isPlaying: false, isLoadingMusic: false });
 						if (shouldSkipToNextOnError()) get().next();
 					},
 					fallbackDuration,
@@ -365,8 +363,13 @@ export const createPlayerControlSlice: StateCreator<
 
 				set({ isLoadingMusic: false });
 
-				// 详情与歌词在音频启动后并行获取，不再阻塞出声
-				getSongMusicDetail(song.id, signal)
+				// 详			);
+
+			// isLoadingMusic 此处不再清除：它要到 onPlay（loaded 事件）才落幕，
+			// 期间旧歌继续响（就绪后硬切），转圈是对「等新歌就绪」的诚实反馈。
+
+			// 详情与歌词在音频启动后并行获取，不再阻塞出声
+			getSongMusicDetail(song.id, signal)
 					.then((musicDetail) => {
 						if (!signal.aborted && musicDetail) {
 							set({ currentSongMusicDetail: musicDetail });
@@ -461,6 +464,11 @@ export const createPlayerControlSlice: StateCreator<
 		if (!currentSong) return;
 
 		if (!corePlayer.isReady()) {
+			// 一次加载正在路上（URL 解析或原生拉流中）：静默等待即可。
+			// 这里若照旧走 playSong，会先把在途请求 abort 掉再从 URL 解析
+			// 重新来一遍——旧加载的 Rust 侧工作全部作废，转圈时间翻倍，
+			// 这正是「暂停后再次播放要转圈等待」的一类来源。
+			if (get().isLoadingMusic) return;
 			playSong(currentSong, isFmMode);
 			return;
 		}

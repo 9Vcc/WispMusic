@@ -47,6 +47,9 @@ async function playNativeOrCurrentSong() {
 
 	const snapshot = await invoke<NativeAudioSnapshot>("player_get_state");
 	if (!snapshot.isReady) {
+		// 与 togglePlay 同一防抖语义：加载正在路上时静默等待，
+		// 别把它 abort 掉从 URL 解析重新来一遍
+		if (usePlayerStore.getState().isLoadingMusic) return;
 		store.playSong(store.currentSong, store.isFmMode);
 		return;
 	}

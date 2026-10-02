@@ -61,6 +61,10 @@ class CorePlayer {
 	private _duration = 0;
 	private _isReady = false;
 	private _isPlaying = false;
+	// 一次 player_load 是否仍在途（已 invoke、尚未 loaded/失败）。
+	// togglePlay / SMTC play 用来区分「加载中」与「音频管线确实不在」：
+	// 前者应静默等待，后者才需要重新走 playSong 完整加载。
+	private _isLoading = false;
 	// 变速倍率：进度插值按此缩放（音频时间 = 墙钟时间 × speed）
 	private _speed = 1;
 	private anchorTime = 0;
@@ -126,6 +130,9 @@ class CorePlayer {
 		}
 
 		this._isReady = snapshot.isReady;
+		// 就绪快照（loaded）到达即代表本次加载落幕；即便 isReady=false
+		// （空源等），管线也已有结论，不再是「加载中」
+		this._isLoading = false;
 		this._isPlaying = snapshot.isPlaying;
 		// 单曲循环通过 seek(0)+resume 重播时 playRequestId 不变，
 		// 恢复播放后需要清除 ended 去重标记，否则下一次自然结束会被吞掉
@@ -192,6 +199,7 @@ class CorePlayer {
 		this.onProgressCallback = onProgress || null;
 		this.onErrorCallback = onError || null;
 		this._isReady = false;
+		this._isLoading = true;
 		this._isPlaying = false;
 		this._duration = this.fallbackDuration;
 		this._currentTime = 0;
@@ -215,6 +223,7 @@ class CorePlayer {
 			.catch((error) => {
 				if (requestId !== this.playRequestId) return;
 				console.error("[CorePlayer] native load error:", error);
+				this._isLoading = false;
 				this.onErrorCallback?.();
 			});
 	}
@@ -425,6 +434,12 @@ class CorePlayer {
 
 	isReady() {
 		return this._isReady;
+	}
+
+	/** 一次 player_load 是否仍在途。加载期间用户点播放应静默等待，
+	 *  而不是把在途请求 abort 后从 URL 解析重新来一遍。 */
+	isLoading() {
+		return this._isLoading;
 	}
 
 	getReactVolume(): number {
