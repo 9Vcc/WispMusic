@@ -57,6 +57,11 @@ export const createSongInfoSlice: StateCreator<
 
 		window.setTimeout(async () => {
 			try {
+				// 切音质同样直接走 corePlayer.play：先对齐代次基线，否则页面重载后
+				// 这次载入会被原生判成迟到请求丢弃（见 ensureRequestIdBaseline）
+				await corePlayer.ensureRequestIdBaseline();
+				if (!isActiveRequest()) return;
+
 				const res = await getSongUrl(
 					[songId.toString()],
 					QUALITY_BY_KEY[key].level,

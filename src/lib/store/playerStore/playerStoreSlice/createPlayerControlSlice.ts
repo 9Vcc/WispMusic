@@ -176,6 +176,15 @@ export const createPlayerControlSlice: StateCreator<
 		};
 
 		try {
+			// 本地 playRequestId 必须先对齐到原生代次之上：WebView 重新加载后本地从 1
+			// 重新数，而进程侧代次只增不减，未对齐时每一次载入都会被原生当成迟到的旧
+			// 请求丢掉（没声音、转圈也不落幕，见 corePlayer.ensureRequestIdBaseline）。
+			// 只有第一次真付这次 IPC 往返，之后拿到的是已完成的 promise。
+			await corePlayer.ensureRequestIdBaseline();
+			// 等基线期间用户又点了一首：本次调用已作废，别让下面这些 set
+			// 把新歌的状态覆盖回去
+			if (isSuperseded()) return;
+
 			const { playlist } = get();
 			const preferMusicLevel = useSettingStore.getState().audio.preferQuality;
 			const fallbackDuration = getSongDurationSeconds(song);

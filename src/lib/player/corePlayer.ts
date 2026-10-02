@@ -70,6 +70,8 @@ class CorePlayer {
 	private anchorTime = 0;
 	private anchorUpdatedAt = performance.now();
 	private playRequestId = 0;
+	// 代次基线的取基线动作本身（幂等，见 ensureRequestIdBaseline）
+	private requestBaselinePromise: Promise<void> | null = null;
 	private endedRequestId: number | null = null;
 	// seek 序列守卫：快速连续 seek 时只采纳最新一次的响应，
 	// 期间忽略音频线程 progress 事件，防止旧位置把进度锚点拉回去
@@ -101,6 +103,37 @@ class CorePlayer {
 		return () => {
 			this.timeListeners.delete(listener);
 		};
+	}
+
+	/**
+	 * 把本地计数基线抬到原生代次之上，首次 `play()` 之前必须先完成一次。
+	 *
+	 * `playRequestId` 活在 WebView 文档里，而原生侧的代次（`AudioState` 的
+	 * `latest_request_id`）活在应用进程里，且只增不减（fetch_max，为的是压住
+	 * 两条 IPC 到达顺序与点击顺序相反的竞态）。页面重新加载会让本地计数从 1
+	 * 重新数——错误页的「刷新」、会话过期跳 /login 的整页导航、开发期热更新都是
+	 * 这条路。此后每个新 requestId 都永远追不上旧代次，于是原生侧把每一次载入
+	 * 都判成迟到的旧请求丢掉：没声音、转圈也不落幕，要连点几十首才自己恢复。
+	 */
+	ensureRequestIdBaseline(): Promise<void> {
+		if (!this.requestBaselinePromise) {
+			this.requestBaselinePromise = invoke<number>("player_latest_request_id")
+				.then((epoch) => {
+					if (epoch > this.playRequestId) this.playRequestId = epoch;
+				})
+				.catch((error) => {
+					// 取不到基线就退回本地计数，并允许下次重试：别把一次失败缓存成永久
+					this.requestBaselinePromise = null;
+					console.warn("[CorePlayer] 取原生代次基线失败:", error);
+				});
+		}
+		return this.requestBaselinePromise;
+	}
+
+	/** 上层判定本次载入不会再有结论时调用：丢弃在途标记，
+	 *  否则 togglePlay 会一直以为「加载正在路上」而早退，用户点什么都没反应。 */
+	abandonPendingLoad() {
+		this._isLoading = false;
 	}
 
 	private ensureEventListener() {
@@ -220,11 +253,16 @@ class CorePlayer {
 				// 只把「加载中」交给更晚那次调用负责，自己不再改动状态，
 				// 也绝不回调 onPlay/onError（否则会用旧歌的结论覆盖新歌）。
 				if (requestId !== this.playRequestId) return;
-				// 本次是当前请求、但快照被 requestId 校验挡下（例如原生把过期
-				// 请求正常返回了一个「非本代次」的快照）：仍须落幕加载态，
-				// 否则 _isLoading 永远为 true，转圈再也不会消失。
+				// 本次是当前请求、但快照被 requestId 校验挡下：原生侧的代次里没有
+				// 我们这次请求，而这次载入此后不会再来任何结论。只清 _isLoading
+				// 是不够的——store.isLoadingMusic 只有 onPlay/onError 才会落幕，
+				// 那样转圈永远不停，所以按失败落幕。
 				if (!this.applySnapshot(snapshot)) {
 					this._isLoading = false;
+					console.error(
+						`[CorePlayer] 载入无结论：原生快照代次 ${snapshot.requestId} 与本次 ${requestId} 不符`,
+					);
+					this.onErrorCallback?.();
 					return;
 				}
 				onPlay(this._duration);
