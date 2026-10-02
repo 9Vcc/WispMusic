@@ -167,4 +167,43 @@ describe("matchID 超时预算", () => {
 		expect(elapsedMs).toBeGreaterThanOrEqual(UNM_MS);
 		expect(elapsedMs).toBeLessThan(TOTAL_MS);
 	}, 30_000);
+
+	it("同一首的并发匹配只发一次引擎请求", async () => {
+		invokeMock.mockImplementation(hang);
+		fetchMock.mockImplementation(hang);
+
+		// 点歌与悬停预取常常同时要同一首
+		const a = matchID("11");
+		await vi.advanceTimersByTimeAsync(1_000);
+		const b = matchID("11");
+
+		const { value } = await resolveWithin(Promise.all([a, b]));
+
+		expect(invokeMock).toHaveBeenCalledTimes(1);
+		// 两个等待方各守各的预算，都按时拿到结论
+		expect(value[0].data).toBeNull();
+		expect(value[1].data).toBeNull();
+	}, 30_000);
+
+	it("并发等待方共享同一次成功", async () => {
+		let lateResolve: (value: { url: string; source: string }) => void = () => {};
+		invokeMock.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					lateResolve = resolve as typeof lateResolve;
+				}),
+		);
+		fetchMock.mockImplementation(hang);
+
+		const a = matchID("12");
+		await vi.advanceTimersByTimeAsync(1_000);
+		const b = matchID("12");
+
+		lateResolve({ url: "http://cdn.example/shared.mp3", source: "kugou" });
+		const [ra, rb] = await Promise.all([a, b]);
+
+		expect(ra.data?.url).toBe("http://cdn.example/shared.mp3");
+		expect(rb.data?.url).toBe("http://cdn.example/shared.mp3");
+		expect(invokeMock).toHaveBeenCalledTimes(1);
+	}, 30_000);
 });

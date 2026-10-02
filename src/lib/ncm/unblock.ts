@@ -413,6 +413,15 @@ const matchCache = createLruCache<
 	{ result: UnblockMatchResult; at: number }
 >(MATCH_CACHE_LIMIT);
 
+/**
+ * 在途匹配（按缓存 key 归并）。
+ *
+ * 只缓存成功结果的话，并发进来的两次「同一首」会各发一遍完整匹配：点歌与悬停
+ * 预取经常同时命中同一首，而第三方音源既慢又限流，重复请求只会互相拖慢、
+ * 一起把预算耗光。命中在途任务时等待方仍然各守各的预算。
+ */
+const inFlight = new Map<string, Promise<UnblockMatchResult>>();
+
 async function matchCacheKey(id: string, sourceNames: string[]) {
 	const settings = await getNetworkUnblockSettings();
 	const preferQuality = await getPreferQualityKey();
@@ -463,15 +472,23 @@ export async function matchID(
 		}
 	};
 
-	return withBudget(
-		resolveMatch(id, sourceNames, record),
-		MATCH_TOTAL_BUDGET_MS,
-		() => ({
-			code: 500,
-			message: `unblock timed out after ${MATCH_TOTAL_BUDGET_MS}ms`,
-			data: null,
-		}),
+	const timedOut = (): UnblockMatchResult => ({
+		code: 500,
+		message: `unblock timed out after ${MATCH_TOTAL_BUDGET_MS}ms`,
+		data: null,
+	});
+
+	const pending = inFlight.get(cacheKey);
+	if (pending) return withBudget(pending, MATCH_TOTAL_BUDGET_MS, timedOut);
+
+	const task = resolveMatch(id, sourceNames, record);
+	inFlight.set(cacheKey, task);
+	// 双参 then 而不是 .finally()：后者会另起一条没人接手的 rejection 分支
+	void task.then(
+		() => inFlight.delete(cacheKey),
+		() => inFlight.delete(cacheKey),
 	);
+	return withBudget(task, MATCH_TOTAL_BUDGET_MS, timedOut);
 }
 
 /** 真正发起匹配的两条分支（自动模式 / 指定音源），由 matchID 负责缓存 */
