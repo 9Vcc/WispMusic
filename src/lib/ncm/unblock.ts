@@ -35,6 +35,46 @@ async function httpGetJson(
 	}
 }
 
+// —— 解灰链路的超时预算 ——
+
+/**
+ * 整条解灰链的预算：超过它就返回「无可用音源」。
+ *
+ * 这一层是**唯一能保证 `await resolveUnblockedSource(...)` 一定返回**的机制。
+ * 缺了它，playSong 会永远停在音源解析上：corePlayer.play 从未被调用，
+ * store.isLoadingMusic 停在 true，用户看到的就是「切歌之后一直转圈」。
+ * 第三方音源慢是常态，但慢不等于可以无限等。
+ */
+const MATCH_TOTAL_BUDGET_MS = 25_000;
+/**
+ * 本地 unm 引擎的预算。故意小于总预算：unm 解不出来还要留给 7 个 HTTP 回退源
+ * 机会，否则整条链的时间全被一个引擎吃掉。
+ */
+const MATCH_UNM_BUDGET_MS = 15_000;
+/** 单个第三方 HTTP 源的预算（这些免费接口挂起时往往一个字都不回） */
+const MATCH_SOURCE_BUDGET_MS = 8_000;
+
+/**
+ * 给一个可能不返回的等待加预算。
+ *
+ * 只让**等待方**按时脱身：task 本身继续跑，不会被取消（Tauri IPC 也取消不了）。
+ * 所以这不是放弃这次匹配，只是不把交互干吊在一口死井上。
+ */
+function withBudget<T>(
+	task: Promise<T>,
+	budgetMs: number,
+	onTimeout: () => T,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	const deadline = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(onTimeout()), budgetMs);
+	});
+	// Promise.race 会给两个入参都挂上处理函数，task 事后 reject 不会成未捕获异常
+	return Promise.race([task, deadline]).finally(() => {
+		if (timer !== null) clearTimeout(timer);
+	});
+}
+
 // bugpk / byfuns 直接使用 NCM 音质名，不支持的特殊音质(环绕声/母带等)按 hires 请求
 const ncmLevelName = (key: QualityKey) => {
 	const level = QUALITY_BY_KEY[key].level;
@@ -251,6 +291,15 @@ async function getPreferQualityKey(): Promise<QualityKey | null> {
 }
 
 /**
+ * 把「已经跑完但没人等了」的匹配结果登记进会话缓存的回调。
+ *
+ * 预算到点只是让等待方脱身，匹配本身停不下来（Tauri IPC 不可取消）。既然算力
+ * 已经花了，迟到成功的地址就该留下——用户再点同一首就是缓存命中，而不是重付一遍
+ * 整条链。没有这一步的话，慢音源的灰歌会每次都从 0 开始等。
+ */
+type MatchRecorder = (result: UnblockMatchResult) => void;
+
+/**
  * 本地 unm 引擎匹配（Rust sidecar：Node + @unblockneteasemusic/server）。
  * 环境变量语义与 VutronMusic 一致（ENABLE_FLAC / FOLLOW_SOURCE_ORDER / QQ_COOKIE / JOOX_COOKIE）；
  * 失败返回空结果由调用方回退 HTTP 音源。
@@ -258,10 +307,11 @@ async function getPreferQualityKey(): Promise<QualityKey | null> {
 async function matchViaUnm(
 	id: string,
 	source?: string,
+	record?: MatchRecorder,
 ): Promise<UnblockMatchResult> {
 	try {
 		const settings = await getNetworkUnblockSettings();
-		const data = await invoke<{
+		const call = invoke<{
 			url: string;
 			source: string;
 			br: number | null;
@@ -275,13 +325,29 @@ async function matchViaUnm(
 			qqCookie: settings.qqCookie || undefined,
 			jooxCookie: settings.jooxCookie || undefined,
 		});
+		const toResult = (
+			data: { url: string; source: string } & Record<string, unknown>,
+		): UnblockMatchResult => ({
+			code: 200,
+			message: "success",
+			data: { url: data.url, source: data.source },
+		});
+
+		if (record) {
+			// 双参 then 而不是 .then().catch()：后者会给 call 留下一条无人处理的
+			// reject 分支（await 那条路径才是负责报错的）
+			call.then(
+				(data) => {
+					if (data?.url) record(toResult(data));
+				},
+				() => {},
+			);
+		}
+
+		const data = await withBudget(call, MATCH_UNM_BUDGET_MS, () => null);
 
 		if (data?.url) {
-			return {
-				code: 200,
-				message: "success",
-				data: { url: data.url, source: data.source },
-			};
+			return toResult(data);
 		}
 		return { code: 500, message: "unm engine returned no url", data: null };
 	} catch (error) {
@@ -298,13 +364,32 @@ async function matchViaUnm(
 async function matchBySource(
 	source: UnblockSource,
 	id: string,
+	record?: MatchRecorder,
 ): Promise<string | null> {
 	const preferKey = await getPreferQualityKey();
 	const quality =
 		preferKey && source.qualityValue
 			? source.qualityValue(preferKey)
 			: undefined;
-	return source.match(id, quality);
+	const call = source.match(id, quality);
+
+	if (record) {
+		call.then(
+			(url) => {
+				if (!url) return;
+				record({
+					code: 200,
+					message: "success",
+					data: { url, source: source.name },
+				});
+			},
+			() => {},
+		);
+	}
+
+	// 单个源只占预算内的一小段：它挂起时（免费接口常见）必须让位给下一个源，
+	// 否则整条回退链会被第一个死源吃掉
+	return withBudget(call, MATCH_SOURCE_BUDGET_MS, () => null);
 }
 
 // —— 解灰结果缓存 ——
@@ -370,28 +455,41 @@ export async function matchID(
 	const cached = readMatchCache(cacheKey);
 	if (cached) return cached;
 
-	const result = await resolveMatch(id, sourceNames);
-	if (result.data) {
-		matchCache.set(cacheKey, { result, at: Date.now() });
-	}
-	return result;
+	// 缓存写入交给 record：不分「谁先被等到」。等待方按整链预算脱身后，迟到的
+	// 成功仍会经同一个回调落进缓存，用户再点同一首就是命中而不是重付一遍。
+	const record: MatchRecorder = (result) => {
+		if (result.data) {
+			matchCache.set(cacheKey, { result, at: Date.now() });
+		}
+	};
+
+	return withBudget(
+		resolveMatch(id, sourceNames, record),
+		MATCH_TOTAL_BUDGET_MS,
+		() => ({
+			code: 500,
+			message: `unblock timed out after ${MATCH_TOTAL_BUDGET_MS}ms`,
+			data: null,
+		}),
+	);
 }
 
 /** 真正发起匹配的两条分支（自动模式 / 指定音源），由 matchID 负责缓存 */
 async function resolveMatch(
 	id: string,
 	sourceNames: string[],
+	record: MatchRecorder,
 ): Promise<UnblockMatchResult> {
 	// 自动模式：本地 unm 引擎优先（可解无损），失败回退全部纯 HTTP 音源
 	if (sourceNames.length === 0) {
-		const unmResult = await matchViaUnm(id);
+		const unmResult = await matchViaUnm(id, undefined, record);
 		if (unmResult.data) {
 			return unmResult;
 		}
 
 		for (const s of sources) {
 			try {
-				const url = await matchBySource(s, id);
+				const url = await matchBySource(s, id, record);
 				if (url) {
 					return {
 						code: 200,
@@ -407,7 +505,11 @@ async function resolveMatch(
 
 	// 指定音源：整表交给 unm 引擎（其内部过滤未知音源）；
 	// unm 失败后仅在指定名单内回退 HTTP 音源
-	const unmResult = await matchViaUnm(id, sourceNames.join(","));
+	const unmResult = await matchViaUnm(
+		id,
+		sourceNames.join(","),
+		record,
+	);
 	if (unmResult.data) {
 		return unmResult;
 	}
@@ -415,7 +517,7 @@ async function resolveMatch(
 	const httpSources = sources.filter((s) => sourceNames.includes(s.name));
 	for (const s of httpSources) {
 		try {
-			const url = await matchBySource(s, id);
+			const url = await matchBySource(s, id, record);
 			if (url) {
 				return {
 					code: 200,
