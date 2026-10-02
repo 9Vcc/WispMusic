@@ -82,11 +82,14 @@ pub async fn player_load(
     // 代次永远取到见过的最大值。
     state.latest_request_id.fetch_max(request_id, Ordering::SeqCst);
 
-    let _ = send_command(state, |respond_to| AudioCommand::BeginLoad {
-        app: app.clone(),
+    // 等待挪到 blocking 线程后闭包必须是 'static，命令带的 AppHandle 要整体交出
+    let begin_app = app.clone();
+    let _ = send_command_async(state, move |respond_to| AudioCommand::BeginLoad {
+        app: begin_app,
         request_id,
         respond_to,
-    })?;
+    })
+    .await?;
 
     let resolved_source = resolve_audio_source(
         &app,
@@ -101,11 +104,13 @@ pub async fn player_load(
         Ok(source) => source,
         Err(err) => {
             if !is_stale_request(&state.latest_request_id, request_id) {
-                let _ = send_command(state, |respond_to| AudioCommand::Stop {
-                    app: app.clone(),
+                let stop_app = app.clone();
+                let _ = send_command_async(state, move |respond_to| AudioCommand::Stop {
+                    app: stop_app,
                     request_id,
                     respond_to,
-                });
+                })
+                .await;
             }
             return Err(err);
         }
@@ -117,7 +122,7 @@ pub async fn player_load(
         return Ok(current_snapshot(&state.snapshot));
     }
 
-    send_command(state, |respond_to| AudioCommand::Load {
+    send_command_async(state, move |respond_to| AudioCommand::Load {
         app,
         source,
         autoplay,
@@ -126,6 +131,7 @@ pub async fn player_load(
         speed,
         respond_to,
     })
+    .await
 }
 
 pub async fn player_preload(
@@ -163,11 +169,16 @@ pub async fn player_preload(
         });
     }
 
-    let duration = probe_source_duration(&source)?;
+    // 探测时长要同步构造解码器（可能触发 Range 请求与读等待），与 send_command 同理
+    // 不能占住 async worker——悬停预取的密度比点歌更高，占满了同样会饿死别的下载任务
+    let label = source.label();
+    let duration = tauri::async_runtime::spawn_blocking(move || probe_source_duration(&source))
+        .await
+        .map_err(|err| format!("duration probe task failed: {err}"))??;
     Ok(PreloadResult {
         request_id,
         is_ready: true,
-        source: Some(source.label()),
+        source: Some(label),
         duration: duration_secs(duration),
     })
 }
@@ -287,29 +298,62 @@ fn is_stale_request(latest_request_id: &AtomicU64, request_id: u64) -> bool {
     latest_request_id.load(Ordering::SeqCst) != request_id
 }
 
-fn send_command<F>(state: &AudioState, build: F) -> Result<AudioSnapshot, String>
+/// 入队一条命令，返回等回包用的接收端。
+fn enqueue_command<F>(state: &AudioState, build: F) -> Result<mpsc::Receiver<Result<AudioSnapshot, String>>, String>
 where
     F: FnOnce(ResponseTx) -> AudioCommand,
 {
     let (respond_to, response) = mpsc::channel();
     // 队列满说明音频线程已被长操作占住且积压到上限：直接拒绝这条新命令，
-    // 而不是让调用方（blocking 池任务）park 在 send 上继续堆积
+    // 而不是让调用方 park 在 send 上继续堆积
     state.tx.try_send(build(respond_to)).map_err(|err| match err {
         mpsc::TrySendError::Full(_) => {
             "audio command queue is full, request dropped".to_string()
         }
         mpsc::TrySendError::Disconnected(_) => "audio thread is not available".to_string(),
     })?;
-    response
+    Ok(response)
+}
+
+fn map_response_error(err: mpsc::RecvTimeoutError) -> String {
+    match err {
+        mpsc::RecvTimeoutError::Timeout => "audio thread did not respond in time".to_string(),
+        mpsc::RecvTimeoutError::Disconnected => "audio thread dropped response".to_string(),
+    }
+}
+
+/// 同步命令：调用方本来就跑在 blocking 池（见 audio.rs 的 run_audio_command），
+/// 在这里 park 是安全的。
+fn send_command<F>(state: &AudioState, build: F) -> Result<AudioSnapshot, String>
+where
+    F: FnOnce(ResponseTx) -> AudioCommand,
+{
+    enqueue_command(state, build)?
         .recv_timeout(AUDIO_COMMAND_RESPONSE_TIMEOUT)
-        .map_err(|err| match err {
-            mpsc::RecvTimeoutError::Timeout => {
-                "audio thread did not respond in time".to_string()
-            }
-            mpsc::RecvTimeoutError::Disconnected => {
-                "audio thread dropped response".to_string()
-            }
-        })?
+        .map_err(map_response_error)?
+}
+
+/// 异步命令用的等待版本：**必须**把 `recv_timeout` 挪出 async worker。
+///
+/// 原先 `player_load` 直接在 async 上下文里调 `send_command`，一等就是最多 20s，
+/// 把一个 tokio worker 占住。快速切歌几首就能把 worker 占满，于是给流缓冲喂数据的
+/// 下载任务不再被轮询——既不报错也不出数据，而音频线程正同步读那条流，只能在
+/// `StreamingReader::read` 里干等（实测：此后每条命令都 20s 超时、切歌彻底没声）。
+/// 放 blocking 池等就没有这层连带效应：blocking 线程按需增长，不抢占任务调度。
+async fn send_command_async<F>(
+    state: &AudioState,
+    build: F,
+) -> Result<AudioSnapshot, String>
+where
+    F: FnOnce(ResponseTx) -> AudioCommand + Send + 'static,
+{
+    let response = enqueue_command(state, build)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        response.recv_timeout(AUDIO_COMMAND_RESPONSE_TIMEOUT)
+    })
+    .await
+    .map_err(|err| format!("audio command wait task failed: {err}"))?
+    .map_err(map_response_error)?
 }
 
 #[cfg(test)]
