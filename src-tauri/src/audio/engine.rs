@@ -11,7 +11,10 @@ use super::event::{emit_snapshot, respond_and_emit};
 use super::pipeline::{rebuild_sink, reset_audio_analysis, stop_fading_sinks, update_fades};
 use super::snapshot::{idle_snapshot, snapshot_inner, store_snapshot};
 use super::source::AudioSource;
-use super::state::{track_position, AudioThreadBusy, AudioThreadInner, TrackState};
+use super::state::{
+    retired_output_is_releasable, track_position, AudioThreadBusy, AudioThreadInner, RetiredOutput,
+    TrackState, RETIRED_OUTPUT_FORCE_GRACE,
+};
 use super::types::AudioSnapshot;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -618,6 +621,9 @@ fn set_output_device_inner(
         .unwrap_or(false);
 
     let previous_device_id = inner.selected_device_id.clone();
+    // rebuild_sink 会把旧 sink 换下来并 stop 它；那块 sink 是「旧设备的 mixer 还在不在
+    // 读我们的流」唯一看得见的凭证，留一份给 release_retired_outputs 判断何时能安全结束
+    let previous_sink = inner.sink.clone();
     let previous_stream = inner.stream.replace(stream);
     let previous_handle = inner.handle.replace(handle);
     inner.selected_device_id = selected_device_id;
@@ -655,16 +661,51 @@ fn set_output_device_inner(
         }
     }
 
-    // 结束旧设备只能在这条线程上做（cpal::Stream 是 !Send 的），所以要量：
-    // 它的 Drop 会等回调线程收尾，而回调线程可能正卡在那条没数据的流里。
-    let release_elapsed = super::device::release_output(previous_handle, previous_stream);
+    // 旧设备先挂起来，不在这条命令线程上结束它：它的 Drop 要等 mixer 收尾，而那个线程
+    // 可能正卡在我们那条没数据的流里（现场量到「切换输出设备占住 35.1s」就是这么来的）。
+    // 交给 release_retired_outputs：等它自己报告 sink empty 之后再释放。
+    inner.retired_outputs.push(RetiredOutput {
+        stream: previous_stream,
+        handle: previous_handle,
+        sink: previous_sink,
+        retired_at: Instant::now(),
+    });
+    release_retired_outputs(inner);
     crate::log_info!(
-        "[AUDIO] 切换输出设备 {target_label}：开新流 {:.2}s，重建管线 {:.2}s，结束旧设备 {:.2}s",
+        "[AUDIO] 切换输出设备 {target_label}：开新流 {:.2}s，重建管线 {:.2}s",
         open_elapsed.as_secs_f64(),
-        rebuild_elapsed.as_secs_f64(),
-        release_elapsed.as_secs_f64()
+        rebuild_elapsed.as_secs_f64()
     );
     Ok(snapshot_inner(inner))
+}
+
+/// 释放挂起来的旧输出设备。
+///
+/// 判据是那块旧 sink 是否已经 empty：mixer 把它手上的源处理完（含 stop 后丢弃）之后，
+/// `cpal::Stream` 的 Drop 就不再等任何人，这时结束它是安全的。超过宽限期仍没空出来
+/// （流真的死了）也强行释放，否则每切一次设备就永久漏一条 mixer 线程和一个设备句柄。
+fn release_retired_outputs(inner: &mut AudioThreadInner) {
+    let now = Instant::now();
+    for retired in std::mem::take(&mut inner.retired_outputs) {
+        let sink_empty = retired
+            .sink
+            .as_ref()
+            .map(|sink| sink.empty())
+            .unwrap_or(true);
+        let waited = now.saturating_duration_since(retired.retired_at);
+        if !retired_output_is_releasable(sink_empty, waited, RETIRED_OUTPUT_FORCE_GRACE) {
+            inner.retired_outputs.push(retired);
+            continue;
+        }
+        let elapsed = super::device::release_output(retired.handle, retired.stream);
+        if waited >= Duration::from_secs(1) || elapsed >= Duration::from_millis(300) {
+            crate::log_info!(
+                "[AUDIO] 释放旧输出设备：挂了 {:.1}s，实际结束又花了 {:.2}s",
+                waited.as_secs_f64(),
+                elapsed.as_secs_f64()
+            );
+        }
+    }
 }
 
 fn set_replay_gain_inner(
@@ -717,6 +758,8 @@ fn tick_progress(
     snapshot_state: &Arc<Mutex<AudioSnapshot>>,
 ) {
     update_fades(inner);
+    // 旧输出设备的释放放在心跳里：一旦发现它已经不再读我们的流（旧 sink empty）就结束掉
+    release_retired_outputs(inner);
 
     if inner.track.is_none() {
         return;
@@ -960,6 +1003,67 @@ mod tests {
         // 阈值必须短到能在用户还没放弃之前留下日志，又要长过正常缓冲抖动
         assert!(SILENCE_LOG_THRESHOLD >= Duration::from_millis(500));
         assert!(SILENCE_LOG_THRESHOLD < SEEK_FEEDBACK_TIMEOUT * 10);
+    }
+
+    /// 旧输出设备只能在「它的 mixer 不再读我们的流」之后结束。
+    /// 反过来（在命令线程上直接 Drop）就是现场量到的「切换输出设备占住 35.1s」。
+    #[test]
+    fn a_retired_device_is_released_only_when_its_mixer_is_done() {
+        use rodio::buffer::SamplesBuffer;
+
+        let mut inner = AudioThreadInner::new();
+
+        // 还在被 mixer 消费的旧 sink：不能在这儿等它
+        let (busy_sink, _queue) = Sink::new_idle();
+        busy_sink.append(SamplesBuffer::new(1, 44_100, vec![0i16; 44_100 * 60]));
+        inner.retired_outputs.push(RetiredOutput {
+            stream: None,
+            handle: None,
+            sink: Some(Arc::new(busy_sink)),
+            retired_at: Instant::now(),
+        });
+        release_retired_outputs(&mut inner);
+        assert_eq!(
+            inner.retired_outputs.len(),
+            1,
+            "mixer 还在用它时必须挂着"
+        );
+
+        // 已经空出来的旧 sink：当场释放
+        let (idle_sink, _idle_queue) = Sink::new_idle();
+        inner.retired_outputs.push(RetiredOutput {
+            stream: None,
+            handle: None,
+            sink: Some(Arc::new(idle_sink)),
+            retired_at: Instant::now(),
+        });
+        release_retired_outputs(&mut inner);
+        assert_eq!(
+            inner.retired_outputs.len(),
+            1,
+            "只该结束空出来的那一块，剩下的继续挂"
+        );
+
+        // 到宽限期：没空出来也必须放行，否则每切一次设备就永久漏一条线程 + 一个设备句柄
+        inner.retired_outputs[0].retired_at = Instant::now() - RETIRED_OUTPUT_FORCE_GRACE;
+        release_retired_outputs(&mut inner);
+        assert!(
+            inner.retired_outputs.is_empty(),
+            "超过宽限期要强行结束，不能无限期挂着"
+        );
+
+        // 判定本身
+        assert!(retired_output_is_releasable(true, Duration::ZERO, RETIRED_OUTPUT_FORCE_GRACE));
+        assert!(!retired_output_is_releasable(
+            false,
+            Duration::from_secs(1),
+            RETIRED_OUTPUT_FORCE_GRACE
+        ));
+        assert!(retired_output_is_releasable(
+            false,
+            RETIRED_OUTPUT_FORCE_GRACE,
+            RETIRED_OUTPUT_FORCE_GRACE
+        ));
     }
 
     #[test]

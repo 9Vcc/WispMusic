@@ -58,6 +58,39 @@ pub(super) struct FadeInState {
     pub(super) target_volume: f32,
 }
 
+/// 已经换下来、但还不能安全结束的旧输出设备。
+///
+/// `cpal::Stream` 是 `!Send` 的（Drop 必须回到创建它的线程），所以旧流只能在这条命令
+/// 线程上结束；而它的 Drop 要等 mixer 线程收尾，那个线程可能正卡在读上等网络数据。
+/// 现场量到的形态：先是一行「疑似无声：底层播放位置已 2.0s 没有推进」，紧接着一次
+/// 切换输出设备把这条命令线程占住 35.1s（心跳同样停 35.2s），此后每条 player_* 都等满
+/// 20s 回包超时。
+///
+/// 于是改成「先挂起来，等它自己的 sink 报告 empty（= mixer 已经处理完这个源，此时
+/// Drop 不再等人）再结束」，并给一个上限防止无限期占着设备不放。
+pub(super) struct RetiredOutput {
+    pub(super) stream: Option<OutputStream>,
+    pub(super) handle: Option<OutputStreamHandle>,
+    /// 换下来时那块 sink；它 empty 了才说明旧 mixer 不再读我们的流
+    pub(super) sink: Option<Arc<Sink>>,
+    pub(super) retired_at: Instant,
+}
+
+/// 旧设备最多挂多久，超过就强行结束（宁可等一次，也不能让换不掉的设备一直占着不放）
+pub(super) const RETIRED_OUTPUT_FORCE_GRACE: Duration = Duration::from_secs(60);
+
+/// 现在可以结束这块旧设备了吗。
+///
+/// `sink_empty` 表示 mixer 已经把它手上的源处理完；`waited` 超过宽限期则强行放行，
+/// 免得一条永久卡死的流把设备句柄 indefinitely 挂在内存里。
+pub(super) fn retired_output_is_releasable(
+    sink_empty: bool,
+    waited: Duration,
+    grace: Duration,
+) -> bool {
+    sink_empty || waited >= grace
+}
+
 pub(super) struct AudioThreadInner {
     pub(super) stream: Option<OutputStream>,
     pub(super) handle: Option<OutputStreamHandle>,
@@ -80,6 +113,8 @@ pub(super) struct AudioThreadInner {
     /// 「就绪前硬切」的宽限截止时刻：BeginLoad 保留旧 sink 等待新音源时挂上，
     /// 到点仍没等到对应的 Load 就主动停掉旧歌（见 engine::expire_pending_handoff）。
     pub(super) handoff_deadline: Option<Instant>,
+    /// 已经换下来、但还不能安全结束的旧输出设备（见 RetiredOutput）
+    pub(super) retired_outputs: Vec<RetiredOutput>,
     /// mixer 每 5ms 回写的播放位置，以及它最后一次发生变化的时刻。
     /// 位置不再推进而墙钟计时照走 = 界面显示在播放、实际没出声（见 engine::note_sink_progress）。
     pub(super) sink_position: Option<Duration>,
@@ -107,6 +142,7 @@ impl AudioThreadInner {
             fade_in: None,
             request_id: 0,
             handoff_deadline: None,
+            retired_outputs: Vec::new(),
             sink_position: None,
             sink_position_changed_at: None,
             silence_reported: false,
