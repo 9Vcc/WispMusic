@@ -383,8 +383,24 @@ impl StreamingReader {
         }
     }
 
+    /// 取消信号的 `ErrorKind` 绝不能是 `Interrupted`。
+    ///
+    /// `Interrupted` 在整个生态里都是「可重试」的意思：std 的 `read_exact` /
+    /// `read_to_end` 会吞掉它再读，symphonia 的 `MediaSourceStream::read_buf_exact`
+    /// （media_source_stream.rs:319-331）也会吞掉它再读。而陈旧 reader 的这个错误是
+    /// **立刻**返回的（不等数据）——于是重试立刻再失败、再重试……**死循环，100% CPU，
+    /// 永不返回**。mp3 解码的每一帧帧体都要走 `read_buf_exact`（symphonia-bundle-mp3
+    /// demuxer.rs:481），所以「解码/seek 正做到一半，用户点了别的歌」就会把那条线程
+    /// 永久占死：现场是音频命令线程被 Seek 占死（此后每条命令都等满 20s 回包超时、
+    /// 界面转圈、只能重启），悬停预取则是泄漏一个转满 CPU 的线程 + 钉住整份流缓冲。
+    ///
+    /// `ConnectionAborted` 表示「这条流被主动中止」，没有任何重试语义，会原样穿出去
+    /// 让解码器按普通 I/O 错误结束。
     fn cancelled_error() -> io::Error {
-        io::Error::new(ErrorKind::Interrupted, "streaming audio load cancelled")
+        io::Error::new(
+            ErrorKind::ConnectionAborted,
+            "streaming audio load cancelled",
+        )
     }
 }
 
@@ -1006,7 +1022,86 @@ mod tests {
         let error = reader
             .read(&mut output)
             .expect_err("stale request should cancel read");
-        assert_eq!(error.kind(), ErrorKind::Interrupted);
+        // 必须是「不可重试」的类别：Interrupted 会被 std/symphonia 吞掉重试成死循环
+        assert_eq!(error.kind(), ErrorKind::ConnectionAborted);
+    }
+
+    /// 现场复现（2026-10-04 03:58 安装版日志）：音频命令线程被一条 Seek 占死 28s+
+    /// 直到重启，期间 Pause/Play/BeginLoad 全部等满 20s 回包超时、界面转圈。
+    ///
+    /// 病灶是**取消信号的 ErrorKind**：陈旧请求的 `read` 立刻返回 `Interrupted`，而
+    /// `Interrupted` 在 std（`read_exact`/`read_to_end`）与 symphonia
+    /// （`MediaSourceStream::read_buf_exact`，media_source_stream.rs:319-331）里都被
+    /// 当作「可重试」吞掉再读 → 立刻又拿到同一个 Interrupted → 死循环，100% CPU，
+    /// 永不返回。凡是在陈旧流上做解码的路径都会中毒：seek 回退路径（音频命令线程）、
+    /// 悬停预取的时长探测（spawn_blocking 线程，泄漏一个转满 CPU 的线程 + 整份
+    /// 流缓冲）——后者正是「用久了越来越卡」的形态。
+    ///
+    /// 这条测试直接打在 mp3 解码的帧体读取上：`next_packet` → `read_mpeg_frame` 用
+    /// `reader.read_buf_exact(&mut packet[MPEG_HEADER_LEN..])`（symphonia-bundle-mp3
+    /// demuxer.rs:481）读每一帧，而它正是那条吞 Interrupted 的循环。取消改用不可重试的
+    /// ErrorKind 之前，本测试以「没返回」失败（线程永不结束，故用带超时的 channel 收
+    /// 结果，测试进程不会挂死）。
+    #[test]
+    fn symphonia_body_read_on_a_superseded_stream_must_fail_fast() {
+        struct Wrapped(StreamingReader);
+
+        impl Read for Wrapped {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+
+        impl Seek for Wrapped {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+
+        impl symphonia::core::io::MediaSource for Wrapped {
+            fn is_seekable(&self) -> bool {
+                true
+            }
+
+            fn byte_len(&self) -> Option<u64> {
+                self.0.byte_len()
+            }
+        }
+
+        let shared = StreamingBuffer::new(Some(1024), None);
+        let latest_request_id = Arc::new(AtomicU64::new(9));
+        // reader 的请求号落后于最新代次 = 这次载入已被取代
+        let reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 8);
+        let mut source = symphonia::core::io::MediaSourceStream::new(
+            Box::new(Wrapped(reader)),
+            Default::default(),
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use symphonia::core::io::ReadBytes;
+            let mut frame_body = [0u8; 64];
+            let outcome = source
+                .read_buf_exact(&mut frame_body)
+                .err()
+                .map(|err| err.kind());
+            let _ = tx.send(outcome);
+        });
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Some(kind)) => {
+                assert_eq!(
+                    kind,
+                    ErrorKind::ConnectionAborted,
+                    "取消信号必须是不可重试的类别——Interrupted 会被 std/symphonia 吞掉重试"
+                );
+            }
+            Ok(None) => panic!("陈旧流上读帧体不该成功"),
+            Err(_) => panic!(
+                "superseded 流上读帧体没有返回：取消错误被当成可重试，陷入死循环\
+                 （音频命令线程/预取线程会被永久占死）"
+            ),
+        }
     }
 
     #[test]
