@@ -3,7 +3,11 @@ import type { StateCreator } from "zustand";
 import { REPEAT_MODE_BY_TYPE } from "@/lib/constants/player";
 import type { QualityKey } from "@/lib/constants/song";
 import { corePlayer } from "@/lib/player/corePlayer";
-import { prefetchSong } from "@/lib/player/prefetch";
+import {
+	inSwitchBurst,
+	noteManualSongSwitch,
+	prefetchSong,
+} from "@/lib/player/prefetch";
 import {
 	getKnownMaxQualityKey,
 	invalidateUnblockCache,
@@ -27,6 +31,32 @@ const NEXT_SONG_PRELOAD_LEAD_SECONDS = 10;
 // 连续播放失败的上限：超过后停止自动跳歌，避免全列表不可播时无限循环
 const MAX_CONSECUTIVE_PLAY_ERRORS = 5;
 let consecutivePlayErrors = 0;
+
+/**
+ * 连续切歌时把「解析音源 + 起播」推到停顿之后再付。
+ *
+ * 每一次点歌都会打一遍地址解析，并让原生开一条下载/流式任务。快速划过 40~50 行时
+ * 这些工作全部为已经被取代的歌白跑：抢带宽、抢原生线程、留一堆半途而废的 .part
+ * 文件，最后真正要听的那首反而更慢——实测还会把音频命令队列拖到停摆。
+ *
+ * 只在「连续」时生效：判据与时间窗由 prefetch.ts 的 inSwitchBurst 提供（同一个窗口
+ * 还兼管「连续切歌期间不做悬停预取」）。单点一首不受任何影响，该多快还多快；
+ * 手停下来之后也只有最后一首会真的去取流。
+ */
+const RAPID_SWITCH_HOLD_MS = 450;
+
+/** 等一个可被提前打断的空档：abort 时立刻返回，由调用方复查代号 */
+function waitQuietly(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		const finish = () => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", finish);
+			resolve();
+		};
+		const timer = setTimeout(finish, ms);
+		signal.addEventListener("abort", finish, { once: true });
+	});
+}
 
 /**
  * 正在执行的 playSong 调用代号。每次进入 playSong 自增，异步等待之后
@@ -205,6 +235,17 @@ export const createPlayerControlSlice: StateCreator<
 				isPlaying: false,
 			});
 			useProgressStore.getState().resetProgress();
+
+			// 连续切歌时先让手停下来：UI 已经立刻指向这一首（上面那两个 set），
+			// 但「解析地址 + 开一条下载/流式任务」等到没有新点击之后再付。
+			// 本地文件没有下载成本，不经过这里。
+			const rapidSwitch = inSwitchBurst();
+			noteManualSongSwitch();
+			if (rapidSwitch && !song.localFilePath) {
+				await waitQuietly(RAPID_SWITCH_HOLD_MS, signal);
+				// 空档期间又点了别的歌：这一首不用取了，交给更新的那次
+				if (isSuperseded() || signal.aborted) return;
+			}
 
 			// 本地歌曲
 			if (song.localFilePath) {

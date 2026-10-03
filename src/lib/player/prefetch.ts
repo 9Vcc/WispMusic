@@ -26,6 +26,25 @@ export const PREFETCH_HOVER_DELAY_MS = 180;
  */
 const PREFETCH_MIN_INTERVAL_MS = 800;
 
+/**
+ * 「用户正在连续切歌」的窗口。
+ *
+ * 这个时刻由播放侧在每次点歌时刷新（`noteManualSongSwitch`）。处在窗口里就说明
+ * 手还在快速划过列表：此时悬停预取下的整首歌，几乎一定马上又被换掉——正是要省掉
+ * 的那份开销（抢带宽、抢原生线程）。所以连续切歌期间不做非紧急预取。
+ */
+const SWITCH_BURST_WINDOW_MS = 1200;
+let lastManualSwitchAt = 0;
+
+export function noteManualSongSwitch(at = Date.now()) {
+	lastManualSwitchAt = at;
+}
+
+/** 此刻是否正在连续切歌 */
+export function inSwitchBurst(now = Date.now()): boolean {
+	return now - lastManualSwitchAt < SWITCH_BURST_WINDOW_MS;
+}
+
 /** 已发起过的歌曲。只要发起过就不再重复（含解析失败的），避免反复重下同一首。
  *  失败不会影响正式播放：播放路径不查这张表，只是这一首少了一次预热。 */
 const attempted = createLruCache<string, true>(64);
@@ -57,6 +76,8 @@ export function prefetchSong(song: Song | undefined, urgent = false): boolean {
 	if (!urgent && Date.now() - lastStartedAt < PREFETCH_MIN_INTERVAL_MS) {
 		return false;
 	}
+	// 连续切歌期间不做（非紧急）预取：预取下的是整首歌，而这些歌马上又会被换掉
+	if (!urgent && inSwitchBurst()) return false;
 	if (!prefetchAllowedByNetwork()) return false;
 
 	attempted.set(key, true);
