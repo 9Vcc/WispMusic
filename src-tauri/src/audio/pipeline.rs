@@ -75,7 +75,7 @@ pub(super) fn rebuild_sink(
             stop_fading_sinks(inner);
         }
     }
-    inner.sink = Some(sink);
+    inner.sink = Some(Arc::new(sink));
     Ok(duration)
 }
 

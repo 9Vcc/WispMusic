@@ -1,3 +1,4 @@
+use rodio::Sink;
 use std::{
     sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
@@ -23,6 +24,18 @@ const CROSSFADE_MAX_DURATION: Duration = Duration::from_secs(12);
 /// 设备也切不动」。没有这条日志时，那种状态只能从外面猜是哪类命令咬住了线程；
 /// 有了它就有一条直接的归因证据（2026-10-03 的压测就是这么定位的）。
 const SLOW_COMMAND_LOG_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// `Sink::try_seek` 等 mixer 线程回信的上限。
+///
+/// rodio 的 `try_seek` 把 SeekOrder 投进控件后就 `feedback.recv()` 阻塞等结果
+/// （sink.rs:249-261），而回信只在 mixer 线程处理样本的间隙给出。mixer 一旦卡在
+/// 我们的 `StreamingReader::read` 里（僵死流最坏 25s），这条 Seek 就把**整条音频
+/// 线程**占死：此后每条 `player_*` 都要等满 20s 回包超时，界面上是进度还在走、
+/// 声音没有、连输出设备都切不动。
+///
+/// 取 3s：实测正常跳转只要 4~23ms，跨 CDN 的 Range 跳转也远在此之内；关键是它
+/// 必须明显小于回包超时，超时后按「跳转没成」走既有的重建管线回退路径。
+const SEEK_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(super) fn run_audio_thread(
     rx: mpsc::Receiver<AudioCommand>,
@@ -424,6 +437,31 @@ fn pause_inner(inner: &mut AudioThreadInner) -> Result<AudioSnapshot, String> {
     Ok(snapshot_inner(inner))
 }
 
+/// 在另一条线程里等 `try_seek` 的回信，到点没等到就放弃——音频线程绝不因它停摆。
+///
+/// 放弃之后这次跳转仍可能在 mixer 恢复时生效，但调用方紧接着会重建管线并
+/// `stop()` 掉旧 sink，一条迟到的跳转落在已停播的 sink 上没有影响；等待线程
+/// 只是临时多持有一份 `Arc<Sink>`，回信到手（或 sink 被它 drop）后就退出。
+fn seek_sink_with_timeout(sink: &Arc<Sink>, position: Duration) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    let seeking = Arc::clone(sink);
+    std::thread::spawn(move || {
+        // 调用方已超时返回时发送失败，线程随之退出
+        let _ = tx.send(seeking.try_seek(position));
+    });
+
+    match rx.recv_timeout(SEEK_FEEDBACK_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("sink seek failed: {error}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("sink seek did not report back in time".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("sink seek thread ended without a result".to_string())
+        }
+    }
+}
+
 fn seek_inner(
     inner: &mut AudioThreadInner,
     mut position: Duration,
@@ -447,7 +485,7 @@ fn seek_inner(
     if sink_can_seek {
         let sink = inner.sink.as_ref().expect("checked above");
         reset_audio_analysis(inner);
-        if sink.try_seek(position).is_ok() {
+        if seek_sink_with_timeout(sink, position).is_ok() {
             if let Some(track) = inner.track.as_mut() {
                 track.base_position = position;
                 track.started_at = if was_playing {
@@ -802,5 +840,35 @@ mod tests {
 
         // 刚起播就断流：位置过小不判
         assert!(!should_mark_ended(true, true, 0.1, 220.0));
+    }
+
+    /// 「进度在走、没声音、连输出设备都切不动」的根因守卫：`Sink::try_seek` 会阻塞
+    /// 等 mixer 线程回信，mixer 卡在流读取里时这条等待没有上限，音频线程跟着停摆。
+    /// 这里造一个**没人消费的 sink**（等价于 mixer 永远不回信），要求它必须在时限内
+    /// 放弃并报错——绝不许无限等下去。
+    #[test]
+    fn seek_gives_up_instead_of_waiting_for_a_stalled_mixer() {
+        use rodio::buffer::SamplesBuffer;
+
+        // queue 接收端不读 = mixer 线程没有推进，seek 的回信永远不来
+        let (sink, _queue) = Sink::new_idle();
+        sink.append(SamplesBuffer::new(1, 44_100, vec![0i16; 44_100 * 60]));
+        let sink = Arc::new(sink);
+
+        let started = Instant::now();
+        let error = seek_sink_with_timeout(&sink, Duration::from_secs(30))
+            .expect_err("mixer 不回信时 try_seek 必须超时放弃");
+        let elapsed = started.elapsed();
+
+        assert!(
+            error.contains("did not report back"),
+            "超时应给出「没等到回信」的原因，实际：{error}"
+        );
+        assert!(
+            elapsed >= SEEK_FEEDBACK_TIMEOUT,
+            "不该比时限更早放弃，实际 {elapsed:?}"
+        );
+        // 时限必须明显短于命令回包超时（20s），否则调用方早就当成彻底卡死了
+        assert!(SEEK_FEEDBACK_TIMEOUT < Duration::from_secs(20));
     }
 }

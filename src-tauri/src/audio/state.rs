@@ -46,7 +46,7 @@ impl AudioThreadBusy {
 }
 
 pub(super) struct FadingSink {
-    pub(super) sink: Sink,
+    pub(super) sink: Arc<Sink>,
     pub(super) started_at: Instant,
     pub(super) duration: Duration,
     pub(super) start_volume: f32,
@@ -61,7 +61,9 @@ pub(super) struct FadeInState {
 pub(super) struct AudioThreadInner {
     pub(super) stream: Option<OutputStream>,
     pub(super) handle: Option<OutputStreamHandle>,
-    pub(super) sink: Option<Sink>,
+    /// Arc 是为了能把 `try_seek` 挪到一次性线程里去等（见 engine::seek_sink_with_timeout）：
+    /// 它内部要阻塞等 mixer 线程回信，而 mixer 可能正卡在我们的流读取里。
+    pub(super) sink: Option<Arc<Sink>>,
     pub(super) track: Option<TrackState>,
     pub(super) volume: f32,
     /// 变速倍率（0.1 ~ 5.0），1.0 = 原速；位置推进按此缩放
