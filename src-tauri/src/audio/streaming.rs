@@ -16,17 +16,12 @@ use super::mp4_decoder::Mp4Decoder;
 
 pub(super) type BoxedAudioSource = Box<dyn Source<Item = i16> + Send>;
 
-/// SeekFrom::End 等待总长度（下载完成/拿到 Content-Length）的硬上限。
-/// 正常流式播放早已拿到 Content-Length 而立即返回；只有在缺长度的畸形流
-/// 叠上源站僵死时才会耗尽这段时间——宁可报错停当前源，也不能把音频回调线程
-/// 永久占住（表现为整应用卡死）。
-const STREAMING_END_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// `read` 等待下一段数据的停滞上限。
 ///
-/// 与上面那条同理由，但影响面大得多：`read` 的调用方是**音频线程**（解码器在
-/// `rebuild_sink` 里同步读它）。没有这个上限时，只要出现「缓冲既没有新数据、也没被
-/// 标成失败、又没下载完」的状态，这条循环就永远转下去，音频线程被这一条命令占死：
+/// 它同时是 `SeekFrom::End` 等总长度时的上限（见 `Seek for StreamingReader`）：
+/// 这两种等待都会把调用方（**音频线程**——解码器在 `rebuild_sink` 里同步读它）
+/// 按在原地。没有上限时，只要出现「缓冲既没有新数据、也没被标成失败、又没下载完」
+/// 的状态，这条循环就永远转下去，音频线程被这一条命令占死：
 /// 命令队列整体停摆，此后每条 `player_*` 都要等满回包超时（20s）才报错，切歌再也不
 /// 出声——实测正是「快速切歌后卡住」的最终形态。
 ///
@@ -527,25 +522,32 @@ impl Seek for StreamingReader {
                 let mut state = self.shared.state.lock().map_err(|_| {
                     io::Error::new(ErrorKind::Other, "streaming audio buffer poisoned")
                 })?;
-                // 等待总长度确定（下载完成或拿到 Content-Length）期间，若源站
-                // 僵死、complete 永不到来，这个循环会把调用方（音频回调线程）
-                // 永久占住 → 表现为卡死。给一个硬上限，超时后按错误退出；
-                // cancelled / error 两条早退路径本就能提前结束正常等待。
-                let deadline = Instant::now() + STREAMING_END_WAIT_TIMEOUT;
-                while !state.complete {
+                // 只在**总长度未知**时才等（等下载完成或等来 Content-Length）。
+                // 长度已经知道就直接回答：Content-Length 本身就是总长度（`byte_len()`
+                // 在下载完成前也正是用它），而「等 complete」会把调用方白按在一条僵死
+                // 流上——音频命令线程一被按满 20s 回包超时，之后每条 `player_*` 都跟着
+                // 超时：切歌转圈、连切换输出设备都没反应。旧实现在这里写死等 30s
+                // （`STREAMING_END_WAIT_TIMEOUT`），既超过回包超时，又完全不吃下面那条
+                // 收紧预算。
+                //
+                // 等待上限用和 `read` 同一个停滞预算（音频命令线程进来时被收紧到 3s），
+                // 且每轮现取：等待中途收紧也当场生效。
+                let wait_started = Instant::now();
+                while state.total_len.is_none() && !state.complete {
                     if self.is_cancelled() {
                         return Err(Self::cancelled_error());
                     }
                     if let Some(error) = state.error.clone() {
                         return Err(io::Error::new(ErrorKind::Other, error));
                     }
-                    if Instant::now() >= deadline {
+                    let budget_ms = self.shared.read_stall_ms.load(Ordering::Relaxed);
+                    if Instant::now() >= wait_started + Duration::from_millis(budget_ms) {
                         return Err(io::Error::new(
                             ErrorKind::TimedOut,
                             "streaming audio length wait timed out",
                         ));
                     }
-                    let (next_state, wait) = self
+                    let (next_state, _) = self
                         .shared
                         .available
                         .wait_timeout(state, Duration::from_millis(250))
@@ -553,12 +555,6 @@ impl Seek for StreamingReader {
                             io::Error::new(ErrorKind::Other, "streaming audio buffer poisoned")
                         })?;
                     state = next_state;
-                    if wait.timed_out() && Instant::now() >= deadline {
-                        return Err(io::Error::new(
-                            ErrorKind::TimedOut,
-                            "streaming audio length wait timed out",
-                        ));
-                    }
                 }
                 // 落地后 total_len 已被 finish 校正为文件实际长度，
                 // 未落地时它就是 Content-Length
@@ -1102,6 +1098,64 @@ mod tests {
                  （音频命令线程/预取线程会被永久占死）"
             ),
         }
+    }
+
+    /// `SeekFrom::End` 在**总长度已知**时必须立刻回答，不能去等「整首下载完成」。
+    ///
+    /// 旧实现无条件等 `complete`：Content-Length 早就拿到了也照等，等于把调用方
+    /// （音频命令线程/mixer）按在一条僵死流上等满 30s——音频命令线程一超 20s 回包
+    /// 超时，之后每条 `player_*` 都跟着超时：切歌转圈、连切换输出设备都没反应。
+    #[test]
+    fn seek_from_end_answers_from_content_length_without_waiting_for_download() {
+        let shared = StreamingBuffer::new(Some(4096), None);
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let mut reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 1);
+        shared.append(&[0u8; 16]).expect("append should succeed");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((reader.seek(SeekFrom::End(0)), reader.seek(SeekFrom::End(-16))));
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok((Ok(end), Ok(before_end))) => {
+                assert_eq!(end, 4096, "End(0) 应给出 Content-Length");
+                assert_eq!(before_end, 4080, "End(负偏移) 应相对总长度回退");
+            }
+            Ok((outcome, _)) => panic!("已知长度必须立刻给出答案，实际：{outcome:?}"),
+            Err(_) => panic!("已知 Content-Length 却去等下载完成——僵死流上这就是 30s 占死"),
+        }
+    }
+
+    /// 长度确实未知时该等，但上限要跟 `read` 走同一条停滞预算（音频命令线程 3s），
+    /// 而不是写死的 30s（30s > 20s 回包超时，整条命令队列会被拖死）；且等待**中途**
+    /// 收紧也要当场生效。
+    #[test]
+    fn seek_from_end_wait_follows_the_tightened_budget() {
+        let shared = StreamingBuffer::new(None, None);
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let mut reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 1);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = reader.seek(SeekFrom::End(0));
+            let _ = tx.send((outcome.is_err(), started.elapsed()));
+        });
+        // 让它先按宽松预算等上（25s，自己不会醒），再模拟音频命令线程收紧
+        std::thread::sleep(Duration::from_millis(200));
+        let guard = shared.with_read_budget(Duration::from_millis(500));
+
+        let (is_err, elapsed) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("长度未知又等不来时必须按时报错，而不是写死等 30s");
+        drop(guard);
+
+        assert!(is_err, "等不到总长度必须报错");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "上限要跟着收紧预算走，实际等了 {elapsed:?}"
+        );
     }
 
     #[test]
