@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { StateCreator } from "zustand";
 import { REPEAT_MODE_BY_TYPE } from "@/lib/constants/player";
 import type { QualityKey } from "@/lib/constants/song";
+import { appLog } from "@/lib/logBridge";
 import { corePlayer } from "@/lib/player/corePlayer";
 import {
 	inSwitchBurst,
@@ -179,6 +180,11 @@ export const createPlayerControlSlice: StateCreator<
 		// 被取代的旧调用一律不再改 store（详见 playSessionToken 的注释）。
 		const sessionToken = ++playSessionToken;
 		const isSuperseded = () => sessionToken !== playSessionToken;
+		// 点歌链路的起点。现场出现过「切歌没反应、日志里一行都没有」——那时分不清是
+		// 点击根本没走到这里，还是走到了但卡在某个 await 上，所以每个交棒点都留一行。
+		const stageStarted = Date.now();
+		const stage = () => ((Date.now() - stageStarted) / 1000).toFixed(2);
+		appLog(`[播放] 点歌 ${song.id}（第 ${sessionToken} 次${song.localFilePath ? "，本地" : ""}）`);
 		let naturalCrossfadeStarted = false;
 		let nextSongPreloadStarted = false;
 		const updatePlaybackProgress = (currentTime: number) => {
@@ -213,7 +219,10 @@ export const createPlayerControlSlice: StateCreator<
 			await corePlayer.ensureRequestIdBaseline();
 			// 等基线期间用户又点了一首：本次调用已作废，别让下面这些 set
 			// 把新歌的状态覆盖回去
-			if (isSuperseded()) return;
+			if (isSuperseded()) {
+				appLog(`[播放] ${song.id} 在等代次基线时被更新的点击取代`, "warn");
+				return;
+			}
 
 			const { playlist } = get();
 			const preferMusicLevel = useSettingStore.getState().audio.preferQuality;
@@ -244,7 +253,13 @@ export const createPlayerControlSlice: StateCreator<
 			if (rapidSwitch && !song.localFilePath) {
 				await waitQuietly(RAPID_SWITCH_HOLD_MS, signal);
 				// 空档期间又点了别的歌：这一首不用取了，交给更新的那次
-				if (isSuperseded() || signal.aborted) return;
+				if (isSuperseded() || signal.aborted) {
+					appLog(
+						`[播放] ${song.id} 停手等待期间被取代/中止（+${stage()}s）`,
+						"warn",
+					);
+					return;
+				}
 			}
 
 			// 本地歌曲
@@ -311,9 +326,18 @@ export const createPlayerControlSlice: StateCreator<
 				);
 				// 解析期间又被点了一首：本次调用已作废，直接退出，
 				// 否则下面的 set 会把新歌的加载状态覆盖掉
-				if (isSuperseded()) return;
+				if (isSuperseded()) {
+					appLog(
+						`[播放] ${song.id} 地址解析回来时已被取代（+${stage()}s）`,
+						"warn",
+					);
+					return;
+				}
 				url = resolved?.url;
 				levelKey = resolved?.levelKey;
+				appLog(
+					`[播放] ${song.id} 常规地址${url ? "已取得" : "为空"}（+${stage()}s）`,
+				);
 
 				if (url && resolved) {
 					set({ currentMusicLevelKey: resolved.levelKey });
@@ -329,7 +353,16 @@ export const createPlayerControlSlice: StateCreator<
 				// 解灰结果带缓存：同一首灰歌的二次播放不必再付一次 /match 往返
 				try {
 					const unblocked = await resolveUnblockedSource(song.id, signal);
-					if (isSuperseded()) return;
+					if (isSuperseded()) {
+						appLog(
+							`[播放] ${song.id} 解灰回来时已被取代（+${stage()}s）`,
+							"warn",
+						);
+						return;
+					}
+					appLog(
+						`[播放] ${song.id} 解灰${unblocked ? "成功" : "无结果"}（+${stage()}s）`,
+					);
 					if (unblocked) {
 						url = unblocked.url;
 						// 解灰音源用固定档位名，让它的缓存也落在稳定 key 上
@@ -345,7 +378,12 @@ export const createPlayerControlSlice: StateCreator<
 
 			if (!url) {
 				// 全部解析途径都拿不到地址且未抛异常：必须复位加载态，
-				// 否则 isLoadingMusic 停在 true、播放按钮永远转圈
+				// 否则 isLoadingMusic 停在 true、播放按钮永远转圈。
+				// 这条分支原本一行日志都不打——「点了没反应」就是这么静过去的。
+				appLog(
+					`[播放] ${song.id} 所有途径都拿不到播放地址，停在待播（+${stage()}s）`,
+					"warn",
+				);
 				set({ isLoadingMusic: false, isPlaying: false });
 				return;
 			}

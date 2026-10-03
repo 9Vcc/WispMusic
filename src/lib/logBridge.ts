@@ -47,29 +47,41 @@ function withinRateLimit(now: number): boolean {
 	return windowCount <= MAX_LINES_PER_SECOND;
 }
 
+const enabled = isTauri();
+// invoke 自身的失败也会走 console.error，再转发就是无限循环；一旦断了就整体停用
+let broken = false;
+let forwarding = false;
+
+function forward(level: "info" | "warn" | "error", line: string) {
+	if (!enabled || broken || forwarding || !withinRateLimit(Date.now())) return;
+	forwarding = true;
+	try {
+		invoke("log_from_frontend", { level, line }).catch(() => {
+			broken = true;
+		});
+	} catch {
+		broken = true;
+	}
+	forwarding = false;
+}
+
+/**
+ * 主动记一条到日志文件。
+ *
+ * console.log 不转发（渲染热路径上太多，会把有用的行挤出滚动窗口），但点歌链路上
+ * 那些「静默 return」必须留痕：现场形态是「点了没反应、原生日志里一行都没有」，
+ * 说明根本没走到 player_load——只看 warn/error 抓不到这种分支。
+ */
+export function appLog(message: string, level: "info" | "warn" = "info") {
+	forward(level, message);
+}
+
 export function installLogFileConsoleBridge() {
-	if (!isTauri()) return;
-
-	// invoke 自身的失败也会走 console.error，再转发就是无限循环；一旦断了就整体停用
-	let broken = false;
-	let forwarding = false;
-
 	for (const level of ["warn", "error"] as const) {
 		const original = console[level].bind(console);
 		console[level] = (...args: unknown[]) => {
 			original(...args);
-			if (broken || forwarding || !withinRateLimit(Date.now())) return;
-			forwarding = true;
-			try {
-				invoke("log_from_frontend", { level, line: toText(args) }).catch(
-					() => {
-						broken = true;
-					},
-				);
-			} catch {
-				broken = true;
-			}
-			forwarding = false;
+			forward(level, toText(args));
 		};
 	}
 }
