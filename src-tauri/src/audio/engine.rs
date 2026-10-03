@@ -88,6 +88,11 @@ pub(super) fn run_audio_thread(
         match rx.recv_timeout(PROGRESS_INTERVAL) {
             Ok(command) => handle_command(command, &mut inner, &snapshot_state, &mut last_app, &busy),
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // 心跳也要挂名，而且要分段挂：现场出现过「等满 20s 没回包，但音频线程
+                // 看着空闲」——current 是 None、loops 计数几十秒不动，说明卡的是**命令之间**
+                // 的收尾工作。不挂名就永远归不到它头上，挂了名也还要再分清是哪一段。
+                let heartbeat_started = Instant::now();
+                name_heartbeat_stage(&busy, "心跳:交接兜底");
                 // 就绪前硬切的兜底：新音源超时未到位时把还在响的旧歌停掉，
                 // 否则网络挂死会让旧歌一直唱下去、看起来像点歌没生效。
                 // 与是否已有 app 句柄无关，心跳里每次都要检查。
@@ -98,7 +103,18 @@ pub(super) fn run_audio_thread(
                     }
                 }
                 if let Some(app) = last_app.as_ref() {
+                    name_heartbeat_stage(&busy, "心跳:发进度事件");
                     tick_progress(app, &mut inner, &snapshot_state);
+                }
+                name_heartbeat_stage(&busy, "心跳:释放旧设备");
+                release_retired_outputs(&mut inner);
+                let heartbeat_elapsed = heartbeat_started.elapsed();
+                clear_heartbeat_stage(&busy);
+                if heartbeat_elapsed >= SLOW_COMMAND_LOG_THRESHOLD {
+                    crate::log_warn!(
+                        "[AUDIO] 心跳本身占住音频线程 {:.1}s（交接兜底 / 发进度事件 / 释放旧设备这类收尾工作）",
+                        heartbeat_elapsed.as_secs_f64()
+                    );
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -108,6 +124,18 @@ pub(super) fn run_audio_thread(
 
 /// 记一笔「线程此刻正被哪条命令占住」。锁只在进入/离开命令时握一下，
 /// 被占住的那段时间锁是放开的——诊断命令因此永远问得出来。
+fn name_heartbeat_stage(busy: &Arc<Mutex<AudioThreadBusy>>, stage: &'static str) {
+    if let Ok(mut guard) = busy.lock() {
+        guard.current = Some((stage, Instant::now()));
+    }
+}
+
+fn clear_heartbeat_stage(busy: &Arc<Mutex<AudioThreadBusy>>) {
+    if let Ok(mut guard) = busy.lock() {
+        guard.current = None;
+    }
+}
+
 fn mark_loop(busy: &Arc<Mutex<AudioThreadBusy>>) {
     if let Ok(mut guard) = busy.lock() {
         guard.looped_at = Instant::now();
@@ -758,8 +786,8 @@ fn tick_progress(
     snapshot_state: &Arc<Mutex<AudioSnapshot>>,
 ) {
     update_fades(inner);
-    // 旧输出设备的释放放在心跳里：一旦发现它已经不再读我们的流（旧 sink empty）就结束掉
-    release_retired_outputs(inner);
+    // 旧输出设备的释放由心跳直接负责（见 run_audio_thread 里的「心跳:释放旧设备」），
+    // 这样它卡住时归因是明确的，不混在发进度事件这段里
 
     if inner.track.is_none() {
         return;
