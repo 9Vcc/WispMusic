@@ -172,24 +172,32 @@ fn append_source(
             format,
             label,
             ..
-        } => append_positioned_source(
-            sink,
-            || {
-                decode_streaming_reader(reader.clone(), *format).map_err(|err| {
-                    format!(
-                        "decode streaming {} audio {label} failed: {err}",
-                        format.label()
-                    )
-                })
-            },
-            position,
-            audio_level,
-            audio_spectrum,
-            source.replay_gain(),
-            dsp,
-            speed,
-            speed_control,
-        ),
+        } => {
+            // 下面这段（建解码器 + 定位 + skip_duration）是在**音频命令线程**上同步读
+            // 这条流。预算不收紧时，一条僵死的第三方流能把这条线程占满 25s——超过 20s
+            // 回包超时，于是此后每条 player_* 都超时：现场日志里那串「命令占住音频线程
+            // 23.1s / 20.1s / 15.5s: SetOutputDevice」正是这个形态。guard 离开作用域
+            // （含各处 ? 早退）时还原成 mixer 线程该用的 25s，正常缓冲不会被误伤。
+            let _tight_read_budget = reader.tighten_read_budget();
+            append_positioned_source(
+                sink,
+                || {
+                    decode_streaming_reader(reader.clone(), *format).map_err(|err| {
+                        format!(
+                            "decode streaming {} audio {label} failed: {err}",
+                            format.label()
+                        )
+                    })
+                },
+                position,
+                audio_level,
+                audio_spectrum,
+                source.replay_gain(),
+                dsp,
+                speed,
+                speed_control,
+            )
+        }
     }
 }
 

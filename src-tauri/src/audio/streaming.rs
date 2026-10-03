@@ -35,6 +35,46 @@ const STREAMING_END_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// runtime worker 被并发切歌占满，没人再轮询它）时，才轮到这条上限兜底。
 const STREAMING_READ_STALL_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// 音频命令线程在建解码器/定位时用的收紧预算。
+///
+/// 同一个 `read` 有两个截然不同的调用方：mixer 线程（它卡住只是当前这首歌暂停发声），
+/// 和**音频命令线程**（`rebuild_sink` 里同步建解码器、定位、`skip_duration`）。后者一被
+/// 占住，整条命令队列跟着停摆——现场日志里那串「命令占住音频线程 23.1s / 20.1s /
+/// 19.8s / 15.5s: SetOutputDevice」正是这个形态：切歌没声、连输出设备都切不动，
+/// 每条 `player_*` 都等满 20s 回包超时。
+///
+/// 取 3s：CDN 首包实测在 1~2s 量级，3s 容得下正常慢首包，又把最坏情况从「超过回包
+/// 超时」压到「远低于它」。
+const AUDIO_THREAD_READ_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 同一次读等待该给多久。纯函数，便于把「音频线程侧必须短于 20s 回包超时」锁进单测。
+fn read_stall_budget(caller_is_audio_thread: bool) -> Duration {
+    if caller_is_audio_thread {
+        AUDIO_THREAD_READ_STALL_TIMEOUT
+    } else {
+        STREAMING_READ_STALL_TIMEOUT
+    }
+}
+
+/// `read` 停滞预算的持有者：进入时收紧，离开作用域（含各处 `?` 早退）自动还原。
+///
+/// 用 RAII 而不是前后两句 store，是因为建解码器这条路径上有好几个早退点；漏还原会把
+/// mixer 线程本该用的 25s 永久变成 3s，正常缓冲就会被误判成死流。
+#[must_use = "预算靠这个 guard 离开作用域时还原"]
+pub(super) struct TightReadBudget<'a> {
+    buffer: &'a StreamingBuffer,
+}
+
+impl Drop for TightReadBudget<'_> {
+    fn drop(&mut self) {
+        self.buffer.read_stall_ms.store(
+            read_stall_budget(false).as_millis() as u64,
+            Ordering::Relaxed,
+        );
+    }
+}
+
+
 /// 本轮读等待是否已经超预算。拆成纯函数是为了能把「到点必须退出」这条不变量
 /// 单测锁死——让测试真的等 25s 既不现实也不可取。
 fn read_wait_timed_out(deadline: Instant, now: Instant) -> bool {
@@ -90,6 +130,9 @@ struct StreamingState {
 pub(super) struct StreamingBuffer {
     state: Mutex<StreamingState>,
     available: Condvar,
+    /// `read` 的停滞预算（毫秒）。平时是 25s（mixer 线程用），音频命令线程建解码器
+    /// 期间由 `tighten_read_budget` 临时收到 3s（见 AUDIO_THREAD_READ_STALL_TIMEOUT）。
+    read_stall_ms: AtomicU64,
     /// reader 读到未下载边界之外时发出的快进目标字节位置；None 表示无需快进。
     fast_forward_tx: watch::Sender<Option<u64>>,
     /// 顺序下载最终落盘的路径。None 表示该缓冲没有对应磁盘文件，永不回退读盘。
@@ -116,9 +159,19 @@ impl StreamingBuffer {
                 file: None,
             }),
             available: Condvar::new(),
+            read_stall_ms: AtomicU64::new(read_stall_budget(false).as_millis() as u64),
             fast_forward_tx,
             final_path,
         })
+    }
+
+    /// 音频命令线程即将同步读这条流之前调用；返回的 guard 离开作用域时还原宽松预算。
+    pub(super) fn tighten_read_budget(&self) -> TightReadBudget<'_> {
+        self.read_stall_ms.store(
+            read_stall_budget(true).as_millis() as u64,
+            Ordering::Relaxed,
+        );
+        TightReadBudget { buffer: self }
     }
 
     pub(super) fn append(&self, chunk: &[u8]) -> Result<(), String> {
@@ -260,6 +313,12 @@ impl StreamingBuffer {
             .unwrap_or(false)
     }
 
+    /// 当前 `read` 停滞预算（毫秒），测试断言「收紧了 / 还原了」用
+    #[cfg(test)]
+    pub(super) fn debug_read_stall_ms(&self) -> u64 {
+        self.read_stall_ms.load(Ordering::Relaxed)
+    }
+
     /// 内存容量快照 (data 容量, tail 容量)，测试断言「容量已归还」用
     #[cfg(test)]
     pub(super) fn debug_capacities(&self) -> (usize, usize) {
@@ -294,6 +353,12 @@ impl StreamingReader {
 
     fn is_cancelled(&self) -> bool {
         self.latest_request_id.load(Ordering::SeqCst) != self.request_id
+    }
+
+    /// 音频命令线程即将同步读这条流（建解码器、定位）之前收紧 `read` 的停滞预算，
+    /// guard 离开作用域时还原。见 StreamingBuffer::tighten_read_budget。
+    pub(super) fn tighten_read_budget(&self) -> TightReadBudget<'_> {
+        self.shared.tighten_read_budget()
     }
 
     /// 返回流总长度：下载完成时用实际长度（落盘后即文件长度），否则用 Content-Length。
@@ -336,8 +401,10 @@ impl Read for StreamingReader {
         }
 
         // 本次读请求的停滞上限（见 STREAMING_READ_STALL_TIMEOUT）：一次成功的读会
-        // 立刻 return，所以这个时限管的正是「一直没有数据可取」那种情况
-        let stall_deadline = Instant::now() + STREAMING_READ_STALL_TIMEOUT;
+        // 立刻 return，所以这个时限管的正是「一直没有数据可取」那种情况。
+        // 音频命令线程建解码器期间，预算被 tighten_read_budget 收到 3s。
+        let stall_deadline = Instant::now()
+            + Duration::from_millis(self.shared.read_stall_ms.load(Ordering::Relaxed));
         let mut gap_deadline: Option<Instant> = None;
 
         loop {
@@ -820,6 +887,70 @@ mod tests {
 
         // 短于它就越过「生产侧先报错」的正常路径，把慢流误判成死流
         assert!(STREAMING_READ_STALL_TIMEOUT > Duration::from_secs(20));
+    }
+
+    #[test]
+    fn audio_thread_read_budget_is_shorter_than_the_command_timeout() {
+        // 音频线程侧的预算必须明显短于 20s 回包超时：超过它，这条命令的调用方就已经
+        // 报错放弃了，而队列里排在后面的每条命令（含切换输出设备）跟着一起烂。
+        assert!(AUDIO_THREAD_READ_STALL_TIMEOUT < Duration::from_secs(20));
+        // mixer 侧继续用宽松预算，正常缓冲不能被当成死流
+        assert!(read_stall_budget(false) > read_stall_budget(true));
+        assert_eq!(read_stall_budget(false), STREAMING_READ_STALL_TIMEOUT);
+        assert_eq!(read_stall_budget(true), AUDIO_THREAD_READ_STALL_TIMEOUT);
+    }
+
+    /// guard 必须**无论怎么走**都还原预算：建解码器那条路径上有好几个 `?` 早退点，
+    /// 漏还原会把 mixer 线程本该用的 25s 永久变成 3s（正常慢缓冲被误判成死流）。
+    #[test]
+    fn read_budget_returns_to_the_lenient_value_even_on_the_error_path() {
+        let shared = StreamingBuffer::new(Some(4096), None);
+        let lenient = read_stall_budget(false).as_millis() as u64;
+        let tight = read_stall_budget(true).as_millis() as u64;
+        assert_eq!(shared.debug_read_stall_ms(), lenient, "初始应是宽松预算");
+
+        // 模拟 `?` 早退：guard 随内层作用域析构，一次都没被显式使用
+        let early: Result<(), &str> = {
+            let _guard = shared.tighten_read_budget();
+            assert_eq!(shared.debug_read_stall_ms(), tight, "收紧后应按短预算等待");
+            Err("decoder init failed")
+        };
+        assert!(early.is_err());
+        assert_eq!(
+            shared.debug_read_stall_ms(),
+            lenient,
+            "早退也必须还原宽松预算"
+        );
+    }
+
+    /// 收紧必须真的作用在等待上：空缓冲、没有任何生产方时，带着 guard 的这次读要在
+    /// 短预算内报错退出。改回「无论谁都等 25s」的话，这条测试会红。
+    #[test]
+    fn tightened_budget_makes_a_stalled_read_give_up_early() {
+        let shared = StreamingBuffer::new(Some(4096), None);
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 1);
+        let mut output = [0u8; 4];
+
+        let started = Instant::now();
+        let guard = reader.tighten_read_budget();
+        let error = reader
+            .clone()
+            .read(&mut output)
+            .expect_err("没有数据可取时必须按时退出");
+        let elapsed = started.elapsed();
+        std::mem::drop(guard);
+
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(
+            elapsed < STREAMING_READ_STALL_TIMEOUT,
+            "收紧后不该等满宽松预算，实际 {elapsed:?}"
+        );
+        assert_eq!(
+            shared.debug_read_stall_ms(),
+            read_stall_budget(false).as_millis() as u64,
+            "读完了也要还原"
+        );
     }
 
     #[test]
