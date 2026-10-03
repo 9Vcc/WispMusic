@@ -220,10 +220,15 @@ async fn resolve_remote_audio_source(
         if let Some(stream_format) =
             detect_stream_format(url, content_type.as_deref(), &first_chunk)
         {
-            // m4a/mp4 的 ISO MP4 解码必须已知总长度，缺 Content-Length 时
-            // 走完整下载路径（文件路径可从 metadata 拿到长度）
-            let streamable = !matches!(stream_format, StreamFormat::M4a | StreamFormat::Mp4)
-                || content_length.is_some();
+            // 只有拿到 Content-Length 才允许流式起播，两个理由指向同一个缺口：
+            // 长度未知时，解码器初始化阶段要往末尾 seek（ISO BMFF 必须有总长度；
+            // symphonia 探测某些格式时也会 seek 去估长度），而 `StreamingReader`
+            // 对「等不到长度」只能返回错误——rodio 0.20.1 把初始化期的 SeekError
+            // 当作 `unreachable!()` panic 处理（`decoder/symphonia.rs:45`），那会
+            // 当场打死音频线程：没声音、切不动输出设备，而且不会留下任何慢命令日志。
+            // 真机日志里抓到的正是这条 panic。缺 Content-Length 的流本就是少数
+            // （CDN 一般都会带），退回完整下载更安全。
+            let streamable = content_length.is_some();
             // 需要先探测的源（解灰地址）在这一步确认能随机跳转才允许流式起播。
             // 放在这里而不是解析入口处，是为了不打断已经建立的主请求：无论探针结果
             // 如何，first_chunk 与 stream 都照原样交给下面的完整下载路径。

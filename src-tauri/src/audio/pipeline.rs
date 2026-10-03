@@ -1,5 +1,6 @@
 use rodio::{Sink, Source};
 use std::{
+    panic::{self, AssertUnwindSafe},
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -192,6 +193,21 @@ fn append_source(
     }
 }
 
+/// 把「在音频线程上碰解码器」这段工作包起来。
+///
+/// 为什么必须包：rodio 0.20.1 在 symphonia 初始化拿到 `Error::SeekError` 时直接
+/// `unreachable!()`（`rodio-0.20.1/src/decoder/symphonia.rs:45`），而这段代码跑在
+/// **音频线程**上。线程一死，播放能力整个会话都回不来——现象是「没声音、连输出
+/// 设备都切不动」，而且因为命令根本没被卡住（是线程没了），连慢命令日志都不会留下。
+/// 真机日志里就抓到过这条 panic。畸形/半残的第三方音源不该有这种权限：宁可这一次
+/// 载入失败，让前端按普通报错处理。
+fn guard_decoder_panic<T>(
+    label: &str,
+    work: impl FnOnce() -> T + panic::UnwindSafe,
+) -> Result<T, String> {
+    panic::catch_unwind(work).map_err(|_| format!("audio decoder panicked while {label}"))
+}
+
 /// 建解码器 → 定位 → 包变速层 → 挂到 sink。
 ///
 /// `create_decoder` 是闭包而不是现成解码器：回退路径需要**第二个干净的解码器**
@@ -210,16 +226,30 @@ fn append_positioned_source<F>(
 where
     F: Fn() -> Result<BoxedAudioSource, String>,
 {
-    let decoder = create_decoder()?;
+    let decoder = guard_decoder_panic("initializing decoder", AssertUnwindSafe(&create_decoder))??;
     let duration = decoder.total_duration();
 
     let mut positioned = wrap_with_tempo(decoder, speed, Arc::clone(&speed_control));
-    if !position.is_zero() && positioned.try_seek(position).is_err() {
+    // 位置为 0 时压根不 seek（保持原有短路：新建的解码器本来就在开头）
+    let seek_ok = position.is_zero()
+        || guard_decoder_panic(
+            "seeking decoder",
+            AssertUnwindSafe(|| positioned.try_seek(position).is_ok()),
+        )?;
+    if !seek_ok {
         // 回退路径：正常不会走到——LevelMeter → TempoSource → decoder 三层都转发了
         // try_seek（dsp.rs / tempo.rs / mp4_decoder.rs），Symphonia 解码器也支持。
         // 走到这里说明该源确实不支持 demuxer 级 seek，只能退回解码跳过。
-        let decoder = create_decoder()?;
-        positioned = wrap_with_tempo(decoder.skip_duration(position), speed, speed_control);
+        let decoder = guard_decoder_panic(
+            "reinitializing decoder for skip",
+            AssertUnwindSafe(&create_decoder),
+        )??;
+        positioned = guard_decoder_panic(
+            "skipping to position",
+            AssertUnwindSafe(|| {
+                wrap_with_tempo(decoder.skip_duration(position), speed, speed_control)
+            }),
+        )?;
     }
 
     sink.append(LevelMeter::new(
@@ -253,5 +283,44 @@ pub(super) fn reset_audio_analysis(inner: &AudioThreadInner) {
     inner.audio_level.store(0.0f32.to_bits(), Ordering::Relaxed);
     for band in inner.audio_spectrum.iter() {
         band.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// rodio 在解码器初始化拿到 SeekError 时会 `unreachable!()` panic（真机日志里
+    /// 抓到过原文），而这段代码跑在音频线程上：panic 等于把整个会话的播放能力打死
+    /// ——没声音、切不动输出设备，还不留任何慢命令日志。所以必须转成一次普通失败。
+    /// （测试里那条 panic 消息会照常打到 stderr，这是默认 panic hook 的行为，不是漏网）
+    #[test]
+    fn decoder_panic_becomes_an_error_instead_of_a_dead_thread() {
+        let outcome = guard_decoder_panic("initializing decoder", AssertUnwindSafe(|| -> Result<u32, String> {
+            panic!("simulated rodio unreachable!()");
+        }));
+
+        let message = outcome.expect_err("panic 必须被转成 Err，而不是穿出音频线程");
+        assert!(message.contains("panicked while initializing decoder"));
+
+        // 正常路径的语义与错误透传都不该被这层包装改变
+        assert_eq!(
+            guard_decoder_panic(
+                "initializing decoder",
+                AssertUnwindSafe(|| Ok::<u32, String>(7u32)),
+            )
+            .unwrap()
+            .unwrap(),
+            7
+        );
+        assert_eq!(
+            guard_decoder_panic(
+                "initializing decoder",
+                AssertUnwindSafe(|| Err::<u32, String>("bad format".to_string()))
+            )
+            .unwrap()
+            .unwrap_err(),
+            "bad format"
+        );
     }
 }
