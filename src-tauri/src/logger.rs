@@ -13,7 +13,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -175,6 +175,98 @@ pub fn directory() -> Option<PathBuf> {
         .map(|sink| sink.directory.clone())
 }
 
+/// 供「查看日志」界面列出的文件信息
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFileInfo {
+    /// 文件名（不含路径）——读取时只接受这里出现过的名字
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+/// 目录下的日志文件（`*.log` 与轮转出的 `*.log.1`），按大小倒序：
+/// 主日志通常最大排最前，历史与 sidecar 日志跟在后面。
+pub fn files() -> Vec<LogFileInfo> {
+    match directory() {
+        Some(dir) => list_files_in(&dir),
+        None => Vec::new(),
+    }
+}
+
+fn list_files_in(directory: &Path) -> Vec<LogFileInfo> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut list: Vec<LogFileInfo> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".log") && !name.ends_with(".log.1") {
+                return None;
+            }
+            let size_bytes = entry.metadata().ok()?.len();
+            Some(LogFileInfo { name, size_bytes })
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    list
+}
+
+/// 尾部读取一次最多读多少字节。日志单文件上限 5MB，整个读进内存去切尾部
+/// 是没必要的开销——末尾这么多字节足够覆盖几千行，够看了。
+const TAIL_READ_BYTES: u64 = 256 * 1024;
+
+/// 读取某个日志文件的末尾若干行。
+///
+/// `name` 必须是 `files()` 给出过的名字：这里只接受目录内的既有日志文件名，
+/// 不然前端传个 `../../windows.log` 就能读到用户其它文件。
+pub fn tail(name: &str, max_lines: usize) -> Result<String, String> {
+    let directory = directory().ok_or_else(|| "日志尚未初始化".to_string())?;
+    read_tail_in(&directory, name, max_lines)
+}
+
+fn read_tail_in(directory: &Path, name: &str, max_lines: usize) -> Result<String, String> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("不是可读取的日志文件: {name}"));
+    }
+    if !list_files_in(directory)
+        .iter()
+        .any(|file| file.name == name)
+    {
+        return Err(format!("不是可读取的日志文件: {name}"));
+    }
+    let path = directory.join(name);
+
+    let mut file = File::open(&path).map_err(|err| format!("打开日志失败: {err}"))?;
+    let len = file
+        .metadata()
+        .map_err(|err| format!("读取日志信息失败: {err}"))?
+        .len();
+    let start = len.saturating_sub(TAIL_READ_BYTES);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))
+            .map_err(|err| format!("定位日志尾部失败: {err}"))?;
+    }
+    let mut bytes = Vec::with_capacity((len - start) as usize + 1);
+    file.read_to_end(&mut bytes)
+        .map_err(|err| format!("读取日志失败: {err}"))?;
+
+    // 截断点大概率落在某一行的中间，丢掉开头那半行再按行数切
+    if start > 0 {
+        if let Some(break_at) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=break_at);
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines.len().saturating_sub(max_lines);
+    Ok(lines[first..].join("\n"))
+}
+
 /// 写一行日志。dev 下同时打到 stderr，保持原有控制台可见性。
 pub fn log_line(level: &str, message: &str) {
     #[cfg(debug_assertions)]
@@ -313,5 +405,45 @@ mod tests {
         // 未初始化（或初始化失败）时调用不能把宿主线程带倒：
         // 日志是辅助设施，它自己不能成为新的故障点
         log_line("INFO", "这条在没有任何 sink 的情况下也必须安全");
+    }
+
+    #[test]
+    fn lists_only_log_files_biggest_first() {
+        let dir = temp_dir("listing");
+        std::fs::write(dir.join(FILE_NAME), "x".repeat(300)).expect("写主日志");
+        std::fs::write(dir.join(format!("{FILE_NAME}.1")), "y".repeat(100)).expect("写历史");
+        std::fs::write(dir.join("unm-server.log"), "z".repeat(200)).expect("写 sidecar 日志");
+        std::fs::write(dir.join("notes.txt"), "不该出现").expect("写非日志文件");
+
+        let listed = list_files_in(&dir);
+        let names: Vec<&str> = listed.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, vec![FILE_NAME, "unm-server.log", "wisp.log.1"]);
+        assert_eq!(listed[0].size_bytes, 300);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_returns_the_last_lines_and_refuses_anything_else() {
+        let dir = temp_dir("tail");
+        let mut content = String::new();
+        for index in 0..500 {
+            content.push_str(&format!("line {index}\n"));
+        }
+        std::fs::write(dir.join(FILE_NAME), &content).expect("写日志");
+
+        let tail = read_tail_in(&dir, FILE_NAME, 3).expect("应能读到尾部");
+        assert_eq!(tail.lines().count(), 3);
+        assert!(tail.ends_with("line 499"), "取到的应是结尾几行：{tail}");
+
+        // 只允许列出来的那几个名字：否则前端传个 ../ 就能读到用户其它文件
+        for rejected in ["../wisp.log", "sub/wisp.log", "..", "notes.txt", "wisp.log.2"] {
+            assert!(
+                read_tail_in(&dir, rejected, 10).is_err(),
+                "{rejected} 不该被允许读取"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

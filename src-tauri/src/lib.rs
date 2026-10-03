@@ -147,6 +147,18 @@ fn log_directory() -> Option<String> {
     logger::directory().map(|dir| dir.display().to_string())
 }
 
+/// 可看的日志文件列表（主日志、轮转出的历史、解灰 sidecar 日志）
+#[tauri::command]
+fn log_files() -> Vec<logger::LogFileInfo> {
+    logger::files()
+}
+
+/// 读某个日志文件的尾部若干行；文件名必须来自 `log_files`，否则报错
+#[tauri::command]
+fn log_file_tail(name: String, max_lines: Option<usize>) -> Result<String, String> {
+    logger::tail(&name, max_lines.unwrap_or(800).clamp(1, 5000))
+}
+
 /// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
 ///
 /// 托盘菜单窗口**常驻**（启动即建、隐藏复用、不销毁）：托盘右键是高频主交互，
@@ -797,6 +809,8 @@ pub fn run() {
             aux_window_ready,
             main_mark_shown,
             log_directory,
+            log_files,
+            log_file_tail,
             desktop_lyric_show,
             desktop_lyric_hide,
             desktop_lyric_resize,

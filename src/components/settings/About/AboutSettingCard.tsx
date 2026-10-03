@@ -1,6 +1,7 @@
 import SettingsExpandar, {
   SettingsExpandarDetail,
 } from "@/components/settings/SettingsExpandar";
+import { Button } from "@/components/ui/button";
 // 唯一保留的 Tabler 业务引用：GitHub 品牌标志在 Fluent 里没有对应图标，
 // 换任何近似图标都会丢失品牌语义，所以这里按"品牌标志"例外处理。
 // 其余业务图标一律使用 @fluentui/react-icons（见 UI_GUIDELINES §12）。
@@ -10,6 +11,7 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { FolderOpen24Regular } from "@fluentui/react-icons";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { LogViewerDialog } from "./LogViewerDialog";
 
 /**
  * 日志目录一行：显示实际路径，点图标在资源管理器里打开。
@@ -21,6 +23,7 @@ import { toast } from "sonner";
  */
 function LogDirectoryDetail() {
   const [directory, setDirectory] = useState<string | null>(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   useEffect(() => {
     invoke<string | null>("log_directory")
@@ -31,31 +34,44 @@ function LogDirectoryDetail() {
   if (!directory) return null;
 
   return (
-    <SettingsExpandarDetail
-      desc="日志目录"
-      trailing={
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="max-w-[260px] truncate text-xs text-foreground/50" title={directory}>
-            {directory}
-          </span>
-          <div
-            role="button"
-            tabIndex={0}
-            className="hover:bg-fill-hover p-2 rounded-sm transition-all duration-300 cursor-pointer"
-            title="在资源管理器中打开"
-            onClick={async () => {
-              try {
-                await openPath(directory);
-              } catch {
-                toast.error("日志目录暂时打不开，可手动复制上方路径");
-              }
-            }}
-          >
-            <FolderOpen24Regular className="size-4 text-foreground" />
+    <>
+      <SettingsExpandarDetail
+        desc="日志目录"
+        trailing={
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className="max-w-[260px] truncate text-xs text-foreground/50"
+              title={directory}
+            >
+              {directory}
+            </span>
+            <Button
+              variant="winui"
+              size="sm"
+              onClick={() => setViewerOpen(true)}
+            >
+              查看
+            </Button>
+            <div
+              role="button"
+              tabIndex={0}
+              className="hover:bg-fill-hover p-2 rounded-sm transition-all duration-300 cursor-pointer"
+              title="在资源管理器中打开"
+              onClick={async () => {
+                try {
+                  await openPath(directory);
+                } catch {
+                  toast.error("日志目录暂时打不开，可手动复制上方路径");
+                }
+              }}
+            >
+              <FolderOpen24Regular className="size-4 text-foreground" />
+            </div>
           </div>
-        </div>
-      }
-    />
+        }
+      />
+      <LogViewerDialog open={viewerOpen} onClose={() => setViewerOpen(false)} />
+    </>
   );
 }
 
