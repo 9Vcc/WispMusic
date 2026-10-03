@@ -80,6 +80,12 @@ pub(super) struct AudioThreadInner {
     /// 「就绪前硬切」的宽限截止时刻：BeginLoad 保留旧 sink 等待新音源时挂上，
     /// 到点仍没等到对应的 Load 就主动停掉旧歌（见 engine::expire_pending_handoff）。
     pub(super) handoff_deadline: Option<Instant>,
+    /// mixer 每 5ms 回写的播放位置，以及它最后一次发生变化的时刻。
+    /// 位置不再推进而墙钟计时照走 = 界面显示在播放、实际没出声（见 engine::note_sink_progress）。
+    pub(super) sink_position: Option<Duration>,
+    pub(super) sink_position_changed_at: Option<Instant>,
+    /// 同一次停滞只报一条日志，位置重新推进后再武装
+    pub(super) silence_reported: bool,
     pub(super) selected_device_id: Option<String>,
 }
 
@@ -101,6 +107,9 @@ impl AudioThreadInner {
             fade_in: None,
             request_id: 0,
             handoff_deadline: None,
+            sink_position: None,
+            sink_position_changed_at: None,
+            silence_reported: false,
             selected_device_id: Option::None,
         }
     }

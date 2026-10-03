@@ -37,6 +37,41 @@ const SLOW_COMMAND_LOG_THRESHOLD: Duration = Duration::from_secs(2);
 /// 必须明显小于回包超时，超时后按「跳转没成」走既有的重建管线回退路径。
 const SEEK_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// 底层播放位置停住多久算「无声」。
+///
+/// 心跳每 250ms 一拍，rodio 每 5ms 由 mixer 回写一次位置（sink.rs:126-146）。
+/// 位置不动就说明 mixer 没在消费样本——通常是它卡在我们的流读取里等网络。
+/// 取 2s：正常缓冲期间位置每拍都在走，2s 足够排除偶发抖动，又短到能在用户还没
+/// 放弃时留下一条归因日志。
+const SILENCE_LOG_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// 喂一拍 mixer 回写的播放位置，返回 `Some(停滞时长)` 表示「刚刚判定为无声」。
+///
+/// 只在刚进入停滞时返回一次（`silence_reported` 去重，免得每拍刷屏），位置重新
+/// 推进后自动再武装。判定与状态分离、`now` 由调用方传入，是为了让这条不变量能
+/// 被单测锁死（不必真等满阈值）。
+fn note_sink_progress(
+    inner: &mut AudioThreadInner,
+    position: Duration,
+    now: Instant,
+) -> Option<Duration> {
+    if inner.sink_position != Some(position) {
+        inner.sink_position = Some(position);
+        inner.sink_position_changed_at = Some(now);
+        inner.silence_reported = false;
+        return None;
+    }
+
+    let stalled_for = now
+        .saturating_duration_since(inner.sink_position_changed_at.unwrap_or(now));
+    if inner.silence_reported || stalled_for < SILENCE_LOG_THRESHOLD {
+        return None;
+    }
+
+    inner.silence_reported = true;
+    Some(stalled_for)
+}
+
 pub(super) fn run_audio_thread(
     rx: mpsc::Receiver<AudioCommand>,
     snapshot_state: Arc<Mutex<AudioSnapshot>>,
@@ -676,6 +711,21 @@ fn tick_progress(
         .as_ref()
         .map(|track| track.is_playing)
         .unwrap_or(false);
+
+    // 「界面在播放、实际没出声」的证据：mixer 回写的位置停住，而墙钟计时照走。
+    // 音频线程本身还在转（否则到不了这里），所以卡的是 mixer 线程那一侧。
+    if is_playing && !sink_empty {
+        if let Some(sink) = inner.sink.as_ref() {
+            let stalled_for = note_sink_progress(inner, sink.get_pos(), Instant::now());
+            if let Some(stalled_for) = stalled_for {
+                crate::log_warn!(
+                    "[AUDIO] 疑似无声：界面按墙钟在播放，但底层播放位置已 {:.1}s 没有推进（mixer 没在消费样本，多半卡在流读取等网络）",
+                    stalled_for.as_secs_f64()
+                );
+            }
+        }
+    }
+
     let ended = should_mark_ended(
         sink_empty,
         is_playing,
@@ -819,6 +869,75 @@ mod tests {
         assert!(!should_expire_handoff(deadline, after, None, 8));
         // 没有挂起交接（普通 Stop / 首次载入）：永不触发
         assert!(!should_expire_handoff(None, after, Some(7), 8));
+    }
+
+    /// 「界面在播放、实际没出声」的判定：底层位置不动就报一次，动了就不再报。
+    /// 这条检测的存在意义是把「音频线程还在转、卡的是 mixer 那一侧」和「整条线程
+    /// 停摆」区分开——后者只会由 SLOW_COMMAND 那条日志（命令跑完才打）留下证据，
+    /// 卡住期间一声不响。
+    #[test]
+    fn frozen_mixer_position_is_reported_once_per_stall() {
+        let mut inner = AudioThreadInner::new();
+        let started = Instant::now();
+
+        // 第一拍建立基线
+        assert_eq!(
+            note_sink_progress(&mut inner, Duration::from_millis(100), started),
+            None
+        );
+
+        // 位置照常推进：不算无声
+        let advanced_at = started + Duration::from_millis(250);
+        assert_eq!(
+            note_sink_progress(&mut inner, Duration::from_millis(400), advanced_at),
+            None
+        );
+
+        // 同一位置但还没过阈值
+        assert_eq!(
+            note_sink_progress(
+                &mut inner,
+                Duration::from_millis(400),
+                advanced_at + SILENCE_LOG_THRESHOLD - Duration::from_millis(1)
+            ),
+            None,
+            "阈值之内不该报"
+        );
+
+        // 跨过阈值：报一次，报的是「距离最后一次推进」停了多久
+        let over = advanced_at + SILENCE_LOG_THRESHOLD + Duration::from_millis(500);
+        let stalled = note_sink_progress(&mut inner, Duration::from_millis(400), over);
+        assert_eq!(stalled, Some(SILENCE_LOG_THRESHOLD + Duration::from_millis(500)));
+
+        // 同一次停滞不得刷屏
+        assert_eq!(
+            note_sink_progress(&mut inner, Duration::from_millis(400), over + Duration::from_secs(30)),
+            None,
+            "同一次停滞只报一条"
+        );
+
+        // 恢复推进后重新武装：再次停滞可以再报
+        assert_eq!(
+            note_sink_progress(
+                &mut inner,
+                Duration::from_millis(900),
+                over + Duration::from_secs(31)
+            ),
+            None
+        );
+        assert!(
+            note_sink_progress(
+                &mut inner,
+                Duration::from_millis(900),
+                over + Duration::from_secs(31) + SILENCE_LOG_THRESHOLD
+            )
+            .is_some(),
+            "恢复过一次之后应该能再次报出来"
+        );
+
+        // 阈值必须短到能在用户还没放弃之前留下日志，又要长过正常缓冲抖动
+        assert!(SILENCE_LOG_THRESHOLD >= Duration::from_millis(500));
+        assert!(SILENCE_LOG_THRESHOLD < SEEK_FEEDBACK_TIMEOUT * 10);
     }
 
     #[test]
