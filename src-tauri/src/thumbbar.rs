@@ -89,7 +89,7 @@ unsafe fn init_thumbbar(hwnd: HWND) {
             play_icon,
             pause_icon,
         });
-        println!("[Thumbbar] Loaded PNG icons and initialized successfully");
+        crate::log_info!("[Thumbbar] 已加载 PNG 图标并初始化成功");
     }
 }
 
@@ -104,7 +104,7 @@ unsafe fn load_png_as_hicon(filename: &str) -> HICON {
         path = std::path::PathBuf::from("icons").join(filename);
     }
     if !path.exists() {
-        eprintln!("[Thumbbar] Warning: Icon not found at {:?}", path);
+        crate::log_warn!("[Thumbbar] 图标文件找不到: {:?}", path);
         return HICON(0);
     }
     let Ok(factory): Result<IWICImagingFactory> =

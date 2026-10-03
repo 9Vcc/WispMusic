@@ -166,8 +166,11 @@ async fn ensure_started(app: &AppHandle) -> Result<Arc<UnmProcess>, String> {
         .current_dir(&dir)
         .env("UNM_PORT", port.to_string());
 
-    // stderr 写入日志文件：sidecar 启动失败（缺依赖/Node 版本问题等）时可排查
-    if let Ok(log_dir) = app.path().app_log_dir() {
+    // stderr 写入日志文件：sidecar 启动失败（缺依赖/Node 版本问题等）时可排查。
+    // 目录跟应用日志取同一个（安装版是 exe 同级 logs/，见 logger.rs）——排查解灰
+    // 问题时两份日志要能摆在一起看，别一半在 Program Files 一半在 AppData。
+    let log_dir = crate::logger::directory().or_else(|| app.path().app_log_dir().ok());
+    if let Some(log_dir) = log_dir {
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("unm-server.log");
         if let Ok(file) = std::fs::OpenOptions::new()
@@ -231,12 +234,12 @@ async fn ensure_started(app: &AppHandle) -> Result<Arc<UnmProcess>, String> {
 
                 if !(configured && assigned) {
                     // 挂载失败只影响"退出时自动清理"，不影响解灰功能本身
-                    eprintln!(
+                    crate::log_warn!(
                         "[unm] sidecar 未挂入 Job Object（configured={configured} assigned={assigned}），退出时可能残留"
                     );
                 }
             } else if let Err(err) = job_result {
-                eprintln!("[unm] 创建 sidecar Job Object 失败：{err}");
+                crate::log_warn!("[unm] 创建 sidecar Job Object 失败：{err}");
             }
         }
     }

@@ -341,6 +341,6 @@ pub(crate) fn cleanup_orphan_temp_files(app: &AppHandle) {
         }
     }
     if removed > 0 {
-        eprintln!("[cache] 启动清扫孤儿临时文件 {removed} 个");
+        crate::log_info!("[cache] 启动清扫孤儿临时文件 {removed} 个");
     }
 }

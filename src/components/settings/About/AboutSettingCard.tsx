@@ -5,7 +5,60 @@ import SettingsExpandar, {
 // 换任何近似图标都会丢失品牌语义，所以这里按"品牌标志"例外处理。
 // 其余业务图标一律使用 @fluentui/react-icons（见 UI_GUIDELINES §12）。
 import { IconBrandGithub } from "@tabler/icons-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { FolderOpen24Regular } from "@fluentui/react-icons";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+
+/**
+ * 日志目录一行：显示实际路径，点图标在资源管理器里打开。
+ *
+ * 目录必须问 Rust 侧要，不能前端自己拼 `%APPDATA%`：安装版优先写 exe 同级的
+ * `logs`（例如装在 D:\APP\WispMusic 就是 D:\APP\WispMusic\logs），装到
+ * Program Files 那种不可写的位置才会回落到系统日志目录——按固定路径显示，
+ * 两种安装方式里必有一个是错的。
+ */
+function LogDirectoryDetail() {
+  const [directory, setDirectory] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<string | null>("log_directory")
+      .then((dir) => setDirectory(dir))
+      .catch(() => setDirectory(null));
+  }, []);
+
+  if (!directory) return null;
+
+  return (
+    <SettingsExpandarDetail
+      desc="日志目录"
+      trailing={
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="max-w-[260px] truncate text-xs text-foreground/50" title={directory}>
+            {directory}
+          </span>
+          <div
+            role="button"
+            tabIndex={0}
+            className="hover:bg-fill-hover p-2 rounded-sm transition-all duration-300 cursor-pointer"
+            title="在资源管理器中打开"
+            onClick={async () => {
+              try {
+                await openPath(directory);
+              } catch {
+                toast.error("日志目录暂时打不开，可手动复制上方路径");
+              }
+            }}
+          >
+            <FolderOpen24Regular className="size-4 text-foreground" />
+          </div>
+        </div>
+      }
+    />
+  );
+}
+
 export function AboutSettingCard() {
   return (
     <SettingsExpandar
@@ -29,6 +82,7 @@ export function AboutSettingCard() {
             </div>
           }
         />
+        <LogDirectoryDetail />
       </div>
     </SettingsExpandar>
   );

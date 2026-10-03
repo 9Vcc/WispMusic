@@ -83,7 +83,7 @@ fn handle_command(
         guard.last_done = Some((kind, elapsed, Instant::now()));
     }
     if elapsed >= SLOW_COMMAND_LOG_THRESHOLD {
-        eprintln!(
+        crate::log_warn!(
             "[AUDIO] 命令占住音频线程 {:.1}s: {}（这段时间里其它命令都在排队）",
             elapsed.as_secs_f64(),
             kind

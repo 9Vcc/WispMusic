@@ -58,6 +58,27 @@ pnpm test    # 运行单元测试（Vitest）
 pnpm build   # 仅构建前端（TypeScript 检查 + Vite 打包）
 ```
 
+### 4. 日志在哪里
+
+日志写在**程序所在目录**下的 `logs`，不是系统的应用数据目录：
+
+| 运行方式 | 目录 |
+| --- | --- |
+| 安装版（如装到 `D:\APP\WispMusic`） | `D:\APP\WispMusic\logs` |
+| 开发运行（`pnpm tdev`） | `src-tauri\target\debug\logs` |
+
+装到 `Program Files` 这类需要管理员权限的位置时，那里建不出目录，会自动回落到系统的
+应用日志目录（`%LOCALAPPDATA%\com.isen.wisp-music\logs`）——实际用了哪个目录，日志第一行
+会写明，设置 → 关于 → 日志目录 也会显示真实路径（点旁边的图标直接在资源管理器打开）。
+
+为什么安装版要落在程序目录：release 构建没有控制台（`main.rs` 的
+`windows_subsystem = "windows"`），`println!` / panic 输出全被丢弃。不写文件日志的话，
+用户机器上「播放卡住」「线程 panic」当场一点痕迹都留不下——本次音频线程那个
+`unreachable!()` 就是靠 dev 控制台才抓到的。单文件超过 5MB 转成 `wisp.log.1`，只留一份历史。
+
+目录与轮转的实现见 `src-tauri/src/logger.rs`；解灰 sidecar 的 `unm-server.log` 落在同一目录，
+排查时两份日志能摆在一起看。
+
 版本变更记录见 [CHANGELOG.md](./.github/workflows/CHANGELOG.md)。
 
 ## 🧰 技术栈

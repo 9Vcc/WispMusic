@@ -107,7 +107,7 @@ where
             let _ = self.engine.clear();
         }));
         if guard.is_err() {
-            eprintln!("[audio] soundtouch engine panicked during apply_speed({speed})");
+            crate::log_error!("[audio] 变速引擎在 apply_speed({speed}) 中 panic");
         }
     }
 
@@ -233,7 +233,7 @@ where
                 Ok(true) => {}
                 Ok(false) => {}
                 Err(err) => {
-                    eprintln!("[audio] tempo processing failed, stopping source: {err}");
+                    crate::log_error!("[audio] 变速处理失败，停止该音源: {err}");
                     return None;
                 }
             }

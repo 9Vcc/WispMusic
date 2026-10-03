@@ -59,7 +59,7 @@ pub(crate) fn cleanup_stale_covers(app: &tauri::AppHandle) {
         }
     }
     if removed > 0 {
-        eprintln!("[LocalMusicScanner] 清扫过期封面缓存 {removed} 个");
+        crate::log_info!("[LocalMusicScanner] 清扫过期封面缓存 {removed} 个");
     }
 }
 
@@ -104,7 +104,7 @@ pub fn scan_local_music(app: tauri::AppHandle, dir: String) -> Result<Vec<LocalT
         match read_track_metadata(file_path, &covers_dir) {
             Ok(track) => tracks.push(track),
             Err(e) => {
-                eprintln!("[LocalMusicScanner] 跳过文件: {:?}: {}", file_path, e);
+                crate::log_warn!("[LocalMusicScanner] 跳过文件: {:?}: {}", file_path, e);
             }
         }
     }

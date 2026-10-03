@@ -93,7 +93,7 @@ mod imp {
                 if is_process_signaled(parent) {
                     hits += 1;
                     if hits >= CONFIRM_ROUNDS {
-                        eprintln!("[dev] 父进程已退出（dev 会话结束），测试应用随之退出");
+                        crate::log_info!("[dev] 父进程已退出（dev 会话结束），测试应用随之退出");
                         let _ = unsafe { CloseHandle(parent) };
                         app.exit(0);
                         return;

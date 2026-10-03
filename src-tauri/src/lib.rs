@@ -6,6 +6,7 @@ mod download;
 mod http_client;
 mod local_lyric;
 mod local_music;
+mod logger;
 mod ncm;
 mod process_memory;
 mod smtc;
@@ -62,7 +63,7 @@ struct AuxWindowSpecFile {
 
 fn aux_window_spec(label: &str) -> Option<WindowConfig> {
     let specs: AuxWindowSpecFile = serde_json::from_str(AUX_WINDOW_SPECS)
-        .map_err(|err| eprintln!("[window] parse aux-windows.json failed: {err}"))
+        .map_err(|err| log_error!("[window] parse aux-windows.json failed: {err}"))
         .ok()?;
     specs
         .windows
@@ -134,6 +135,16 @@ fn show_main_window(app: &tauri::AppHandle, focus: bool) -> Result<(), String> {
 #[tauri::command]
 fn main_mark_shown() {
     MAIN_SHOWN.store(true, Ordering::Release);
+}
+
+/// 当前采用的日志目录（绝对路径字符串）。
+///
+/// 放在 Rust 侧而不是前端拼 `%APPDATA%`：安装版优先写 exe 同级的 `logs`，装到
+/// `Program Files` 下不可写时才回落到系统日志目录（见 `logger.rs`）——前端按
+/// 任一固定位置显示都会在其中一种安装方式下指错地方。
+#[tauri::command]
+fn log_directory() -> Option<String> {
+    logger::directory().map(|dir| dir.display().to_string())
 }
 
 /// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
@@ -600,6 +611,11 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 第一件事就是开日志：release 没有控制台（main.rs 的 windows_subsystem），
+            // 不装这份文件日志，安装版上发生的 panic 与失败会一个字都不留。
+            logger::init(app.handle());
+            log_info!("[app] 启动完成，版本 {}", app.package_info().version);
+
             // dev 专属：父进程（tauri dev / cargo）结束时本进程跟着退出，
             // 避免终端侧结束 dev 后留下孤儿实例。release 下是空实现。
             dev_watchdog::spawn_watchdog(app.handle().clone());
@@ -665,10 +681,10 @@ pub fn run() {
                         match app.get_webview_window("tray-menu") {
                             Some(window) => {
                                 if let Err(err) = show_tray_menu_at(&window, app, position) {
-                                    eprintln!("[tray] show tray-menu failed: {err}");
+                                    log_error!("[tray] show tray-menu failed: {err}");
                                 }
                             }
-                            None => eprintln!("[tray] tray-menu window not found"),
+                            None => log_error!("[tray] tray-menu window not found"),
                         }
                     }
                     _ => {}
@@ -780,6 +796,7 @@ pub fn run() {
             mini_set_bounds,
             aux_window_ready,
             main_mark_shown,
+            log_directory,
             desktop_lyric_show,
             desktop_lyric_hide,
             desktop_lyric_resize,

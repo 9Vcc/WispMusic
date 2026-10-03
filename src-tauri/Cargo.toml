@@ -41,6 +41,8 @@ windows = { version = "0.44", features = [
   "Win32_System_Diagnostics_ToolHelp",
   # 内存归因用：K32GetProcessMemoryInfo 读各进程工作集，见 src/process_memory.rs
   "Win32_System_ProcessStatus",
+  # 日志时间戳用本地时间：GetLocalTime，见 src/logger.rs
+  "Win32_System_SystemInformation",
   # unm sidecar 随宿主进程退出：KILL_ON_JOB_CLOSE，见 src/unm.rs
   "Win32_System_JobObjects",
   # CreateJobObjectW 的 SECURITY_ATTRIBUTES 参数需要
