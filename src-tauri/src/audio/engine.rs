@@ -40,6 +40,16 @@ const SLOW_COMMAND_LOG_THRESHOLD: Duration = Duration::from_secs(2);
 /// 必须明显小于回包超时，超时后按「跳转没成」走既有的重建管线回退路径。
 const SEEK_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// seek 回退路径（重建管线）允许占住音频线程的总时限。
+///
+/// 回退路径是几段串行的流式工作（建解码器 → demuxer 级定位 → 必要时 `skip_duration`
+/// 解码跳过），每段自己的等待上限是 3s，串起来最坏能到 9s 级——这期间新点的歌只能
+/// 排队，再叠上别的等待就冲过 20s 回包超时。
+///
+/// 取 5s：容得下正常重建（实测 0.0~0.2s）与一次慢首包（CDN 实测 1~2s），又把
+/// 「快路径 3s + 回退 5s」的整体最坏占用压在 8s，离回包超时仍有充足余量。
+const SEEK_FALLBACK_TOTAL_BUDGET: Duration = Duration::from_secs(5);
+
 /// 底层播放位置停住多久算「无声」。
 ///
 /// 心跳每 250ms 一拍，rodio 每 5ms 由 mixer 回写一次位置（sink.rs:126-146）。
@@ -565,7 +575,21 @@ fn seek_inner(
         }
     }
 
-    // 回退路径：sink 为空或底层源不支持 seek 时，重建管线并解码跳转
+    // 回退路径：sink 为空或底层源不支持 seek 时，重建管线并解码跳转。
+    //
+    // 这一段是**多段**串行的流式工作（建解码器 → demuxer 级定位 → 必要时退到
+    // `skip_duration` 从头解码跳过），每段自己的等待上限是 3s，串起来最坏能到 9s 级：
+    // 期间用户新点的歌只能排队，再叠上任何别的等待就冲过 20s 回包超时。给它装一个
+    // 总时限，到点后本线程的读立刻失败退出，命令按普通失败返回（前端已有的
+    // 「播放错误 → 尝试恢复」路径接住），而不是让整条命令队列陪着停摆。
+    // 只约束本线程：新管线装好后 mixer 的读不受影响（见 with_hard_deadline）。
+    let fallback_source = inner.track.as_ref().map(|track| track.source.clone());
+    let _fallback_deadline = match fallback_source.as_ref() {
+        Some(AudioSource::Stream { reader, .. }) => {
+            Some(reader.with_hard_deadline(Instant::now() + SEEK_FALLBACK_TOTAL_BUDGET))
+        }
+        _ => None,
+    };
     let duration = rebuild_sink(inner, position, was_playing, false)?;
 
     if let Some(track) = inner.track.as_mut() {
@@ -1143,5 +1167,23 @@ mod tests {
         );
         // 时限必须明显短于命令回包超时（20s），否则调用方早就当成彻底卡死了
         assert!(SEEK_FEEDBACK_TIMEOUT < Duration::from_secs(20));
+    }
+
+    /// seek 的最坏占用必须塞得进回包超时里：快路径（3s 放弃）+ 回退重建（5s 总时限）
+    /// 之外还要留余量给别的命令。超了的话单条 Seek 就能把整条命令队列拖垮——
+    /// 2026-10-04 现场就是一条 Seek 占住线程直到重启（那条是死循环，见 streaming.rs
+    /// 的取消信号修复；这条守的是「就算慢，也得有界」）。
+    #[test]
+    fn seek_worst_case_occupation_fits_inside_the_command_response_timeout() {
+        let worst_case = SEEK_FEEDBACK_TIMEOUT + SEEK_FALLBACK_TOTAL_BUDGET;
+        assert!(
+            worst_case < Duration::from_secs(20),
+            "seek 最坏占用 {worst_case:?} 必须明显短于 20s 回包超时"
+        );
+        // 也别小到把正常重建（实测 0.0~0.2s）和一次慢首包（CDN 实测 1~2s）误杀
+        assert!(
+            SEEK_FALLBACK_TOTAL_BUDGET > Duration::from_secs(1),
+            "总时限得容得下一次正常的慢首包"
+        );
     }
 }

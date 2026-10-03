@@ -69,6 +69,26 @@ impl Drop for TightReadBudget<'_> {
     }
 }
 
+/// `with_hard_deadline` 的持有者：离开作用域（含各处 `?` 早退）时清除总时限。
+///
+/// 一定要走 guard 而不是前后两次赋值：回退重建这条路径上有好几个早退点，漏清除会
+/// 让属主线程此后每次读都立刻超时——那条线程再干别的流式工作（切设备/再点歌）就
+/// 直接失败了。
+#[must_use = "总时限靠这个 guard 离开作用域时清除"]
+pub(super) struct HardDeadlineGuard<'a> {
+    buffer: &'a StreamingBuffer,
+    previous: Option<HardDeadline>,
+}
+
+impl Drop for HardDeadlineGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.buffer.state.lock() {
+            state.hard_deadline = self.previous;
+        }
+        self.buffer.available.notify_all();
+    }
+}
+
 
 /// 本轮读等待是否已经超预算。拆成纯函数是为了能把「到点必须退出」这条不变量
 /// 单测锁死——让测试真的等 25s 既不现实也不可取。
@@ -104,6 +124,28 @@ const DATA_RESERVE_MAX_BYTES: u64 = 24 * 1024 * 1024;
 /// Range，而 reset_tail 会先回收旧缓冲，因此不会一直占着这 32MB。
 const TAIL_MAX_BYTES: usize = 32 * 1024 * 1024;
 
+/// 某条线程给自己的**多段**流式工作设的绝对截止时刻（见 `with_hard_deadline`）。
+///
+/// 单段等待各自都有上限（`read` 3s / `SeekFrom::End` 同预算），但一段工作里可以串起
+/// 好几段（建解码器 → 定位 → 解码跳过），加起来照样能把音频命令线程占满回包超时。
+/// 到点后属主线程的每次读/等立刻按超时失败，跟取消一样是**不可重试**的错误类别，
+/// 会原样穿出去让解码器结束。
+#[derive(Clone, Copy)]
+struct HardDeadline {
+    at: Instant,
+    owner: std::thread::ThreadId,
+}
+
+/// 「总时限」是否已越过——**只对装上它的那条线程生效**。
+///
+/// 只认属主线程是刻意的：装的是一条命令自己的总预算（seek 回退路径等），到点就放弃；
+/// mixer 等其它读者不能跟着被误伤，否则一次放弃会把正在播的歌也掐掉。
+fn hard_deadline_expired(state: &StreamingState) -> bool {
+    state.hard_deadline.is_some_and(|deadline| {
+        deadline.owner == std::thread::current().id() && Instant::now() >= deadline.at
+    })
+}
+
 struct StreamingState {
     data: Vec<u8>,
     complete: bool,
@@ -120,6 +162,8 @@ struct StreamingState {
     /// 句柄保持打开还有一层作用：即使文件随后被缓存淘汰逻辑删除，
     /// 已打开的句柄仍可继续读到全部数据，当前播放不会中断。
     file: Option<File>,
+    /// 见 `with_hard_deadline`：某条线程给自己的多段流式工作设的绝对截止时刻。
+    hard_deadline: Option<HardDeadline>,
 }
 
 pub(super) struct StreamingBuffer {
@@ -152,6 +196,7 @@ impl StreamingBuffer {
                 tail_data: Vec::new(),
                 tail_done: true,
                 file: None,
+                hard_deadline: None,
             }),
             available: Condvar::new(),
             read_stall_ms: AtomicU64::new(read_stall_budget(false).as_millis() as u64),
@@ -173,6 +218,31 @@ impl StreamingBuffer {
         TightReadBudget {
             buffer: self,
             previous_ms,
+        }
+    }
+
+    /// 给**当前线程**装一个绝对总时限（见 HardDeadline），guard 离开作用域时清除。
+    ///
+    /// 用途是给「回退重建」这类**多段**流式工作设总预算：单段等待各有上限，加起来
+    /// 仍可能把音频命令线程占满到回包超时。只影响装上它的那条线程——mixer 和其它
+    /// 读者照旧走各自的停滞预算。
+    pub(super) fn with_hard_deadline(&self, at: Instant) -> HardDeadlineGuard<'_> {
+        let previous = match self.state.lock() {
+            Ok(mut state) => {
+                let previous = state.hard_deadline;
+                state.hard_deadline = Some(HardDeadline {
+                    at,
+                    owner: std::thread::current().id(),
+                });
+                previous
+            }
+            Err(_) => None,
+        };
+        // 正在等的那次读每轮都会重新判：装完立刻唤醒，别让它把剩余预算等满
+        self.available.notify_all();
+        HardDeadlineGuard {
+            buffer: self,
+            previous,
         }
     }
 
@@ -326,6 +396,15 @@ impl StreamingBuffer {
         self.read_stall_ms.load(Ordering::Relaxed)
     }
 
+    /// 是否有线程装着总时限，测试断言 guard 的装/清用
+    #[cfg(test)]
+    pub(super) fn debug_hard_deadline_active(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.hard_deadline.is_some())
+            .unwrap_or(false)
+    }
+
     /// 内存容量快照 (data 容量, tail 容量)，测试断言「容量已归还」用
     #[cfg(test)]
     pub(super) fn debug_capacities(&self) -> (usize, usize) {
@@ -366,6 +445,12 @@ impl StreamingReader {
     /// guard 离开作用域时还原。见 StreamingBuffer::tighten_read_budget。
     pub(super) fn tighten_read_budget(&self) -> TightReadBudget<'_> {
         self.shared.tighten_read_budget()
+    }
+
+    /// 给当前线程装一个绝对总时限（回退重建这类多段流式工作的总预算）。
+    /// 见 StreamingBuffer::with_hard_deadline。
+    pub(super) fn with_hard_deadline(&self, at: Instant) -> HardDeadlineGuard<'_> {
+        self.shared.with_hard_deadline(at)
     }
 
     /// 返回流总长度：下载完成时用实际长度（落盘后即文件长度），否则用 Content-Length。
@@ -433,6 +518,15 @@ impl Read for StreamingReader {
         loop {
             if self.is_cancelled() {
                 return Err(Self::cancelled_error());
+            }
+            // 多段工作的总时限（见 with_hard_deadline）：到点后属主线程的每次读都
+            // 直接失败，不再吃单段预算——否则「建解码器 3s + 定位 3s + 跳过 3s」
+            // 串起来照样能把音频命令线程占满回包超时。
+            if hard_deadline_expired(&state) {
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "streaming audio read budget exhausted",
+                ));
             }
 
             let data_len = state.data.len() as u64;
@@ -536,6 +630,13 @@ impl Seek for StreamingReader {
                 while state.total_len.is_none() && !state.complete {
                     if self.is_cancelled() {
                         return Err(Self::cancelled_error());
+                    }
+                    // 总时限优先于单段预算：回退重建里这一段也不该跑过头
+                    if hard_deadline_expired(&state) {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            "streaming audio length wait timed out",
+                        ));
                     }
                     if let Some(error) = state.error.clone() {
                         return Err(io::Error::new(ErrorKind::Other, error));
@@ -1155,6 +1256,74 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "上限要跟着收紧预算走，实际等了 {elapsed:?}"
+        );
+    }
+
+    /// 总时限是**属主线程**的：到点后装上它的线程每次读都失败，别的线程（mixer）
+    /// 照读不误——否则一次 seek 回退放弃会把正在播的歌也掐掉。
+    #[test]
+    fn hard_deadline_only_fails_reads_on_the_thread_that_installed_it() {
+        let shared = StreamingBuffer::new(None, None);
+        shared.append(b"abcdef").expect("append should succeed");
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+
+        let mut owner_reader =
+            StreamingReader::new(Arc::clone(&shared), Arc::clone(&latest_request_id), 1);
+        let other_reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 1);
+
+        // 装一个已经越过的总时限（属主 = 当前测试线程）
+        let guard = shared.with_hard_deadline(Instant::now() - Duration::from_secs(1));
+        assert!(shared.debug_hard_deadline_active());
+
+        // 非属主线程不受影响
+        let other_read = std::thread::spawn(move || {
+            let mut reader = other_reader;
+            let mut output = [0u8; 3];
+            reader.read(&mut output).map(|len| (len, output))
+        })
+        .join()
+        .expect("join");
+        let (len, bytes) = other_read.expect("非属主线程不该被总时限拦下");
+        assert_eq!((len, bytes), (3, [b'a', b'b', b'c']));
+
+        // 属主线程立刻按超时失败
+        let error = owner_reader
+            .read(&mut [0u8; 3])
+            .expect_err("属主线程必须被总时限拦住");
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+
+        drop(guard);
+        assert!(!shared.debug_hard_deadline_active(), "guard 离开作用域必须清掉总时限");
+    }
+
+    /// 总时限要能截断**正在等**的那次读：单段预算 25s 时，等的那次读会在到点后
+    /// 250ms 内（每轮唤醒一次的粒度）失败退出，而不是把剩余预算等满。
+    #[test]
+    fn hard_deadline_releases_a_waiting_read_early() {
+        let shared = StreamingBuffer::new(None, None);
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let reader_shared = Arc::clone(&shared);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // 属主必须就是等在里面的这条线程；guard 单独用一份 Arc（reader 要 &mut 读）
+            let shared_for_deadline = Arc::clone(&reader_shared);
+            let reader = StreamingReader::new(reader_shared, latest_request_id, 1);
+            let _guard =
+                shared_for_deadline.with_hard_deadline(Instant::now() + Duration::from_millis(300));
+            let mut reader = reader;
+            let started = Instant::now();
+            let outcome = reader.read(&mut [0u8; 4]);
+            let _ = tx.send((outcome.is_err(), started.elapsed()));
+        });
+
+        let (is_err, elapsed) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("总时限必须截断这次等待，而不是等满 25s 的单段预算");
+        assert!(is_err, "越界后这次读必须报错");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "300ms 的总时限不该等到 3s 以上，实际 {elapsed:?}"
         );
     }
 
