@@ -5,6 +5,15 @@ on:
     tags:
       - "v*"
 
+# 同一个 tag 只允许一条流水线在跑：tag 被反复删除重推（发布脚本重打 tag）时
+# GitHub 会为每次 ref 变更各起一条 run，它们会并发抢建同一个 GitHub Release、
+# 并并发向 CNB 更新仓库推 update.json——后到的要么报错中止，要么把前一份产物的
+# 直链覆盖掉。私有仓库的 Windows runner 按分钟计费（2x），重复的那几条即使跑完
+# 也只会产出同一个版本的同一份包，所以直接取消旧的那条，不烧钱。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     strategy:
