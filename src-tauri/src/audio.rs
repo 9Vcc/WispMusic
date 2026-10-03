@@ -16,7 +16,7 @@ mod types;
 use tauri::{AppHandle, Manager, State};
 
 pub use controller::AudioState;
-use types::{AudioSnapshot, PreloadResult};
+use types::{AudioSnapshot, AudioThreadStatus, PreloadResult};
 
 /// 缓存文件命名规则的唯一来源，供 crate 根部的 cache 模块复用：
 /// 写入方与查询方必须算出同一个文件名，否则缓存永不命中。
@@ -182,4 +182,12 @@ pub fn player_get_state(state: State<'_, AudioState>) -> Result<AudioSnapshot, S
 #[tauri::command]
 pub fn player_latest_request_id(state: State<'_, AudioState>) -> u64 {
     state.latest_request_id()
+}
+
+/// 音频线程体检（不进命令队列）：卡住时用它指认是哪类命令占住了线程。
+#[tauri::command]
+pub fn player_thread_status(
+    state: State<'_, AudioState>,
+) -> Result<AudioThreadStatus, String> {
+    controller::player_thread_status(&state)
 }

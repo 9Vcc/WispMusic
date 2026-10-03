@@ -807,6 +807,7 @@ pub fn run() {
             audio::player_stop,
             audio::player_get_state,
             audio::player_latest_request_id,
+            audio::player_thread_status,
             audio::list_audio_output_devices,
             audio::player_set_output_device,
             audio::player_set_replay_gain,

@@ -10,22 +10,32 @@ use super::event::{emit_snapshot, respond_and_emit};
 use super::pipeline::{rebuild_sink, reset_audio_analysis, stop_fading_sinks, update_fades};
 use super::snapshot::{idle_snapshot, snapshot_inner, store_snapshot};
 use super::source::AudioSource;
-use super::state::{track_position, AudioThreadInner, TrackState};
+use super::state::{track_position, AudioThreadBusy, AudioThreadInner, TrackState};
 use super::types::AudioSnapshot;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const CROSSFADE_MAX_DURATION: Duration = Duration::from_secs(12);
 
+/// 单条命令占用音频线程超过这个时长就打一条日志。
+///
+/// 音频线程是**一条命令串行执行**的：它被谁占住，后面所有命令（含切换输出设备、
+/// 暂停、seek）就只能排队等，而调用方的回包超时是 20s——用户看到的就是「卡住没声音、
+/// 设备也切不动」。没有这条日志时，那种状态只能从外面猜是哪类命令咬住了线程；
+/// 有了它就有一条直接的归因证据（2026-10-03 的压测就是这么定位的）。
+const SLOW_COMMAND_LOG_THRESHOLD: Duration = Duration::from_secs(2);
+
 pub(super) fn run_audio_thread(
     rx: mpsc::Receiver<AudioCommand>,
     snapshot_state: Arc<Mutex<AudioSnapshot>>,
+    busy: Arc<Mutex<AudioThreadBusy>>,
 ) {
     let mut inner = AudioThreadInner::new();
     let mut last_app: Option<AppHandle> = None;
 
     loop {
+        mark_loop(&busy);
         match rx.recv_timeout(PROGRESS_INTERVAL) {
-            Ok(command) => handle_command(command, &mut inner, &snapshot_state, &mut last_app),
+            Ok(command) => handle_command(command, &mut inner, &snapshot_state, &mut last_app, &busy),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // 就绪前硬切的兜底：新音源超时未到位时把还在响的旧歌停掉，
                 // 否则网络挂死会让旧歌一直唱下去、看起来像点歌没生效。
@@ -45,7 +55,61 @@ pub(super) fn run_audio_thread(
     }
 }
 
+/// 记一笔「线程此刻正被哪条命令占住」。锁只在进入/离开命令时握一下，
+/// 被占住的那段时间锁是放开的——诊断命令因此永远问得出来。
+fn mark_loop(busy: &Arc<Mutex<AudioThreadBusy>>) {
+    if let Ok(mut guard) = busy.lock() {
+        guard.looped_at = Instant::now();
+        guard.loops += 1;
+    }
+}
+
 fn handle_command(
+    command: AudioCommand,
+    inner: &mut AudioThreadInner,
+    snapshot_state: &Arc<Mutex<AudioSnapshot>>,
+    last_app: &mut Option<AppHandle>,
+    busy: &Arc<Mutex<AudioThreadBusy>>,
+) {
+    let kind = command_kind(&command);
+    let started = Instant::now();
+    if let Ok(mut guard) = busy.lock() {
+        guard.current = Some((kind, started));
+    }
+    dispatch_command(command, inner, snapshot_state, last_app);
+    let elapsed = started.elapsed();
+    if let Ok(mut guard) = busy.lock() {
+        guard.current = None;
+        guard.last_done = Some((kind, elapsed, Instant::now()));
+    }
+    if elapsed >= SLOW_COMMAND_LOG_THRESHOLD {
+        eprintln!(
+            "[AUDIO] 命令占住音频线程 {:.1}s: {}（这段时间里其它命令都在排队）",
+            elapsed.as_secs_f64(),
+            kind
+        );
+    }
+}
+
+/// 命令种类标签，只用于日志归因（不改变任何行为）。
+fn command_kind(command: &AudioCommand) -> &'static str {
+    match command {
+        AudioCommand::BeginLoad { .. } => "BeginLoad",
+        AudioCommand::Load { .. } => "Load",
+        AudioCommand::Play { .. } => "Play",
+        AudioCommand::Pause { .. } => "Pause",
+        AudioCommand::Seek { .. } => "Seek",
+        AudioCommand::SetVolume { .. } => "SetVolume",
+        AudioCommand::SetSpeed { .. } => "SetSpeed",
+        AudioCommand::Stop { .. } => "Stop",
+        AudioCommand::SetOutputDevice { .. } => "SetOutputDevice",
+        AudioCommand::SetReplayGain { .. } => "SetReplayGain",
+        AudioCommand::SetEqualizer { .. } => "SetEqualizer",
+        AudioCommand::SetCrossfade { .. } => "SetCrossfade",
+    }
+}
+
+fn dispatch_command(
     command: AudioCommand,
     inner: &mut AudioThreadInner,
     snapshot_state: &Arc<Mutex<AudioSnapshot>>,

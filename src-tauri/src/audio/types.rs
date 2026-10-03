@@ -55,6 +55,23 @@ pub struct PreloadResult {
     pub(super) duration: f64,
 }
 
+/// 音频线程体检结果。**不进命令队列**：线程被某条命令占住、队列整体停摆时，
+/// 这是唯一还能问出「此刻在忙什么、忙了多久」的入口。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioThreadStatus {
+    /// 正在处理的命令种类；None = 线程空闲在等下一条命令
+    pub busy_with: Option<String>,
+    /// 这条命令已经占了多久（秒）
+    pub busy_secs: f64,
+    pub last_command: Option<String>,
+    pub last_command_secs: f64,
+    /// 距离线程最后一次回到事件循环过去了多久（毫秒）。心跳长期停在这里
+    /// 就说明线程根本没在转，而不是命令队列排队
+    pub loop_age_ms: u64,
+    pub loops: u64,
+}
+
 #[derive(Clone, Serialize)]
 pub(super) struct AudioEvent {
     kind: String,

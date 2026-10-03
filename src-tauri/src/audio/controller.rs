@@ -3,7 +3,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::AppHandle;
@@ -12,7 +12,8 @@ use super::command::{AudioCommand, ResponseTx};
 use super::engine::{run_audio_thread, safe_duration_from_secs};
 use super::snapshot::{current_snapshot, duration_secs};
 use super::source::{probe_source_duration, resolve_audio_source};
-pub use super::types::{AudioSnapshot, PreloadResult};
+use super::state::AudioThreadBusy;
+pub use super::types::{AudioSnapshot, AudioThreadStatus, PreloadResult};
 
 /// 命令队列容量。音频线程逐个串行执行命令（一次 seek/切设备可能占住数秒），
 /// 期间 UI 命令只入队；不设上限时拖动类操作可无限堆积。256 条远高于正常
@@ -28,6 +29,7 @@ pub struct AudioState {
     tx: mpsc::SyncSender<AudioCommand>,
     snapshot: Arc<Mutex<AudioSnapshot>>,
     latest_request_id: Arc<AtomicU64>,
+    busy: Arc<Mutex<AudioThreadBusy>>,
 }
 
 impl AudioState {
@@ -35,13 +37,16 @@ impl AudioState {
         let (tx, rx) = mpsc::sync_channel(AUDIO_COMMAND_QUEUE_CAPACITY);
         let snapshot = Arc::new(Mutex::new(AudioSnapshot::idle(0.7, 0)));
         let snapshot_for_thread = Arc::clone(&snapshot);
+        let busy = Arc::new(Mutex::new(AudioThreadBusy::new()));
+        let busy_for_thread = Arc::clone(&busy);
 
-        std::thread::spawn(move || run_audio_thread(rx, snapshot_for_thread));
+        std::thread::spawn(move || run_audio_thread(rx, snapshot_for_thread, busy_for_thread));
 
         Self {
             tx,
             snapshot,
             latest_request_id: Arc::new(AtomicU64::new(0)),
+            busy,
         }
     }
 
@@ -292,6 +297,35 @@ pub fn player_stop(app: AppHandle, state: &AudioState) -> Result<AudioSnapshot, 
 
 pub fn player_get_state(state: &AudioState) -> Result<AudioSnapshot, String> {
     Ok(current_snapshot(&state.snapshot))
+}
+
+/// 音频线程体检：此刻正被哪条命令占住、占了多久、心跳还在不在走。
+///
+/// 与快照同一条「不进命令队列」的路，所以队列停摆时照样问得出来——而那正是需要
+/// 它的时刻：卡住之后每条 `player_*` 都要等满 20s 回包超时，界面上看是整体死掉
+/// （连输出设备都切不动），只有这个能指认是哪类命令咬住了线程。
+pub fn player_thread_status(state: &AudioState) -> Result<AudioThreadStatus, String> {
+    let busy = state
+        .busy
+        .lock()
+        .map_err(|_| "audio thread busy state is poisoned".to_string())?;
+    let now = Instant::now();
+    let (busy_with, busy_secs) = match &busy.current {
+        Some((kind, started)) => (Some((*kind).to_string()), started.elapsed().as_secs_f64()),
+        None => (None, 0.0),
+    };
+    let (last_command, last_command_secs) = match &busy.last_done {
+        Some((kind, elapsed, _)) => (Some((*kind).to_string()), elapsed.as_secs_f64()),
+        None => (None, 0.0),
+    };
+    Ok(AudioThreadStatus {
+        busy_with,
+        busy_secs,
+        last_command,
+        last_command_secs,
+        loop_age_ms: now.saturating_duration_since(busy.looped_at).as_millis() as u64,
+        loops: busy.loops,
+    })
 }
 
 fn is_stale_request(latest_request_id: &AtomicU64, request_id: u64) -> bool {
