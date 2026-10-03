@@ -159,6 +159,22 @@ fn log_file_tail(name: String, max_lines: Option<usize>) -> Result<String, Strin
     logger::tail(&name, max_lines.unwrap_or(800).clamp(1, 5000))
 }
 
+/// 把前端的 warn/error 落到同一个日志文件。
+///
+/// release 包没有 devtools：切歌失败只在前端 console 喊一声就消失了，而实测主日志
+/// 里连一行播放相关的记录都没有（此前只有「命令跑完且超过 2s」这一类事后日志）。
+/// 带上来源窗口标签，便于区分主窗口与迷你播放器/桌面歌词。
+#[tauri::command]
+fn log_from_frontend(window: tauri::Window, level: String, line: String) {
+    let line: String = line.chars().take(600).collect();
+    let label = window.label().to_string();
+    match level.as_str() {
+        "error" => log_error!("[WEB/{label}] {line}"),
+        "warn" => log_warn!("[WEB/{label}] {line}"),
+        _ => log_info!("[WEB/{label}] {line}"),
+    }
+}
+
 /// 定位并显示托盘菜单（居中于鼠标、在鼠标上方）。
 ///
 /// 托盘菜单窗口**常驻**（启动即建、隐藏复用、不销毁）：托盘右键是高频主交互，
@@ -811,6 +827,7 @@ pub fn run() {
             log_directory,
             log_files,
             log_file_tail,
+            log_from_frontend,
             desktop_lyric_show,
             desktop_lyric_hide,
             desktop_lyric_resize,

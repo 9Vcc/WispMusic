@@ -63,14 +63,14 @@ fn read_stall_budget(caller_is_audio_thread: bool) -> Duration {
 #[must_use = "预算靠这个 guard 离开作用域时还原"]
 pub(super) struct TightReadBudget<'a> {
     buffer: &'a StreamingBuffer,
+    previous_ms: u64,
 }
 
 impl Drop for TightReadBudget<'_> {
     fn drop(&mut self) {
-        self.buffer.read_stall_ms.store(
-            read_stall_budget(false).as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.buffer
+            .read_stall_ms
+            .store(self.previous_ms, Ordering::Relaxed);
     }
 }
 
@@ -165,13 +165,25 @@ impl StreamingBuffer {
         })
     }
 
-    /// 音频命令线程即将同步读这条流之前调用；返回的 guard 离开作用域时还原宽松预算。
-    pub(super) fn tighten_read_budget(&self) -> TightReadBudget<'_> {
-        self.read_stall_ms.store(
-            read_stall_budget(true).as_millis() as u64,
+    /// 临时把 `read` 的停滞预算改成 `budget`，guard 离开作用域时还原成改之前的值。
+    ///
+    /// 改完立刻唤醒等待者：正在等的那次读每轮都会重新读这个预算（见 read 的循环），
+    /// 所以收紧能当场生效，而不是只对下一次读生效。
+    pub(super) fn with_read_budget(&self, budget: Duration) -> TightReadBudget<'_> {
+        let previous_ms = self.read_stall_ms.swap(
+            budget.max(Duration::from_millis(1)).as_millis() as u64,
             Ordering::Relaxed,
         );
-        TightReadBudget { buffer: self }
+        self.available.notify_all();
+        TightReadBudget {
+            buffer: self,
+            previous_ms,
+        }
+    }
+
+    /// 音频命令线程即将同步读这条流之前收紧预算（见 AUDIO_THREAD_READ_STALL_TIMEOUT）。
+    pub(super) fn tighten_read_budget(&self) -> TightReadBudget<'_> {
+        self.with_read_budget(read_stall_budget(true))
     }
 
     pub(super) fn append(&self, chunk: &[u8]) -> Result<(), String> {
@@ -400,11 +412,11 @@ impl Read for StreamingReader {
             return Ok(read_len);
         }
 
-        // 本次读请求的停滞上限（见 STREAMING_READ_STALL_TIMEOUT）：一次成功的读会
+        // 本次读请求的等待起点（见 STREAMING_READ_STALL_TIMEOUT）：一次成功的读会
         // 立刻 return，所以这个时限管的正是「一直没有数据可取」那种情况。
-        // 音频命令线程建解码器期间，预算被 tighten_read_budget 收到 3s。
-        let stall_deadline = Instant::now()
-            + Duration::from_millis(self.shared.read_stall_ms.load(Ordering::Relaxed));
+        // 预算每轮重新取：这样音频线程在等待中途收紧预算，正在等的那次读也能早退出
+        // （否则收紧只对下一次读生效，而拖住命令队列的恰恰是这一次）。
+        let wait_started = Instant::now();
         let mut gap_deadline: Option<Instant> = None;
 
         loop {
@@ -456,6 +468,9 @@ impl Read for StreamingReader {
             // 兜底：数据、错误、完结三种信号都没来，且当前请求仍是最新（没被取消）
             // 时，绝不能继续等下去——占用的是音频线程，整条命令队列都会停摆
             let now = Instant::now();
+            // 预算每轮现取：音频线程在等待中途收紧预算时，正在等的那次读也能提前退出
+            let stall_deadline =
+                wait_started + Duration::from_millis(self.shared.read_stall_ms.load(Ordering::Relaxed));
             if gap_deadline.is_none()
                 && should_tighten_wait_for_unreachable_gap(
                     self.position.saturating_sub(data_len),
@@ -950,6 +965,34 @@ mod tests {
             shared.debug_read_stall_ms(),
             read_stall_budget(false).as_millis() as u64,
             "读完了也要还原"
+        );
+    }
+
+    /// 收紧必须**当场**生效：已经在等的那次读也要提前撒手。
+    /// 拖住命令队列的恰恰是那一次等待，只对下一次读生效等于没改。
+    #[test]
+    fn tightening_the_budget_releases_a_read_that_is_already_waiting() {
+        let shared = StreamingBuffer::new(Some(4096), None);
+        let latest_request_id = Arc::new(AtomicU64::new(1));
+        let reader = StreamingReader::new(Arc::clone(&shared), latest_request_id, 1);
+        let waiter = std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut output = [0u8; 4];
+            reader.read(&mut output)
+        });
+        // 让它先进入宽松预算的等待（25s，自己不会醒）
+        std::thread::sleep(Duration::from_millis(300));
+
+        let started = Instant::now();
+        let guard = shared.with_read_budget(Duration::from_millis(200));
+        let result = waiter.join().expect("等待中的读线程不该 panic");
+        let elapsed = started.elapsed();
+        drop(guard);
+
+        assert!(result.is_err(), "没有数据时这次读必须报错退出");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "收紧要立刻作用在正在等的那次读上，实际又等了 {elapsed:?}"
         );
     }
 

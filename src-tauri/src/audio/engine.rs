@@ -140,7 +140,7 @@ fn handle_command(
 }
 
 /// 命令种类标签，只用于日志归因（不改变任何行为）。
-fn command_kind(command: &AudioCommand) -> &'static str {
+pub(super) fn command_kind(command: &AudioCommand) -> &'static str {
     match command {
         AudioCommand::BeginLoad { .. } => "BeginLoad",
         AudioCommand::Load { .. } => "Load",
@@ -596,8 +596,15 @@ fn set_output_device_inner(
     if selected_device_id == inner.selected_device_id {
         return Ok(snapshot_inner(inner));
     }
+    let target_label = selected_device_id
+        .clone()
+        .unwrap_or_else(|| "<默认设备>".to_string());
 
+    // 这条命令是现场量到「占住音频线程 20~30s」的那一条，所以分段计时写进日志：
+    // 开新流多久、在新流上重建管线多久。旧流的释放不再计入（挪到后台线程去了）。
+    let open_started = Instant::now();
     let (stream, handle) = open_output(selected_device_id.as_deref())?;
+    let open_elapsed = open_started.elapsed();
 
     let track_position = inner
         .track
@@ -615,7 +622,9 @@ fn set_output_device_inner(
     let previous_handle = inner.handle.replace(handle);
     inner.selected_device_id = selected_device_id;
 
+    let mut rebuild_elapsed = Duration::ZERO;
     if inner.track.is_some() {
+        let rebuild_started = Instant::now();
         let duration = match rebuild_sink(inner, track_position, was_playing, false) {
             Ok(duration) => duration,
             Err(err) => {
@@ -624,9 +633,15 @@ fn set_output_device_inner(
                 inner.handle = previous_handle;
                 inner.stream = previous_stream;
                 inner.selected_device_id = previous_device_id;
+                crate::log_warn!(
+                    "[AUDIO] 切换输出设备 {target_label} 失败：开新流 {:.2}s，重建管线 {:.2}s，{err}",
+                    open_elapsed.as_secs_f64(),
+                    rebuild_started.elapsed().as_secs_f64()
+                );
                 return Err(err);
             }
         };
+        rebuild_elapsed = rebuild_started.elapsed();
 
         if let Some(track) = inner.track.as_mut() {
             track.duration = duration.or(track.duration);
@@ -640,8 +655,15 @@ fn set_output_device_inner(
         }
     }
 
-    drop(previous_handle);
-    drop(previous_stream);
+    // 结束旧设备只能在这条线程上做（cpal::Stream 是 !Send 的），所以要量：
+    // 它的 Drop 会等回调线程收尾，而回调线程可能正卡在那条没数据的流里。
+    let release_elapsed = super::device::release_output(previous_handle, previous_stream);
+    crate::log_info!(
+        "[AUDIO] 切换输出设备 {target_label}：开新流 {:.2}s，重建管线 {:.2}s，结束旧设备 {:.2}s",
+        open_elapsed.as_secs_f64(),
+        rebuild_elapsed.as_secs_f64(),
+        release_elapsed.as_secs_f64()
+    );
     Ok(snapshot_inner(inner))
 }
 

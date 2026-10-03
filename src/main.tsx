@@ -6,9 +6,14 @@ import { SWRConfig } from "swr";
 import App from "./App";
 import "./index.css";
 import { initGlobalShortcuts } from "./lib/shortcuts/global-shortcut-manager";
+import { installLogFileConsoleBridge } from "./lib/logBridge";
 import { initLocalMusic } from "./lib/store/localMusicStore/localMusicStore";
 import { initSettings } from "./lib/store/settingStore/settingStore";
 import { createSwrLruCache } from "./lib/utils/swr-cache";
+
+// 前端的 warn/error 要落到安装目录的日志文件里：release 包里没有 devtools，
+// 切歌失败原本只在 console 喊一声就消失了（实测装机的日志里连一行播放相关记录都没有）
+installLogFileConsoleBridge();
 
 const settingsReady = initSettings();
 settingsReady.then(() => initGlobalShortcuts());

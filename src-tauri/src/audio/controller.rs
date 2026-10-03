@@ -9,7 +9,7 @@ use std::{
 use tauri::AppHandle;
 
 use super::command::{AudioCommand, ResponseTx};
-use super::engine::{run_audio_thread, safe_duration_from_secs};
+use super::engine::{command_kind, run_audio_thread, safe_duration_from_secs};
 use super::snapshot::{current_snapshot, duration_secs};
 use super::source::{probe_source_duration, resolve_audio_source};
 use super::state::AudioThreadBusy;
@@ -86,6 +86,13 @@ pub async fn player_load(
     // 表现为快速切歌后卡在加载、音频仍停在更早那首歌上。用 fetch_max 保证
     // 代次永远取到见过的最大值。
     state.latest_request_id.fetch_max(request_id, Ordering::SeqCst);
+    let started = Instant::now();
+    // 每一次点歌都留一行：装到 D:\APP\WispMusic\logs 的 release 包以前只有
+    // 「命令跑了 2s 以上」这一类事后日志，切歌没反应时文件里连一行都没写过。
+    crate::log_info!(
+        "[AUDIO] 载入 #{request_id}（autoplay={autoplay}）源：{}",
+        source_label(&source)
+    );
 
     // 等待挪到 blocking 线程后闭包必须是 'static，命令带的 AppHandle 要整体交出
     let begin_app = app.clone();
@@ -94,7 +101,10 @@ pub async fn player_load(
         request_id,
         respond_to,
     })
-    .await?;
+    .await
+    .inspect_err(|err| {
+        crate::log_warn!("[AUDIO] 载入 #{request_id} 停在 BeginLoad：{err}");
+    })?;
 
     let resolved_source = resolve_audio_source(
         &app,
@@ -106,8 +116,18 @@ pub async fn player_load(
     )
     .await;
     let Some(source) = (match resolved_source {
-        Ok(source) => source,
+        Ok(source) => {
+            crate::log_info!(
+                "[AUDIO] 载入 #{request_id} 音源就绪（{:.1}s）",
+                started.elapsed().as_secs_f64()
+            );
+            source
+        }
         Err(err) => {
+            crate::log_warn!(
+                "[AUDIO] 载入 #{request_id} 取音源失败（{:.1}s）：{err}",
+                started.elapsed().as_secs_f64()
+            );
             if !is_stale_request(&state.latest_request_id, request_id) {
                 let stop_app = app.clone();
                 let _ = send_command_async(state, move |respond_to| AudioCommand::Stop {
@@ -120,10 +140,14 @@ pub async fn player_load(
             return Err(err);
         }
     }) else {
+        // 音源解析判定「已被更新的点击取代」：不发 Load，界面停在原地
+        crate::log_warn!("[AUDIO] 载入 #{request_id} 被取代，取音源时已放弃");
         return Ok(current_snapshot(&state.snapshot));
     };
 
     if is_stale_request(&state.latest_request_id, request_id) {
+        crate::log_warn!("[AUDIO] 载入 #{request_id} 已过期（原生代次已到 {}），不下发 Load",
+            state.latest_request_id.load(Ordering::SeqCst));
         return Ok(current_snapshot(&state.snapshot));
     }
 
@@ -137,7 +161,42 @@ pub async fn player_load(
         respond_to,
     })
     .await
+    .inspect_err(|err| {
+        crate::log_warn!(
+            "[AUDIO] 载入 #{request_id} 失败（{:.1}s）：{err}",
+            started.elapsed().as_secs_f64()
+        );
+    })
+    .inspect(|snapshot| {
+        crate::log_info!(
+            "[AUDIO] 载入 #{request_id} 完成（{:.1}s），时长 {:.1}s",
+            started.elapsed().as_secs_f64(),
+            snapshot.duration
+        );
+    })
 }
+
+/// 写进日志的源标识：**去掉 query 与 fragment**（第三方直链的 token 都在 query 里，
+/// 不该落到用户机器上的明文日志），过长时只留尾部以便认出是哪个源。
+fn source_label(source: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    let head: String = source
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(source)
+        .chars()
+        .collect();
+    let count = head.chars().count();
+    if count <= MAX_CHARS {
+        return head;
+    }
+    let tail = head
+        .chars()
+        .skip(count - MAX_CHARS / 2)
+        .collect::<String>();
+    format!("…{tail}")
+}
+
 
 pub async fn player_preload(
     app: AppHandle,
@@ -332,26 +391,68 @@ fn is_stale_request(latest_request_id: &AtomicU64, request_id: u64) -> bool {
     latest_request_id.load(Ordering::SeqCst) != request_id
 }
 
-/// 入队一条命令，返回等回包用的接收端。
-fn enqueue_command<F>(state: &AudioState, build: F) -> Result<mpsc::Receiver<Result<AudioSnapshot, String>>, String>
+/// 入队一条命令，返回命令种类标签与等回包用的接收端。
+///
+/// 标签是入队之后就地上从命令本身取的：超时那条日志要说的正是「哪条命令没回包」，
+/// 让 13 个调用点各写一遍反而会写歪。
+fn enqueue_command<F>(
+    state: &AudioState,
+    build: F,
+) -> Result<(&'static str, mpsc::Receiver<Result<AudioSnapshot, String>>), String>
 where
     F: FnOnce(ResponseTx) -> AudioCommand,
 {
     let (respond_to, response) = mpsc::channel();
+    let command = build(respond_to);
+    let kind = command_kind(&command);
     // 队列满说明音频线程已被长操作占住且积压到上限：直接拒绝这条新命令，
     // 而不是让调用方 park 在 send 上继续堆积
-    state.tx.try_send(build(respond_to)).map_err(|err| match err {
+    state.tx.try_send(command).map_err(|err| match err {
         mpsc::TrySendError::Full(_) => {
+            crate::log_warn!("[AUDIO] {kind} 被丢弃：命令队列已满（音频线程长时间没腾出手）");
             "audio command queue is full, request dropped".to_string()
         }
         mpsc::TrySendError::Disconnected(_) => "audio thread is not available".to_string(),
     })?;
-    Ok(response)
+    Ok((kind, response))
 }
 
-fn map_response_error(err: mpsc::RecvTimeoutError) -> String {
+/// 等回包超时/失联时的日志。
+///
+/// 音频线程自己那条「命令占住音频线程 Ns」的 warn 必须等命令**跑完**才打得出来，
+/// 一旦是永久停摆就一行都不会有；这里是从队列外面往里看，卡着的当下就能留下证据
+/// ——包括「线程看着空闲却不回包」（= 命令积压在队列里根本没被执行到）这种形态。
+fn log_response_timeout(state: &AudioState, kind: &'static str) {
+    let secs = AUDIO_COMMAND_RESPONSE_TIMEOUT.as_secs();
+    let Ok(busy) = state.busy.lock() else { return };
+    let loop_age = Instant::now()
+        .saturating_duration_since(busy.looped_at)
+        .as_secs_f64();
+    match &busy.current {
+        Some((current, started)) => crate::log_warn!(
+            "[AUDIO] {kind} 等满 {secs}s 没回包：音频线程正被 {current} 占住 {:.1}s（心跳 {:.2}s 前，已跑 {} 轮）",
+            started.elapsed().as_secs_f64(),
+            loop_age,
+            busy.loops
+        ),
+        None => crate::log_warn!(
+            "[AUDIO] {kind} 等满 {secs}s 没回包，但音频线程看着空闲（心跳 {:.2}s 前，已跑 {} 轮——命令可能压在队列里没被执行）",
+            loop_age,
+            busy.loops
+        ),
+    }
+}
+
+fn map_response_error(
+    state: &AudioState,
+    kind: &'static str,
+    err: mpsc::RecvTimeoutError,
+) -> String {
     match err {
-        mpsc::RecvTimeoutError::Timeout => "audio thread did not respond in time".to_string(),
+        mpsc::RecvTimeoutError::Timeout => {
+            log_response_timeout(state, kind);
+            "audio thread did not respond in time".to_string()
+        }
         mpsc::RecvTimeoutError::Disconnected => "audio thread dropped response".to_string(),
     }
 }
@@ -362,9 +463,10 @@ fn send_command<F>(state: &AudioState, build: F) -> Result<AudioSnapshot, String
 where
     F: FnOnce(ResponseTx) -> AudioCommand,
 {
-    enqueue_command(state, build)?
+    let (kind, response) = enqueue_command(state, build)?;
+    response
         .recv_timeout(AUDIO_COMMAND_RESPONSE_TIMEOUT)
-        .map_err(map_response_error)?
+        .map_err(|err| map_response_error(state, kind, err))?
 }
 
 /// 异步命令用的等待版本：**必须**把 `recv_timeout` 挪出 async worker。
@@ -381,19 +483,45 @@ async fn send_command_async<F>(
 where
     F: FnOnce(ResponseTx) -> AudioCommand + Send + 'static,
 {
-    let response = enqueue_command(state, build)?;
+    let (kind, response) = enqueue_command(state, build)?;
     tauri::async_runtime::spawn_blocking(move || {
         response.recv_timeout(AUDIO_COMMAND_RESPONSE_TIMEOUT)
     })
     .await
     .map_err(|err| format!("audio command wait task failed: {err}"))?
-    .map_err(map_response_error)?
+    .map_err(|err| map_response_error(state, kind, err))?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 日志里的源标识绝不能带上 query：第三方直链的 token/签名都在 query 里，
+    /// 而这份文件就躺在用户的安装目录里。本地路径（无 query）要原样留着才认得出文件。
+    #[test]
+    fn source_label_strips_query_but_keeps_the_path() {
+        assert_eq!(
+            source_label("https://m8.music.126.net/ym/20261003/abc.ts?sign=SECRET&e=1"),
+            "https://m8.music.126.net/ym/20261003/abc.ts"
+        );
+        assert_eq!(source_label("https://a.test/x.mp3#frag"), "https://a.test/x.mp3");
+        assert_eq!(
+            source_label("D:\\音乐\\无损\\周杰伦-晴天.flac"),
+            "D:\\音乐\\无损\\周杰伦-晴天.flac"
+        );
+    }
+
+    /// 超长要按**字符**折半截断，不能按字节切片：中文路径按字节切会踩在多字节
+    /// 中间直接 panic——日志函数本身把音频线程/命令打崩是不可接受的。
+    #[test]
+    fn source_label_truncates_multibyte_without_panicking() {
+        let long = format!("https://host.test/{}", "中文目录".repeat(60));
+        let label = source_label(&long);
+        assert!(label.starts_with('…'), "超时应以省略号开头，实际 {label}");
+        assert!(label.chars().count() <= 96, "折半后仍要落在预算内");
+        // 多字节边界自查：能走到这里就没 panic
+        assert!(long.chars().count() > 96);
+    }
     /// 快速切歌的竞态复现：两条 player_load 的 IPC 到达顺序可能与调用顺序相反。
     /// 代次必须是**单调不减**的，否则一条迟到的旧请求会把代次倒拨，
     /// 导致真正最新的那次请求被 is_stale_request 误判为「被取代」而丢弃——

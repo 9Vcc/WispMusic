@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use rodio::cpal::{
     self,
@@ -13,6 +16,24 @@ pub struct AudioDeviceInfo {
     id: String,
     name: String,
     is_default: bool,
+}
+
+/// 结束一台输出设备，并把耗时交回调用方。
+///
+/// 为什么不能像其它资源那样丢给后台线程：`cpal::Stream` 是 `!Send` 的（它的 Drop 必须
+/// 回到创建它的那个 COM 套间），所以这一步只能留在音频命令线程上做。而它的 Drop 要等
+/// 回调线程收尾——回调线程此刻可能正卡在我们那条流的 `read` 里等网络数据。
+/// 于是「切换输出设备」可能替一条僵死的流等到超时为止（现场量到过 30s 级）。
+/// 这里只负责把它量出来：慢到一定程度就落一条 warn，好让日志能区分「开新流慢」
+/// 「重建管线慢」和「旧设备下不去」这三种形态。
+pub(super) fn release_output(
+    handle: Option<OutputStreamHandle>,
+    stream: Option<OutputStream>,
+) -> Duration {
+    let started = Instant::now();
+    drop(handle);
+    drop(stream);
+    started.elapsed()
 }
 
 pub(super) fn normalize_device_id(device_id: Option<String>) -> Option<String> {
