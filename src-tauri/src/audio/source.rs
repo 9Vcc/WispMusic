@@ -22,7 +22,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 #[derive(Clone)]
 pub(super) enum AudioSource {
@@ -700,12 +700,9 @@ pub(super) fn enforce_native_audio_cache_limit(
 }
 
 fn native_audio_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|err| format!("resolve app cache dir failed: {err}"))?;
-    dir.push("native_audio");
-    Ok(dir)
+    // 解析逻辑收敛到 cache.rs：那里同时承载用户自定义缓存根目录的覆盖，
+    // 两处各写一份会让「改了缓存位置但原生缓存仍写旧目录」复发
+    crate::cache::native_audio_cache_dir(app).ok_or_else(|| "No cache dir".to_string())
 }
 
 fn native_audio_cache_files(app: &AppHandle) -> Result<Vec<(PathBuf, u64, SystemTime)>, String> {
