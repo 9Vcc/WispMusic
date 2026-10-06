@@ -14,6 +14,10 @@ import {
 	type ShortcutAction,
 	type ShortcutBindings,
 } from "@/lib/constants/shortcuts";
+import {
+	resetAudioCacheDir,
+	setAudioCacheDir,
+} from "@/lib/player/audio-cache-dir";
 import { type AudioDeviceInfo, corePlayer } from "@/lib/player/corePlayer";
 import {
 	type AccentTheme,
@@ -101,6 +105,8 @@ export type OutputDeviceProfiles = Record<string, OutputDeviceProfile>;
 export interface AudioSettings {
 	preferQuality: QualityKey;
 	maxCacheSize: number;
+	/** 自定义缓存目录（空字符串表示使用系统默认位置） */
+	cacheDir: string;
 	outputDeviceId: string | null;
 	outputDeviceProfiles: OutputDeviceProfiles;
 	replayGainEnabled: boolean;
@@ -206,6 +212,7 @@ const defaultOutputDeviceProfiles: OutputDeviceProfiles = {
 const defaultAudioSettings: AudioSettings = {
 	preferQuality: "l",
 	maxCacheSize: 10,
+	cacheDir: "",
 	outputDeviceId: null,
 	outputDeviceProfiles: defaultOutputDeviceProfiles,
 	replayGainEnabled: true,
@@ -292,6 +299,10 @@ type SettingStore = {
 	resetDesktopLyricColors: () => Promise<void>;
 	setPreferQuality: (quality: QualityKey) => Promise<void>;
 	setMaxCacheSize: (size: number) => Promise<void>;
+	/** 切换缓存目录（原生侧校验可写并迁移旧缓存），成功后写回设置 */
+	setCacheDir: (dir: string) => Promise<void>;
+	/** 恢复缓存到系统默认目录 */
+	resetCacheDir: () => Promise<void>;
 	upsertOutputDeviceProfiles: (devices: AudioDeviceInfo[]) => Promise<void>;
 	updateOutputDeviceProfile: (
 		id: string,
@@ -545,6 +556,26 @@ export const useSettingStore = create<SettingStore>((set, get) => ({
 		await store.save();
 		if (get().audio.maxCacheSize !== size) return;
 		await applyAudioCacheLimit(size);
+	},
+
+	setCacheDir: async (dir) => {
+		const cacheDir = dir.trim();
+		if (!cacheDir || cacheDir === get().audio.cacheDir) return;
+		// 先让原生侧完成校验与迁移，成功后才落设置：
+		// 否则失败时会留下「设置写着新目录、实际仍写在旧目录」的不一致
+		await setAudioCacheDir(cacheDir);
+		const store = await getSettingsStore();
+		set({ audio: { ...get().audio, cacheDir } });
+		await store.set("audio", get().audio);
+		await store.save();
+	},
+
+	resetCacheDir: async () => {
+		await resetAudioCacheDir();
+		const store = await getSettingsStore();
+		set({ audio: { ...get().audio, cacheDir: "" } });
+		await store.set("audio", get().audio);
+		await store.save();
 	},
 
 	upsertOutputDeviceProfiles: async (devices) => {
@@ -843,6 +874,8 @@ function normalizeAudioSettings(
 		: fallbackAudio;
 	return {
 		...audio,
+		// 脏值（手改配置 / 旧版残留）一律落回空串＝系统默认目录
+		cacheDir: typeof audio.cacheDir === "string" ? audio.cacheDir.trim() : "",
 		outputDeviceProfiles: normalizeOutputDeviceProfiles(
 			audio.outputDeviceProfiles,
 		),
@@ -1180,6 +1213,22 @@ function applyLyricTypography(font: FontSettings) {
 	root.style.setProperty("--app-lyric-font-size", `${font.lyricFontSize}px`);
 }
 
+/**
+ * 启动时把用户自定义缓存目录下发给原生侧。
+ *
+ * 设为空串（默认）时不发命令：覆盖根目录是进程级全局量，每次启动都从
+ * `None`（默认位置）开始，无需再「恢复」；只有非空时才需要切过去。
+ */
+async function applyCacheDir(cacheDir: string) {
+	if (!isTauri() || !cacheDir.trim()) return;
+
+	try {
+		await setAudioCacheDir(cacheDir.trim());
+	} catch (error) {
+		console.error("Failed to apply audio cache dir", error);
+	}
+}
+
 async function applyAudioCacheLimit(maxCacheSize: number) {
 	if (!isTauri()) return;
 
@@ -1228,6 +1277,8 @@ export async function initSettings() {
 	applyLyricFont(appearance.font.lyricFontStr);
 	applyLyricTypography(appearance.font);
 	applyAudioEngine(audio);
+	// 缓存目录必须先于上限下发：上限生效时会按目录扫描淘汰，目录没切过去就会扫错地方
+	await applyCacheDir(audio.cacheDir);
 	applyAudioCacheLimit(audio.maxCacheSize).catch((error) => {
 		console.error("Failed to apply audio cache limit", error);
 	});

@@ -1,5 +1,5 @@
-import { clsx, type ClassValue } from "clsx";
-import { Area } from "react-easy-crop";
+import { type ClassValue, clsx } from "clsx";
+import type { Area } from "react-easy-crop";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -24,7 +24,11 @@ export function formatDuration(seconds: number): string {
 export function formatFileSize(size: number): string {
 	if (size < 1024) return `${size}B`;
 	if (size < 1024 * 1024) return `${(size / 1024).toFixed(2)}KB`;
-	return `${(size / (1024 * 1024)).toFixed(2)}MB`;
+	if (size < 1024 * 1024 * 1024)
+		return `${(size / (1024 * 1024)).toFixed(2)}MB`;
+	if (size < 1024 * 1024 * 1024 * 1024)
+		return `${(size / (1024 * 1024 * 1024)).toFixed(2)}GB`;
+	return `${(size / (1024 * 1024 * 1024 * 1024)).toFixed(2)}TB`;
 }
 
 export function foramtBitrate(bitrate: number): string {
