@@ -1,0 +1,26 @@
+阿里巴巴普惠体 3.0 (Alibaba PuHuiTi 3.0)
+=========================================
+
+Copyright (c) Alibaba Group. All rights reserved.
+
+This binary embeds three faces of the Alibaba PuHuiTi 3.0 family, used as the
+application's interface typeface:
+
+  AlibabaPuHuiTi-3-65-Medium.ttf    body text
+  AlibabaPuHuiTi-3-75-SemiBold.ttf  headings
+  AlibabaPuHuiTi-3-85-Bold.ttf      strong emphasis
+
+阿里巴巴普惠体由阿里巴巴集团发布，官方声明为面向全社会免费商用（包括商业
+使用），无需授权、不收取费用，可自由使用、复制、修改与再分发，但不得单独
+出售字体文件本身。
+
+Official source and terms:
+  https://alibabafont.alibaba.com/
+  https://alibabafont.alibaba.com/font-download
+
+商用条款以阿里巴巴官方页面当前公布的为准；本文件只记录随包内嵌的事实与出处，
+不构成对条款的转述或替代。若需在贵司法务流程中归档，请以官方页面公布的原文
+为准。
+
+WispMusic itself is licensed under AGPL-3.0 (see `COPYING`). The embedded font
+is distributed under its own terms above and is not relicensed by AGPL-3.0.

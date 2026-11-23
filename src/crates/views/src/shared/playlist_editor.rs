@@ -1,0 +1,390 @@
+use gpui::prelude::*;
+use gpui::{
+    App, Context, Div, Entity, FocusHandle, Global, PathPromptOptions, Render, SharedString, Task,
+    Window, div,
+};
+use i18n::t;
+use music::Playlist;
+use state::{Addition, CoverEdit, Leaving, Outcome, Shelf, Wisp, Toasts, cover_problem};
+use ui::{ActiveTheme as _, Artwork, Button, Modal, PinKind, TabBar};
+use ui::{Dismiss, FORM_CONTEXT, Field, Form, Input, Submit};
+
+#[derive(Clone)]
+pub(crate) enum Edit {
+    Create {
+        addition: Addition,
+        shelf: Shelf,
+    },
+    /// The name and the cover of an owned playlist.
+    Details(Playlist),
+    Delete(Playlist),
+    Again {
+        playlist: Playlist,
+        track: String,
+        leaving: Option<Leaving>,
+    },
+}
+
+pub(crate) struct PlaylistEditor {
+    edit: Option<Edit>,
+    name: Entity<Input>,
+    /// What saving does to the cover, which the preview already shows.
+    cover: CoverEdit,
+    picking: Option<Task<()>>,
+    focus: FocusHandle,
+    restore: Option<FocusHandle>,
+}
+
+struct Installed(Entity<PlaylistEditor>);
+
+impl Global for Installed {}
+
+impl PlaylistEditor {
+    pub fn entity(cx: &mut App) -> Entity<Self> {
+        if cx.try_global::<Installed>().is_none() {
+            let editor = cx.new(|cx| Self {
+                edit: None,
+                name: cx.new(|cx| Input::new("playlist-name-placeholder", cx)),
+                cover: CoverEdit::Keep,
+                picking: None,
+                focus: cx.focus_handle(),
+                restore: None,
+            });
+            cx.set_global(Installed(editor));
+        }
+        cx.global::<Installed>().0.clone()
+    }
+
+    pub fn open(edit: Edit, window: &mut Window, cx: &mut App) {
+        let editor = Self::entity(cx);
+        editor.update(cx, |this, cx| this.show(edit, window, cx));
+    }
+
+    fn show(&mut self, edit: Edit, window: &mut Window, cx: &mut Context<Self>) {
+        let name = match &edit {
+            Edit::Details(playlist) => playlist.name.clone(),
+            _ => String::new(),
+        };
+        self.restore = window.focused(cx);
+        self.cover = CoverEdit::Keep;
+        self.picking = None;
+        self.name.update(cx, |input, cx| input.set_text(name, cx));
+        match plain(&edit) {
+            true => window.focus(&self.focus, cx),
+            false => self.name.update(cx, |input, cx| input.focus(window, cx)),
+        }
+        self.edit = Some(edit);
+        cx.notify();
+    }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit = None;
+        self.picking = None;
+        if let Some(focus) = self.restore.take() {
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Asks for a picture and shows it in the preview once it passes a quick check. A file
+    /// that fails says why in a toast and leaves the cover as it was.
+    fn choose_cover(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        self.picking = Some(cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let checked = cx
+                .background_spawn({
+                    let path = path.clone();
+                    async move { music::cover::check_file(&path) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match checked {
+                    Ok(()) => this.cover = CoverEdit::Replace(path),
+                    Err(unusable) => Toasts::show(Outcome::Failed, cover_problem(unusable), cx),
+                }
+                this.picking = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn choose_shelf(&mut self, chosen: Shelf, cx: &mut Context<Self>) {
+        if let Some(Edit::Create { shelf, .. }) = &mut self.edit {
+            *shelf = chosen;
+            cx.notify();
+        }
+    }
+
+    fn remove_cover(&mut self, cx: &mut Context<Self>) {
+        self.cover = CoverEdit::Remove;
+        cx.notify();
+    }
+
+    /// The cover the preview shows: the picked file, nothing once removed, and otherwise the
+    /// playlist's current cover as the library knows it.
+    fn preview(&self, playlist: &Playlist, cx: &App) -> Option<SharedString> {
+        match &self.cover {
+            CoverEdit::Replace(path) => Some(format!("file://{}", path.display()).into()),
+            CoverEdit::Remove => None,
+            CoverEdit::Keep => Wisp::global(cx)
+                .library
+                .read(cx)
+                .playlist(&playlist.id)
+                .unwrap_or(playlist)
+                .cover
+                .clone()
+                .map(Into::into),
+        }
+    }
+
+    fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.edit.take() else {
+            return;
+        };
+        if let Some(focus) = self.restore.take() {
+            window.focus(&focus, cx);
+        }
+        let name = self.name.read(cx).text().trim().to_owned();
+        let library = Wisp::global(cx).library.clone();
+
+        match edit {
+            Edit::Create { addition, shelf } if !name.is_empty() => {
+                library.update(cx, |library, cx| {
+                    library.create_playlist(name, addition, shelf, cx);
+                })
+            }
+            Edit::Details(playlist) => {
+                let renamed = (!name.is_empty() && name != playlist.name).then_some(name);
+                let cover = std::mem::replace(&mut self.cover, CoverEdit::Keep);
+                library.update(cx, |library, cx| {
+                    library.edit_playlist(playlist.id, renamed, cover, cx);
+                })
+            }
+            Edit::Delete(playlist) => library.update(cx, |library, cx| {
+                library.delete_playlist(playlist.id, cx);
+            }),
+            Edit::Again {
+                playlist,
+                track,
+                leaving,
+            } => library.update(cx, |library, cx| match leaving {
+                Some(leaving) => library.move_to_playlist(playlist.id, track, leaving, cx),
+                None => library.add_to_playlist(playlist.id, track, cx),
+            }),
+            _ => {}
+        }
+        cx.notify();
+    }
+}
+
+fn plain(edit: &Edit) -> bool {
+    matches!(edit, Edit::Delete(_) | Edit::Again { .. })
+}
+
+impl PlaylistEditor {
+    /// The cover preview with its buttons beside the name field. The cover buttons show only
+    /// where the provider takes a cover.
+    /// The playlist's name as a form of one field. Enter and Escape go on to the dialog around it.
+    fn name_form(&self, cx: &App) -> Form {
+        Form::new("playlist-name-form").field(Field::new(&self.name, cx))
+    }
+
+    /// Where a blank new playlist goes, the streaming account or the local files. It shows only
+    /// while both are there to take one, since songs already picked decide it for themselves.
+    fn shelves(&self, edit: &Edit, cx: &mut Context<Self>) -> Option<Div> {
+        let Edit::Create { addition, shelf } = edit else {
+            return None;
+        };
+        let session = Wisp::global(cx).session.read(cx);
+        let provider = session
+            .provider_name()
+            .filter(|_| session.authenticated())?;
+        if !addition.is_empty() || session.local_paths().is_empty() {
+            return None;
+        }
+        let chosen = *shelf;
+        let options = [
+            (
+                "playlist-shelf-streaming",
+                SharedString::from(provider),
+                Shelf::Streaming,
+            ),
+            (
+                "playlist-shelf-local",
+                t!("playlist-create-local"),
+                Shelf::Local,
+            ),
+        ];
+        let bar = TabBar::new("playlist-shelf")
+            .name(t!("playlist-create-shelf"))
+            .flex_none()
+            .items(options.map(|(id, label, option)| {
+                Button::new(id)
+                    .label(label)
+                    .small()
+                    .ghost()
+                    .selected(option == chosen)
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_shelf(option, cx)))
+            }));
+        // The modal sets each child in a block that would stretch the bar to its full width.
+        Some(div().flex().child(bar))
+    }
+
+    fn details(&self, playlist: &Playlist, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
+        let covers = Wisp::global(cx)
+            .session
+            .read(cx)
+            .capabilities_of(Shelf::of(&playlist.id))
+            .playlist_covers;
+        let removable = self.cover != CoverEdit::Remove;
+        div()
+            .flex()
+            .gap(theme.metrics.pad)
+            .child(
+                Artwork::new(self.preview(playlist, cx))
+                    .size(theme.metrics.cover)
+                    .corner_radius(theme.radius)
+                    .fallback(PinKind::Playlist.icon())
+                    .flex_none(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(self.name_form(cx))
+                    .when(covers, |column| {
+                        column.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    Button::new("choose-playlist-cover")
+                                        .outline()
+                                        .small()
+                                        .icon("icons/image.svg")
+                                        .label(t!("playlist-cover-choose"))
+                                        .disabled(self.picking.is_some())
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.choose_cover(cx)),
+                                        ),
+                                )
+                                .when(removable, |row| {
+                                    row.child(
+                                        Button::new("remove-playlist-cover")
+                                            .ghost()
+                                            .small()
+                                            .icon("icons/image-off.svg")
+                                            .label(t!("playlist-cover-remove"))
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.remove_cover(cx)),
+                                            ),
+                                    )
+                                }),
+                        )
+                    }),
+            )
+    }
+}
+
+impl Render for PlaylistEditor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(edit) = self.edit.clone() else {
+            return div().into_any_element();
+        };
+        let theme = *cx.theme();
+        let deleting = matches!(edit, Edit::Delete(_));
+        let asking = plain(&edit);
+        let title = match &edit {
+            Edit::Create { .. } => t!("playlist-create-title"),
+            Edit::Details(_) => t!("playlist-edit-title"),
+            Edit::Delete(_) => t!("playlist-delete-title"),
+            Edit::Again { .. } => t!("playlist-again-title"),
+        };
+        // A blank new playlist can come from an M3U file instead, which the local shelf reads.
+        let import =
+            matches!(&edit, Edit::Create { addition, .. } if addition.is_empty()).then(|| {
+                Button::new("import-playlist")
+                    .ghost()
+                    .small()
+                    .icon("icons/file-music.svg")
+                    .label(t!("menu-import-playlist"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close(window, cx);
+                        crate::shared::local::import_playlist(cx);
+                    }))
+            });
+        let shelves = self.shelves(&edit, cx);
+        let detail = match &edit {
+            Edit::Delete(playlist) => Some(t!("playlist-delete-confirm", name = &playlist.name)),
+            Edit::Again { playlist, .. } => {
+                Some(t!("playlist-again-confirm", name = &playlist.name))
+            }
+            _ => None,
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .key_context(FORM_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                cx.stop_propagation();
+                this.close(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Submit, window, cx| {
+                cx.stop_propagation();
+                this.apply(window, cx);
+            }))
+            .child(
+                Modal::new("playlist-editor", title)
+                    .w(theme.metrics.cover * 2.8)
+                    .when_some(detail, Modal::detail)
+                    .when_some(import, Modal::trailing)
+                    .when_some(shelves, Modal::child)
+                    .map(|modal| match &edit {
+                        Edit::Details(playlist) => modal.child(self.details(playlist, cx)),
+                        _ if asking => modal,
+                        _ => modal.child(self.name_form(cx)),
+                    })
+                    .action(
+                        Button::new("cancel-playlist-edit")
+                            .ghost()
+                            .label(t!("common-cancel"))
+                            .on_click(cx.listener(|this, _, window, cx| this.close(window, cx))),
+                    )
+                    .action(
+                        Button::new("apply-playlist-edit")
+                            .when_else(
+                                deleting,
+                                |button| button.destructive(),
+                                |button| button.primary(),
+                            )
+                            .label(match &edit {
+                                Edit::Delete(_) => t!("common-delete"),
+                                Edit::Again { .. } => t!("playlist-again-add"),
+                                _ => t!("common-save"),
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx))),
+                    )
+                    .on_dismiss(cx.listener(|this, _, window, cx| this.close(window, cx))),
+            )
+            .into_any_element()
+    }
+}

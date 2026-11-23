@@ -1,0 +1,1663 @@
+use gpui::{AnyView, Context, Entity, MouseButton, NavigationDirection, Render, Task};
+use gpui::{App, Font, FontFallbacks, Pixels, SharedString, StyleRefinement, font, prelude::*};
+use gpui::{Window, deferred, div};
+use input::{
+    CloseWindow, MinimizeWindow, NavigateBack, NavigateForward, OpenFilter, OpenSearch,
+    OpenSettings, Refresh, ToggleFullscreen, ToggleLyrics, TogglePowerbar, ToggleQueue,
+    ToggleWindowFullscreen, ZoomWindow,
+};
+use router::{Destination, NavigationEvent, back, forward, navigate};
+use state::{
+    ArtistDetail, Detail, GenreDetails, Genres, HistoryState, Home, Io, Library, LibraryState,
+    Network, Playback, Profile, Queue, Reconnected, SYSTEM_FONT, Scan, Search, Session,
+    SessionState, Shelf, SideTab, SongDetail, Wisp,
+};
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use ui::WindowFrame;
+use ui::{
+    ActiveTheme as _, Dismiss, Entrance, INPUT_CONTEXT, Look, Springs, Sprung, Stillness, Theme,
+    ThemeKind, Themed, clear_listing,
+};
+
+use crate::chrome::{
+    Busy, PlayerBar, ThemeInvite, TitleBar,
+    TitleBarEvent, TitleBarOptions, ToastStack, Toolbar, Tooled,
+};
+use crate::screens::search::SearchView;
+use crate::screens::picks::{DailyEmpty, RadioView};
+use crate::screens::settings::SettingsHeader;
+use crate::shared::ambient::{self, Ambient};
+use crate::shared::confirm::Confirm;
+use crate::shared::playlist_editor::PlaylistEditor;
+use crate::shared::powerbar::{Powerbar, PowerbarEvent};
+use crate::shared::smart_playlist::SmartPlaylistEditor;
+use crate::shared::tag_editor::TagEditor;
+use crate::shared::tracks::{LIBRARY_COLUMNS, album_columns};
+use crate::shared::transport::{CoverAway, CoverFade, ShellSwap};
+use crate::shells::Shell;
+use crate::shells::workspace::Workspace;
+use crate::{
+    Adaptive, ArtistView, DetailView, EqualizerView, FullscreenView, GenreView, HistoryView,
+    HomeView, LibraryView, LoginView, SettingsView, SongView, UserView,
+};
+
+/// How much smaller than its size the fullscreen player starts as it opens, zooming up to fill
+/// the window.
+const SHELL_ZOOM: f32 = 0.03;
+/// How close the opening zoom comes to its end before it counts as landed.
+const SHELL_ZOOM_REST: f32 = 1e-3;
+/// The paint layer toasts take. Dialogs paint at 0 and menus at 1, so a toast shows over an
+/// open dialog and a menu opened after it still shows over the toast.
+const TOAST_LAYER: usize = 1;
+
+struct Screens {
+    home: Entity<HomeView>,
+    radio: Option<Entity<RadioView>>,
+    /// [wisp] 每日推荐还没有曲子时的空态页。
+    daily_empty: Option<Entity<DailyEmpty>>,
+    history: Entity<HistoryView>,
+    library: Entity<LibraryView>,
+    artist: Option<Entity<ArtistView>>,
+    artist_detail: Option<Entity<ArtistDetail>>,
+    album: Option<Entity<DetailView>>,
+    album_detail: Option<Entity<Detail>>,
+    song: Entity<SongView>,
+    song_detail: Entity<SongDetail>,
+    user: Entity<UserView>,
+    user_profile: Entity<Profile>,
+    playlist: Option<Entity<DetailView>>,
+    playlist_detail: Option<Entity<Detail>>,
+    search: Entity<SearchView>,
+    genres: Entity<Genres>,
+    genre: Option<Entity<GenreView>>,
+    genre_detail: Option<Entity<GenreDetails>>,
+    /// The settings pages' view, whose search the settings header draws.
+    settings: Entity<SettingsView>,
+    /// The search field and page tabs floating over every settings page.
+    settings_header: Entity<SettingsHeader>,
+    equalizer: Entity<EqualizerView>,
+    /// Whether a settings destination was on show after the last move, so the settings view
+    /// hears when settings open and close.
+    settings_open: bool,
+}
+
+struct Shells {
+    workspace: Entity<Workspace>,
+    fullscreen: Entity<FullscreenView>,
+}
+
+/// The dialogs a track, playback or account action raises. The root draws them over whichever
+/// shell is up, so one raised from the fullscreen player opens there.
+struct Dialogs {
+    playlist_editor: Entity<PlaylistEditor>,
+    smart_playlist_editor: Entity<SmartPlaylistEditor>,
+    tag_editor: Entity<TagEditor>,
+    confirm: Entity<Confirm>,
+}
+
+impl Dialogs {
+    fn new(cx: &mut App) -> Self {
+        Self {
+            playlist_editor: PlaylistEditor::entity(cx),
+            smart_playlist_editor: SmartPlaylistEditor::entity(cx),
+            tag_editor: TagEditor::entity(cx),
+            confirm: Confirm::entity(cx),
+        }
+    }
+
+    fn views(&self) -> [AnyView; 4] {
+        [
+            self.playlist_editor.clone().into(),
+            self.smart_playlist_editor.clone().into(),
+            self.tag_editor.clone().into(),
+            self.confirm.clone().into(),
+        ]
+    }
+}
+
+/// Which shell fills the window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootView {
+    Workspace,
+    Fullscreen,
+}
+
+impl RootView {
+    /// The shell that draws `destination`.
+    fn of(destination: &Destination) -> Self {
+        match destination {
+            Destination::Fullscreen => Self::Fullscreen,
+            _ => Self::Workspace,
+        }
+    }
+}
+
+/// What a shell on its way out stands on, since neither shell paints a background of its own.
+enum Ground {
+    /// The page colour of the theme it wore.
+    Page,
+    /// The ambient field fullscreen was drawn over.
+    Field(Entity<Ambient>),
+}
+
+enum Focus {
+    Search,
+    Workspace,
+    Fullscreen,
+}
+
+pub struct Root {
+    session: Entity<Session>,
+    playback: Entity<Playback>,
+    io: Io,
+    login: Entity<LoginView>,
+    title_bar: Entity<TitleBar>,
+    ambient: Entity<Ambient>,
+    /// The question before a Jam link is joined, drawn over whichever shell is up so a link
+    /// opened in fullscreen is answered there.
+    /// The question before a linked theme is installed, drawn over whichever shell is up.
+    theme_invite: Entity<ThemeInvite>,
+    /// The quick search, drawn over whichever shell is up so it opens in fullscreen too.
+    powerbar: Entity<Powerbar>,
+    dialogs: Dialogs,
+    /// The toasts, hung above the player bar or the fullscreen dock, whichever shell is up.
+    toasts: Entity<ToastStack>,
+    shells: Shells,
+    view: RootView,
+    /// [wisp] 每日推荐页上一次展示的数据签名；相同就不重建详情，滚动与选中不被打断。
+    daily_signature: Option<(usize, Option<String>)>,
+    /// Whether the home page already has a feed, so its skeleton-to-content change is animated
+    /// once rather than on every notify while the page is populated.
+    home_loaded: bool,
+    signing_in: bool,
+    toolbar: Option<Entity<Toolbar>>,
+    pending: Option<Focus>,
+    navigation_transition: Option<Task<()>>,
+    /// The entrance the shell plays as the window moves from one shell to another.
+    shell_entrance: Option<Entrance>,
+    /// How much of the fullscreen player its opening still hides, springing from 1 as it opens
+    /// to 0, where it lets go. The player fades in as it zooms up from a little smaller.
+    shell_zoom: Option<Sprung>,
+    /// How much of the fullscreen player is still showing over the workspace it gave way to,
+    /// springing from 1 as it closes to 0.
+    shell_leave: Option<Sprung>,
+    /// Whether the closing player has faded out and draws one last frame, in which the player
+    /// bar takes its cover back under the one that just landed on it.
+    shell_left: bool,
+    /// The OS fullscreen move the next render owes the fullscreen view, true as it opens and
+    /// false as it closes.
+    os_follow: Option<bool>,
+    /// Whether the window is in OS fullscreen because opening the fullscreen view put it there.
+    os_entered: bool,
+    /// The theme the shell wore when the window last moved off it. Fullscreen wears its own
+    /// over the ambient field, so the shell fading out keeps this one while the shell coming in
+    /// already wears the window's.
+    parted: Option<Theme>,
+    screens: Screens,
+    adaptive: Entity<Adaptive>,
+    background: Option<gpui::WindowBackgroundAppearance>,
+    /// The font the window is set in and the name it was built from, rebuilt only when the
+    /// chosen font changes since the root renders every frame anything below it animates.
+    font: Option<(String, Font)>,
+    #[cfg(target_os = "windows")]
+    rounded: Option<ui::Rounding>,
+    /// The corners and traffic-light position last handed to AppKit.
+    #[cfg(target_os = "macos")]
+    framed: Option<(ui::Rounding, gpui::Point<gpui::Pixels>)>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    decorations: gpui::WindowDecorations,
+}
+
+impl Root {
+    pub fn new(
+        session: Entity<Session>,
+        library: Entity<Library>,
+        playback: Entity<Playback>,
+        queue: Entity<Queue>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(&session, |this, session, cx| {
+            if matches!(session.read(cx).state(), SessionState::SignedOut) {
+                this.navigation_transition = None;
+                this.shell_entrance = None;
+                this.shell_zoom = None;
+                this.shell_leave = None;
+                this.shell_left = false;
+                this.shells
+                    .workspace
+                    .update(cx, |workspace, cx| workspace.finish_transition(cx));
+                this.screens.artist = None;
+                this.screens.artist_detail = None;
+                this.screens.album = None;
+                this.screens.album_detail = None;
+                this.screens.playlist = None;
+                this.screens.playlist_detail = None;
+            }
+            cx.notify();
+        })
+        .detach();
+
+        let login = cx.new(|cx| LoginView::new(session.clone(), cx));
+
+        let navigation = router::trail(cx);
+
+        cx.subscribe(&navigation, |this, _, event, cx| {
+            let NavigationEvent::Moved(destination) = event;
+            this.transition_to(destination.clone(), cx);
+        })
+        .detach();
+
+        cx.subscribe(&Network::global(cx), |this, _, _: &Reconnected, cx| {
+            this.reload(cx)
+        })
+        .detach();
+
+        let library_view =
+            cx.new(|cx| LibraryView::new(library.clone(), playback.clone(), window, cx));
+
+        let io = Io::global(cx);
+        let home_state = cx.new(|cx| Home::new(library.clone(), session.clone(), io.clone(), cx));
+        let observed_home = home_state.clone();
+        let home = cx.new(|cx| HomeView::new(home_state, playback.clone(), cx));
+        let history = Wisp::global(cx).history.clone();
+        let history = cx.new(|cx| HistoryView::new(history, playback.clone(), window, cx));
+
+        let queries = cx.new(|cx| Search::new(session.clone(), library.clone(), io.clone(), cx));
+        let suggestions =
+            cx.new(|cx| Search::new(session.clone(), library.clone(), io.clone(), cx));
+        // The quick search asks on its own, so typing in it leaves the search screen as it was.
+        let quick = cx.new(|cx| Search::new(session.clone(), library.clone(), io.clone(), cx));
+        let powerbar = Powerbar::entity(quick, playback.clone(), cx);
+        cx.subscribe(&powerbar, |this, _, event, cx| match event {
+            PowerbarEvent::Search(query) => this.search_for(query, cx),
+        })
+        .detach();
+        let genres = cx.new(|cx| Genres::new(session.clone(), io.clone(), cx));
+        let search = cx.new(|cx| {
+            SearchView::new(
+                queries,
+                suggestions,
+                genres.clone(),
+                playback.clone(),
+                window,
+                cx,
+            )
+        });
+
+        let settings = cx.new(|cx| SettingsView::new(session.clone(), playback.clone(), cx));
+        let equalizer = Wisp::global(cx).equalizer.clone();
+        let equalizer = cx.new(|cx| EqualizerView::new(equalizer, window, cx));
+        let settings_header =
+            cx.new(|cx| SettingsHeader::new(settings.clone(), equalizer.clone(), cx));
+
+        let song_detail = cx.new(|cx| SongDetail::new(session.clone(), io.clone(), cx));
+        let song = cx.new(|cx| SongView::new(song_detail.clone(), playback.clone(), cx));
+
+        let user_profile = cx.new(|cx| Profile::new(session.clone(), io.clone(), cx));
+        let user = cx.new(|cx| UserView::new(user_profile.clone(), playback.clone(), cx));
+
+        let start = navigation.read(cx).current();
+        let workspace = cx.new(|cx| {
+            Workspace::new(
+                playback.clone(),
+                queue.clone(),
+                library_view.clone().into(),
+                cx,
+            )
+        });
+        let fullscreen = cx.new(|cx| FullscreenView::new(playback.clone(), queue.clone(), cx));
+        let ambient = cx.new(Ambient::new);
+
+        let title_bar = cx.new(TitleBar::new);
+        cx.subscribe(&title_bar, |this, _, event, cx| match event {
+            TitleBarEvent::ToggleSidebar => this
+                .shells
+                .workspace
+                .update(cx, |workspace, cx| workspace.toggle_sidebar(cx)),
+            TitleBarEvent::ToggleSidebarRight => this
+                .shells
+                .workspace
+                .update(cx, |workspace, cx| workspace.toggle_sidebar_right(cx)),
+        })
+        .detach();
+
+        // Re-read the system preference when the window becomes active instead of keeping a
+        // long-lived portal listener alive. This picks up changes after the user returns from
+        // the desktop accessibility settings.
+        cx.observe_window_activation(window, |_, window, cx| {
+            if !window.is_window_active() {
+                return;
+            }
+            // Pick up plays made on other devices while Wisp was in the background, off the
+            // window coming back to the foreground rather than a poll.
+            Wisp::global(cx)
+                .history
+                .clone()
+                .update(cx, |history, cx| history.refresh(cx));
+            ui::refresh_primary_paste(cx);
+            let settings = Wisp::global(cx).settings.clone();
+            let (stillness, pace) = {
+                let settings = settings.read(cx);
+                (settings.stillness(), settings.pace())
+            };
+            if stillness != Stillness::System {
+                return;
+            }
+            ui::motion::apply(stillness, pace, cx);
+        })
+        .detach();
+
+        cx.observe_window_activation(window, |_, window, cx| update_focus_for_wake(window, cx))
+            .detach();
+        update_focus_for_wake(window, cx);
+
+        ui::WindowBlur::update(window, cx);
+        window
+            .observe_window_appearance(|window, cx| {
+                ui::WindowBlur::update(window, cx);
+                let settings = Wisp::global(cx).settings.clone();
+                let reported = ThemeKind::reported(cx);
+                let changed = ThemeKind::assumed() != Some(reported);
+                if changed {
+                    ThemeKind::assume(reported);
+                    settings.update(cx, |settings, cx| settings.set_system_theme(reported, cx));
+                }
+                if ThemeKind::from_id(settings.read(cx).theme()) != ThemeKind::System || !changed {
+                    return;
+                }
+                let settings = settings.read(cx);
+                let look = Look {
+                    tint: cx.theme().tint,
+                    ..settings.look()
+                };
+                let overrides = settings.theme_overrides();
+                Theme::fade(look, &overrides, cx);
+            })
+            .detach();
+
+        let adaptive = cx.new(|cx| Adaptive::new(playback.clone(), cx));
+
+        let mut root = Self {
+            session,
+            playback,
+            io,
+            login,
+            title_bar,
+            shells: Shells {
+                workspace,
+                fullscreen,
+            },
+            view: RootView::Workspace,
+            daily_signature: None,
+            home_loaded: observed_home.read(cx).has_content(),
+            signing_in: false,
+            toolbar: None,
+            pending: None,
+            navigation_transition: None,
+            shell_entrance: None,
+            shell_zoom: None,
+            shell_leave: None,
+            shell_left: false,
+            os_follow: None,
+            os_entered: false,
+            parted: None,
+            screens: Screens {
+                home,
+                
+                radio: None,
+                daily_empty: None,
+                history,
+                library: library_view,
+                artist: None,
+                artist_detail: None,
+                album: None,
+                album_detail: None,
+                song,
+                song_detail,
+                user,
+                user_profile,
+                playlist: None,
+                playlist_detail: None,
+                search,
+                genres,
+                genre: None,
+                genre_detail: None,
+                settings,
+                settings_header,
+                equalizer,
+                settings_open: false,
+            },
+            adaptive,
+            ambient,
+            theme_invite: cx.new(ThemeInvite::new),
+            powerbar,
+            dialogs: Dialogs::new(cx),
+            toasts: cx.new(ToastStack::new),
+            background: None,
+            font: None,
+            #[cfg(target_os = "windows")]
+            rounded: None,
+            #[cfg(target_os = "macos")]
+            framed: None,
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            decorations: Wisp::global(cx).settings.read(cx).window_decorations(),
+        };
+        cx.observe(&observed_home, |this, home, cx| {
+            let loaded = home.read(cx).has_content();
+            if loaded == this.home_loaded {
+                return;
+            }
+            this.home_loaded = loaded;
+            if loaded && matches!(router::trail(cx).read(cx).current(), Destination::Home) {
+                this.reveal_page(cx);
+            }
+        })
+        .detach();
+        root.show(start, cx);
+        root
+    }
+
+    fn artist(&mut self, cx: &mut Context<Self>) -> (Entity<ArtistView>, Entity<ArtistDetail>) {
+        if let (Some(view), Some(detail)) = (&self.screens.artist, &self.screens.artist_detail) {
+            return (view.clone(), detail.clone());
+        }
+
+        let detail = cx.new(|cx| {
+            ArtistDetail::new(
+                self.session.clone(),
+                Wisp::global(cx).library.clone(),
+                self.io.clone(),
+                cx,
+            )
+        });
+        let view = cx.new(|cx| ArtistView::new(detail.clone(), self.playback.clone(), cx));
+        self.screens.artist = Some(view.clone());
+        self.screens.artist_detail = Some(detail.clone());
+        (view, detail)
+    }
+
+    fn genre(&mut self, cx: &mut Context<Self>) -> (Entity<GenreView>, Entity<GenreDetails>) {
+        if let (Some(view), Some(detail)) = (&self.screens.genre, &self.screens.genre_detail) {
+            return (view.clone(), detail.clone());
+        }
+
+        let genres = self.screens.genres.clone();
+        let detail =
+            cx.new(|cx| GenreDetails::new(self.session.clone(), genres, self.io.clone(), cx));
+        let view = cx.new(|cx| GenreView::new(detail.clone(), self.playback.clone(), cx));
+        self.screens.genre = Some(view.clone());
+        self.screens.genre_detail = Some(detail.clone());
+        (view, detail)
+    }
+
+    fn album(&mut self, cx: &mut Context<Self>) -> (Entity<DetailView>, Entity<Detail>) {
+        if let (Some(view), Some(detail)) = (&self.screens.album, &self.screens.album_detail) {
+            return (view.clone(), detail.clone());
+        }
+        let playcounts = self.session.read(cx).capabilities().playcounts;
+        let detail = cx.new(|cx| {
+            Detail::new(
+                self.session.clone(),
+                Wisp::global(cx).library.clone(),
+                self.io.clone(),
+                cx,
+            )
+        });
+        let view = cx.new(|cx| {
+            DetailView::new(
+                detail.clone(),
+                self.playback.clone(),
+                album_columns(playcounts),
+                true,
+                "album",
+                cx,
+            )
+        });
+        self.screens.album = Some(view.clone());
+        self.screens.album_detail = Some(detail.clone());
+        (view, detail)
+    }
+
+    fn playlist(&mut self, cx: &mut Context<Self>) -> (Entity<DetailView>, Entity<Detail>) {
+        if let (Some(view), Some(detail)) = (&self.screens.playlist, &self.screens.playlist_detail)
+        {
+            return (view.clone(), detail.clone());
+        }
+        let detail = cx.new(|cx| {
+            Detail::new(
+                self.session.clone(),
+                Wisp::global(cx).library.clone(),
+                self.io.clone(),
+                cx,
+            )
+        });
+        let view = cx.new(|cx| {
+            DetailView::new(
+                detail.clone(),
+                self.playback.clone(),
+                LIBRARY_COLUMNS,
+                true,
+                "playlist",
+                cx,
+            )
+        });
+        self.screens.playlist = Some(view.clone());
+        self.screens.playlist_detail = Some(detail.clone());
+        (view, detail)
+    }
+
+    fn open_search(&mut self, cx: &mut Context<Self>) {
+        navigate(Destination::Search, cx);
+        self.pending = Some(Focus::Search);
+        cx.notify();
+    }
+
+    /// Opens the search page with the full results for `query`. An empty query opens the page as
+    /// it was left.
+    fn search_for(&mut self, query: &str, cx: &mut Context<Self>) {
+        if !query.is_empty() {
+            self.screens
+                .search
+                .update(cx, |search, cx| search.search_for(query, cx));
+        }
+        self.open_search(cx);
+    }
+
+    /// Focuses the filter of the page on show. In settings that is the settings search.
+    fn open_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = router::trail(cx).read(cx).current();
+        if current.in_settings() {
+            let search = self.screens.settings.read(cx).search();
+            search.update(cx, |search, cx| search.focus(window, cx));
+            return;
+        }
+        let Some(toolbar) = self.toolbar.clone() else {
+            return;
+        };
+        toolbar.update(cx, |toolbar, cx| toolbar.focus(window, cx));
+    }
+
+    fn show_side(&self, tab: SideTab, cx: &mut Context<Self>) {
+        self.shells
+            .workspace
+            .update(cx, |workspace, cx| workspace.show_side(tab, cx));
+    }
+
+    /// Tells the adaptive theme and the wake lock whether fullscreen is up. The ambient
+    /// background is painted out of the cover's hues, so fullscreen samples the cover even with
+    /// the adaptive theme off, and leaving drops the tint again.
+    fn announce_fullscreen(&self, fullscreen: bool, cx: &mut Context<Self>) {
+        self.adaptive
+            .update(cx, |adaptive, cx| adaptive.set_fullscreen(fullscreen, cx));
+        let wake = Wisp::global(cx).wake.clone();
+        wake.update(cx, |wake, cx| wake.set_fullscreen(fullscreen, cx));
+    }
+
+    /// Carries the window into or out of OS fullscreen with the fullscreen view when the setting
+    /// asks for it. Closing the view leaves OS fullscreen only if opening it went there, so a
+    /// window put there with F11 stays.
+    fn follow_os_fullscreen(&mut self, window: &mut Window, cx: &App) {
+        let Some(opening) = self.os_follow.take() else {
+            return;
+        };
+        match opening {
+            true => {
+                if Wisp::global(cx).settings.read(cx).os_fullscreen() && !window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                    self.os_entered = true;
+                }
+            }
+            false => {
+                if std::mem::take(&mut self.os_entered) && window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                }
+            }
+        }
+    }
+
+    fn toggle_fullscreen(&mut self, cx: &mut Context<Self>) {
+        match self.view {
+            RootView::Workspace => navigate(Destination::Fullscreen, cx),
+            RootView::Fullscreen => back(cx),
+        }
+    }
+
+    /// Escape that nothing on the page took. A focused text field lets go of the keyboard first,
+    /// on any screen. Otherwise it leaves fullscreen, and on a settings page it closes an open
+    /// menu or dialog, then clears the search. It never leaves settings.
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typing = window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains(INPUT_CONTEXT));
+        if typing {
+            match self.view {
+                RootView::Workspace => self
+                    .shells
+                    .workspace
+                    .update(cx, |workspace, cx| workspace.focus(window, cx)),
+                RootView::Fullscreen => self
+                    .shells
+                    .fullscreen
+                    .update(cx, |fullscreen, cx| fullscreen.focus(window, cx)),
+            }
+            return;
+        }
+        if self.signing_in {
+            let session = Wisp::global(cx).session.clone();
+            session.update(cx, |session, cx| session.close_login(cx));
+            return;
+        }
+        if let RootView::Fullscreen = self.view {
+            back(cx);
+            return;
+        }
+        match router::trail(cx).read(cx).current() {
+            Destination::Equalizer => {
+                self.screens.equalizer.update(cx, |view, cx| {
+                    if view.escape() {
+                        cx.notify();
+                    }
+                });
+            }
+            Destination::Settings(_) => {
+                self.screens.settings.update(cx, |view, cx| view.escape(cx));
+            }
+            Destination::Artist(_) => {
+                if let Some(artist) = self.screens.artist.clone() {
+                    artist.update(cx, |view, cx| view.escape(cx));
+                }
+            }
+            Destination::Song(_) => {
+                self.screens.song.update(cx, |view, cx| view.escape(cx));
+            }
+            _ => {}
+        }
+    }
+
+    fn options(&self, cx: &Context<Self>) -> TitleBarOptions {
+        let content = self.toolbar.clone().map(Into::into);
+
+        match self.view {
+            RootView::Workspace => self.shells.workspace.read(cx).title_bar(content, cx),
+            RootView::Fullscreen => self.shells.fullscreen.read(cx).title_bar(content, cx),
+        }
+    }
+
+    /// Opens settings on the page they last showed, inside the workspace.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        router::open_settings(cx);
+    }
+
+    /// Drops what the current page shows and fetches it again from its provider, so the page
+    /// sits in its loading state until the new data lands. Ctrl/Cmd+R, the menu and the
+    /// title-bar button all land here while a window is open, and pages with nothing to reload
+    /// ignore it. A page still loading ignores it too, so a held key or repeated presses cannot
+    /// keep restarting the load. The title-bar button turns until the page has its data.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let destination = router::trail(cx).read(cx).current();
+        let Some(busy) = self.loading(&destination, cx) else {
+            return;
+        };
+        if busy(cx) {
+            return;
+        }
+        self.reload_page(destination, cx);
+        self.title_bar
+            .update(cx, |bar, cx| bar.refreshing(busy, cx));
+    }
+
+    /// How to tell whether `destination` is still loading, or `None` for a page with nothing
+    /// to reload.
+    fn loading(&self, destination: &Destination, cx: &App) -> Option<Busy> {
+        let library = Wisp::global(cx).library.clone();
+        let shelf = |shelf: Shelf| -> Busy {
+            let library = library.clone();
+            Box::new(move |cx| matches!(library.read(cx).state(shelf), LibraryState::Loading))
+        };
+        Some(match destination {
+            Destination::DailyRecommend | Destination::Radio => return None,
+            Destination::Home => {
+                let home = self.screens.home.clone();
+                Box::new(move |cx| home.read(cx).is_loading(cx))
+            }
+            Destination::History => {
+                let history = Wisp::global(cx).history.clone();
+                Box::new(move |cx| matches!(history.read(cx).state(), HistoryState::Loading))
+            }
+            Destination::Library(_) => {
+                let session = Wisp::global(cx).session.clone();
+                let streaming = shelf(Shelf::Streaming);
+                let local = shelf(Shelf::Local);
+                Box::new(move |cx| session.read(cx).scanning() || streaming(cx) || local(cx))
+            }
+            Destination::Album(_) => {
+                let detail = self.screens.album_detail.clone()?;
+                Box::new(move |cx| detail.read(cx).is_loading())
+            }
+            Destination::Playlist(_) => {
+                let detail = self.screens.playlist_detail.clone()?;
+                Box::new(move |cx| detail.read(cx).is_loading())
+            }
+            Destination::Artist(_) => {
+                let detail = self.screens.artist_detail.clone()?;
+                Box::new(move |cx| detail.read(cx).is_loading())
+            }
+            Destination::Genre(_) => {
+                let detail = self.screens.genre_detail.clone()?;
+                Box::new(move |cx| detail.read(cx).is_loading())
+            }
+            Destination::HomeSection(_) => return None,
+            Destination::Song(_) => {
+                let detail = self.screens.song_detail.clone();
+                Box::new(move |cx| detail.read(cx).is_loading())
+            }
+            Destination::User(_) => {
+                let profile = self.screens.user_profile.clone();
+                Box::new(move |cx| profile.read(cx).is_loading())
+            }
+            Destination::Search
+            | Destination::Settings(_)
+            | Destination::Equalizer
+            | Destination::Fullscreen => return None,
+        })
+    }
+
+    /// Drops what `destination` shows and asks its provider for it again, past the caches.
+    fn reload_page(&mut self, destination: Destination, cx: &mut Context<Self>) {
+        let library = Wisp::global(cx).library.clone();
+        match destination {
+            Destination::DailyRecommend | Destination::Radio => {}
+            Destination::Home => self.screens.home.update(cx, |home, cx| home.refresh(cx)),
+            Destination::History => {
+                let history = Wisp::global(cx).history.clone();
+                history.update(cx, |history, cx| history.reload(cx));
+            }
+            Destination::Library(_) => library.update(cx, |library, cx| {
+                library.reload(Shelf::Streaming, cx);
+                library.reload(Shelf::Local, cx);
+            }),
+            Destination::Album(id) => {
+                if let Some(detail) = self.screens.album_detail.clone() {
+                    detail.update(cx, |detail, cx| detail.refresh(cx));
+                }
+                library.update(cx, |library, cx| library.refresh(Shelf::of(&id), cx));
+            }
+            Destination::Playlist(id) => {
+                if let Some(detail) = self.screens.playlist_detail.clone() {
+                    detail.update(cx, |detail, cx| detail.refresh(cx));
+                }
+                library.update(cx, |library, cx| library.refresh(Shelf::of(&id), cx));
+            }
+            Destination::Artist(_) => {
+                if let Some(detail) = self.screens.artist_detail.clone() {
+                    detail.update(cx, |detail, cx| detail.refresh(cx));
+                }
+            }
+            Destination::Genre(_) => {
+                if let Some(detail) = self.screens.genre_detail.clone() {
+                    detail.update(cx, |detail, cx| detail.refresh(cx));
+                }
+            }
+            Destination::HomeSection(_) => {}
+            Destination::Song(_) => self
+                .screens
+                .song_detail
+                .update(cx, |detail, cx| detail.refresh(cx)),
+            Destination::User(_) => self
+                .screens
+                .user_profile
+                .update(cx, |profile, cx| profile.refresh(cx)),
+            Destination::Search
+            | Destination::Settings(_)
+            | Destination::Equalizer
+            | Destination::Fullscreen => {}
+        }
+    }
+
+    /// Moves to `destination`. Opening the fullscreen player zooms it in, a move back to the
+    /// workspace plays the entrance over the whole window, a move within the workspace plays it
+    /// over the page, and reduced motion skips them all.
+    fn transition_to(&mut self, destination: Destination, cx: &mut Context<Self>) {
+        self.navigation_transition = None;
+        self.shell_entrance = None;
+        self.shell_zoom = None;
+        self.shell_leave = None;
+        self.shell_left = false;
+
+        let next = RootView::of(&destination);
+        let moving = next != self.view;
+        if moving || next == RootView::Fullscreen || cx.reduce_motion() {
+            self.shells
+                .workspace
+                .update(cx, |workspace, cx| workspace.finish_transition(cx));
+            self.show(destination, cx);
+            if moving && !cx.reduce_motion() {
+                // Set here rather than in render, so the cached player bar hears of it before
+                // the first frame of the move draws.
+                cx.set_global(match next {
+                    RootView::Fullscreen => ShellSwap::Opening,
+                    RootView::Workspace => ShellSwap::Closing,
+                });
+                match next {
+                    RootView::Fullscreen => self.shell_zoom = Some(Sprung::at(1.)),
+                    RootView::Workspace => {
+                        self.shell_leave = Some(Sprung::at(1.));
+                        self.reveal_shell(cx);
+                    }
+                }
+            }
+            return;
+        }
+
+        self.show(destination, cx);
+        self.reveal_page(cx);
+    }
+
+    /// Plays the page entrance over the workspace once its content has changed in place, as
+    /// when a page's first data replaces its loading state.
+    fn reveal_page(&mut self, cx: &mut Context<Self>) {
+        let enter = self
+            .shells
+            .workspace
+            .update(cx, |workspace, cx| workspace.reveal_content(cx));
+        self.navigation_transition = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(enter).await;
+            this.update(cx, |this, cx| {
+                this.navigation_transition = None;
+                this.shells
+                    .workspace
+                    .update(cx, |workspace, cx| workspace.finish_transition(cx));
+            })
+            .ok();
+        }));
+    }
+
+    /// Plays the page entrance over the whole shell, for a move from one shell to another.
+    fn reveal_shell(&mut self, cx: &mut Context<Self>) {
+        let entrance = Entrance::start();
+        self.shell_entrance = Some(entrance);
+        self.navigation_transition = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(entrance.span()).await;
+            this.update(cx, |this, cx| {
+                this.navigation_transition = None;
+                this.shell_entrance = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The font the window is set in, built again only once a different font is chosen.
+    fn font(&mut self, cx: &App) -> Font {
+        let chosen = Wisp::global(cx).settings.read(cx).font();
+        match &self.font {
+            Some((name, font)) if name == chosen => font.clone(),
+            _ => {
+                // A face whose metrics would crash the renderer must never become the window's
+                // font, and the picker is not the only way in: the setting is saved, so a family
+                // chosen before this check existed is still on disk. Falling back to the bundled
+                // face is the same thing the picker does by leaving the name out of its list.
+                let usable = match chosen == SYSTEM_FONT
+                    || crate::shared::typeface::draws(&cx.text_system(), chosen)
+                {
+                    true => chosen,
+                    false => {
+                        log::warn!("ui: {chosen:?} cannot be measured, drawing in {UI_FONT:?}");
+                        SYSTEM_FONT
+                    }
+                };
+                let font = ui_font(usable);
+                self.font = Some((chosen.to_owned(), font.clone()));
+                font
+            }
+        }
+    }
+
+    /// How much of the shell its entrance still hides, asking for the next frame while it runs.
+    /// A see-through window fades the shell itself, so every frame of that fade is a full
+    /// refresh, or the workspace's cached views would replay the opacity they were first
+    /// painted with.
+    fn shell_hidden(&mut self, window: &mut Window, cx: &Context<Self>) -> f32 {
+        let Some(entrance) = self.shell_entrance else {
+            return 0.;
+        };
+        if cx.reduce_motion() {
+            self.shell_entrance = None;
+            return 0.;
+        }
+        if entrance.running() {
+            match cx.theme().transparent {
+                true => window.on_next_frame(|window, _| window.refresh()),
+                false => window.request_animation_frame(),
+            }
+        }
+        entrance.hidden()
+    }
+
+    /// How much of the fullscreen player its opening zoom still hides, stepping the spring and
+    /// asking for the next frame while it runs. The player holds cached views, which replay the
+    /// opacity they were first painted with, so every frame of the fade repaints the window.
+    fn fullscreen_hidden(&mut self, window: &mut Window, cx: &Context<Self>) -> f32 {
+        let Some(zoom) = self.shell_zoom.as_mut() else {
+            return 0.;
+        };
+        let hidden = match self.view {
+            RootView::Fullscreen => zoom.follow(0., Springs::shell(), SHELL_ZOOM_REST, window, cx),
+            RootView::Workspace => 0.,
+        };
+        match hidden > 0. {
+            true => window.on_next_frame(|window, _| window.refresh()),
+            false => self.shell_zoom = None,
+        }
+        hidden
+    }
+
+    /// How much of the fullscreen player still shows over the workspace as it closes, stepping
+    /// the spring and repainting the window for every frame of the fade, as its opening does.
+    /// It runs at the pace the cover flies back to the player bar, and answers 0 for one frame
+    /// more once it is done, `None` when no player is closing.
+    fn fullscreen_left(&mut self, window: &mut Window, cx: &Context<Self>) -> Option<f32> {
+        let leave = self.shell_leave.as_mut()?;
+        let left = match self.view {
+            RootView::Workspace => {
+                leave.follow(0., Springs::ARTWORK_FLIGHT, SHELL_ZOOM_REST, window, cx)
+            }
+            RootView::Fullscreen => 0.,
+        };
+        if left <= 0. && std::mem::replace(&mut self.shell_left, true) {
+            self.shell_leave = None;
+            self.shell_left = false;
+            return None;
+        }
+        window.on_next_frame(|window, _| window.refresh());
+        Some(left)
+    }
+
+    /// Loads the screen on show again, which is what a page that gave up while the network was
+    /// gone needs once it is back. Focus stays where the user left it, since nothing moved.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        let destination = router::trail(cx).read(cx).current();
+        let pending = self.pending.take();
+        self.show(destination, cx);
+        self.pending = pending;
+    }
+
+    /// Tells the settings views about a move. The equalizer reads its meters only while it is
+    /// the page on show and the previews run only while settings are open, so every move tells
+    /// them, settings or not.
+    fn follow_settings(&mut self, destination: &Destination, cx: &mut Context<Self>) {
+        let equalizer = matches!(destination, Destination::Equalizer);
+        self.screens
+            .equalizer
+            .update(cx, |view, cx| view.set_visible(equalizer, cx));
+        let open = destination.in_settings();
+        if open != self.screens.settings_open {
+            self.screens.settings_open = open;
+            self.screens
+                .settings
+                .update(cx, |view, cx| view.set_open(open, cx));
+        }
+        if let Destination::Settings(page) = destination {
+            let page = *page;
+            self.screens
+                .settings
+                .update(cx, |view, cx| view.select(page, cx));
+        }
+    }
+
+    fn show(&mut self, destination: Destination, cx: &mut Context<Self>) {
+        clear_listing(cx);
+        let opening = matches!(destination, Destination::Fullscreen);
+        if opening != matches!(self.view, RootView::Fullscreen) {
+            self.os_follow = Some(opening);
+            self.parted = Some(*cx.theme());
+            self.shells
+                .fullscreen
+                .update(cx, |fullscreen, cx| fullscreen.set_shown(opening, cx));
+        }
+        // Leaving settings is what clears the note about the last scan, so every move tells it.
+        let settings = destination.in_settings();
+        Scan::global(cx).update(cx, |scan, cx| scan.viewing_settings(settings, cx));
+        let home = matches!(destination, Destination::Home);
+        self.screens
+            .home
+            .update(cx, |view, cx| view.set_visible(home, cx));
+        self.follow_settings(&destination, cx);
+        if let Destination::Fullscreen = destination {
+            self.view = RootView::Fullscreen;
+            self.announce_fullscreen(true, cx);
+            self.pending = Some(Focus::Fullscreen);
+            cx.notify();
+            return;
+        }
+        self.announce_fullscreen(false, cx);
+        self.view = RootView::Workspace;
+        self.pending = Some(match destination {
+            Destination::Search => Focus::Search,
+            _ => Focus::Workspace,
+        });
+
+        let mut toolbar = None;
+        let mut header = None;
+        let cached = destination != Destination::Equalizer;
+
+        let content: AnyView = match destination {
+            Destination::Fullscreen => return,
+            Destination::DailyRecommend => {
+                // [wisp] 复用播放列表页的 Hero + 曲目表格，只是数据来自当天推荐。
+                let home = self.screens.home.read(cx).home_state();
+                let tracks = home.read(cx).daily_recommend().as_ref().clone();
+                // 还没拿到推荐（未登录或正在加载）：给一个空态，刷新入口就在那里。
+                if tracks.is_empty() {
+                    if self.screens.daily_empty.is_none() {
+                        let view = cx.new(|cx| DailyEmpty::new(home.clone(), cx));
+                        self.screens.daily_empty = Some(view);
+                    }
+                    self.screens
+                        .daily_empty
+                        .clone()
+                        .unwrap()
+                        .into()
+                } else {
+                let (playlist, detail) = self.playlist(cx);
+                let cover = tracks.first().and_then(|track| track.cover.clone());
+                let signature = (tracks.len(), tracks.first().and_then(|track| track.id.clone()));
+                let synthetic = music::PlaylistDetail {
+                    playlist: music::Playlist {
+                        id: "daily-recommend".to_owned(),
+                        name: "每日推荐".to_owned(),
+                        owner: "为你量身定制".to_owned(),
+                        owner_id: String::new(),
+                        owned: false,
+                        collaborative: false,
+                        blend: false,
+                        public: false,
+                        cover,
+                        track_count: tracks.len() as u32,
+                        modified_at: None,
+                        read_only: true,
+                    },
+                    tracks,
+                    continuation: None,
+                };
+                // 同一批曲子只装一次：每次渲染都重装会清掉详情页的滚动与选中。
+                // 但详情页可能还停在别的歌单上（签名没变时也要重装），否则点卡片进来
+                // 看到的会是上次打开的那张歌单。
+                let showing_daily = detail.read(cx).id() == Some("daily-recommend");
+                if !showing_daily || self.daily_signature.as_ref() != Some(&signature) {
+                    detail.update(cx, |detail, cx| detail.show_playlist(synthetic, cx));
+                    self.daily_signature = Some(signature);
+                }
+                toolbar = Some(playlist.read(cx).toolbar());
+                playlist.into()
+                }
+            }
+            Destination::Radio => {
+                if self.screens.radio.is_none() {
+                    let session = Wisp::global(cx).session.clone();
+                    let io = cx.global::<state::Io>().clone();
+                    let playback = self.playback.clone();
+                    let queue = Wisp::global(cx).queue.clone();
+                    let view = cx.new(|cx| RadioView::new(session, playback, queue, io, cx));
+                    self.screens.radio = Some(view.clone());
+                }
+                self.screens.radio.clone().unwrap().into()
+            }
+            Destination::Home => self.screens.home.clone().into(),
+            Destination::HomeSection(title) => {
+                let home = self.screens.home.read(cx).home_state();
+                let viewed = home.read(cx).sections();
+                let sections = viewed
+                    .iter()
+                    .find(|section| section.title == title.as_ref())
+                    .cloned()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let (genre, detail) = self.genre(cx);
+                detail.update(cx, |detail, cx| {
+                    detail.show_home_section(title.as_ref(), sections, cx);
+                });
+                genre.update(cx, |genre, cx| genre.reset_scroll(cx));
+                toolbar = Some(genre.read(cx).toolbar());
+                genre.into()
+            }
+            Destination::History => {
+                let history = self.screens.history.clone();
+                history.update(cx, |history, cx| history.refresh(cx));
+                toolbar = Some(history.read(cx).toolbar());
+                history.into()
+            }
+            Destination::Library(tab) => {
+                self.screens
+                    .library
+                    .update(cx, |library, cx| library.select(tab.into(), cx));
+                let library = self.screens.library.clone();
+                toolbar = Some(library.read(cx).toolbar());
+                library.into()
+            }
+            Destination::Album(id) => {
+                let (album, detail) = self.album(cx);
+                detail.update(cx, |detail, cx| detail.open_album(&id, cx));
+                toolbar = Some(album.read(cx).toolbar());
+                album.into()
+            }
+            Destination::Song(id) => {
+                self.screens
+                    .song_detail
+                    .update(cx, |detail, cx| detail.open(&id, cx));
+                self.screens.song.clone().into()
+            }
+            Destination::Playlist(id) => {
+                let (playlist, detail) = self.playlist(cx);
+                detail.update(cx, |detail, cx| detail.open_playlist(&id, cx));
+                toolbar = Some(playlist.read(cx).toolbar());
+                playlist.into()
+            }
+            Destination::User(id) => {
+                self.screens
+                    .user_profile
+                    .update(cx, |profile, cx| profile.open(&id, cx));
+                self.screens.user.clone().into()
+            }
+            Destination::Artist(id) => {
+                let (artist, detail) = self.artist(cx);
+                detail.update(cx, |artist, cx| artist.open(&id, cx));
+                toolbar = Some(artist.read(cx).toolbar());
+                artist.into()
+            }
+            Destination::Genre(id) => {
+                let (genre, detail) = self.genre(cx);
+                detail.update(cx, |detail, cx| detail.open(&id, cx));
+                genre.update(cx, |genre, cx| genre.reset_scroll(cx));
+                toolbar = Some(genre.read(cx).toolbar());
+                genre.into()
+            }
+            Destination::Search => {
+                self.screens.genres.update(cx, |genres, cx| genres.load(cx));
+                self.screens.search.clone().into()
+            }
+            Destination::Equalizer => {
+                header = Some(self.screens.settings_header.clone().into());
+                self.screens.equalizer.clone().into()
+            }
+            Destination::Settings(_) => {
+                header = Some(self.screens.settings_header.clone().into());
+                self.screens.settings.clone().into()
+            }
+        };
+
+        self.toolbar = toolbar;
+
+        self.shells.workspace.update(cx, |workspace, cx| {
+            workspace.set_content(content, header, cached, cx)
+        });
+        cx.notify();
+    }
+}
+
+// [wisp] 全局主字体：内嵌的阿里巴巴普惠体 3.0（`src/assets/fonts/`，由
+// `wisp/build.rs` 扫成 `FONTS` 表注册进 TextSystem）。它自带拉丁与中日韩字形，
+// 中英文共用一套笔画与字面，观感统一；系统自带的雅黑/宋体在部分字号与字重下会
+// 丢笔画、发虚。
+//
+// 这里必须是**主字体**，不能只当回退项：gpui_windows 生成回退映射时是从
+// **系统**字体集合里按族名查字的（`direct_write.rs::generate_font_fallbacks`），
+// 内嵌字体只活在 custom 集合里，系统里没装就查不到、那条映射会被静默跳过。
+// 所以把普惠体写进 `SCRIPTS` 是无效的（此前即如此，中文实际一直走雅黑）。
+//
+// 族名取 typographic family（nameID 16）而**不是** nameID 1：实测注册进
+// DirectWrite 后，字体集合报告的名字是本地化的「阿里巴巴普惠体 3.0」，而
+// `Alibaba PuHuiTi 3.0 65 Medium` 这种带字重后缀的 nameID 1 反而查不到——排版
+// 宽度与兜底字体一致，说明静默回落了。同一份实测还确认 10 个字重被归为**一个**
+// 字族，能按 weight 选到不同字面，所以字重差异必须靠内嵌多份 ttf 来给：
+// 目前内嵌 65 Medium（500，正文）/ 75 SemiBold（600）/ 85 Bold（700）三档，
+// 品牌名与标题用的 SEMIBOLD/BOLD 就落到真字面上，而不是由 500 一档顶替。
+const UI_FONT: &str = "Alibaba PuHuiTi 3.0";
+
+// [wisp] 主字体缺字时的回退链，按语种排优先级。普惠体覆盖拉丁与中日韩，
+// 这里补的是阿拉伯/希伯来/泰/天城体与 emoji，以及各平台的中文兜底。
+const SCRIPTS: [&str; 18] = [
+    "Source Han Sans",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK TC",
+    "Noto Sans CJK KR",
+    "Noto Sans Arabic",
+    "Noto Sans Hebrew",
+    "Noto Sans Thai",
+    "Noto Sans Devanagari",
+    "Hiragino Sans",
+    "PingFang SC",
+    "Apple SD Gothic Neo",
+    "Yu Gothic UI",
+    "Microsoft YaHei UI",
+    "Malgun Gothic",
+    "Noto Color Emoji",
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+];
+
+fn ui_font(chosen: &str) -> Font {
+    match chosen == SYSTEM_FONT {
+        true => Font {
+            fallbacks: Some(scripts()),
+            ..font(UI_FONT)
+        },
+        false => Font {
+            fallbacks: Some(scripts()),
+            ..font(SharedString::from(chosen.to_owned()))
+        },
+    }
+}
+
+/// The system fonts drawn for whatever `UI_FONT` and a chosen face leave uncovered. One list
+/// for both, since an embedded face cannot serve as a fallback: gpui_windows resolves the
+/// names below against the **system** collection only, where the bundled font is absent.
+fn scripts() -> FontFallbacks {
+    static SCRIPTS_FALLBACK: std::sync::OnceLock<FontFallbacks> = std::sync::OnceLock::new();
+    SCRIPTS_FALLBACK
+        .get_or_init(|| FontFallbacks::from_fonts(SCRIPTS.iter().map(|name| (*name).to_owned()).collect()))
+        .clone()
+}
+
+/// Tells the wake lock whether the window has focus, which the display lock needs.
+fn update_focus_for_wake(window: &Window, cx: &mut App) {
+    let focused = window.is_window_active();
+    let wake = Wisp::global(cx).wake.clone();
+    wake.update(cx, |wake, cx| wake.set_focused(focused, cx));
+}
+
+/// The shell on its way out, in the `theme` it wore and on its `ground` when it had one, since
+/// neither shell paints a background of its own. It fills its box and keeps the top `bar` free
+/// for the title bar, so the caller places it to cover the bar's strip or to sit under it.
+fn parting(
+    theme: &Theme,
+    bar: Pixels,
+    radius: Option<Pixels>,
+    ground: Option<Ground>,
+    shell: impl IntoElement,
+) -> impl IntoElement {
+    let (page, field) = match ground {
+        Some(Ground::Page) => (true, None),
+        Some(Ground::Field(field)) => (false, Some(field)),
+        None => (false, None),
+    };
+    Themed::new(
+        *theme,
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .pt(bar)
+            .when(page, |this| {
+                this.bg(theme.background)
+                    .when_some(radius, |this, radius| this.rounded(radius))
+            })
+            .text_color(theme.foreground)
+            .children(field)
+            .child(shell),
+    )
+}
+
+impl Render for Root {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // An account that could not be reached is still an account, so nothing about a lost
+        // network puts the sign-in page up: the workspace stays, on what the library kept and
+        // on the local files.
+        // [wisp] 默认落在首页；只有用户主动发起登录（设置页点登录）才切到登录页。
+        let show_sign_in = {
+            let session = self.session.read(cx);
+            session.login_page()
+                || session.login_slug().is_some()
+                || matches!(session.state(), SessionState::Authorizing(_))
+        };
+        self.signing_in = show_sign_in;
+
+        match self.pending.take() {
+            Some(Focus::Search) => self
+                .screens
+                .search
+                .update(cx, |search, cx| search.focus(window, cx)),
+            Some(Focus::Workspace) => self
+                .shells
+                .workspace
+                .update(cx, |workspace, cx| workspace.focus(window, cx)),
+            Some(Focus::Fullscreen) => self
+                .shells
+                .fullscreen
+                .update(cx, |fullscreen, cx| fullscreen.focus(window, cx)),
+            None => {}
+        }
+        self.follow_os_fullscreen(window, cx);
+
+        let options = match show_sign_in {
+            // The sign-in screen runs under the bar, so the bar keeps only the window controls
+            // and its drag area over it.
+            true => TitleBarOptions {
+                border: false,
+                transparent: true,
+                ..TitleBarOptions::default()
+            },
+            false => self.options(cx),
+        };
+        self.title_bar
+            .update(cx, |bar, cx| bar.set_options(options, cx));
+
+        let theme = *cx.theme();
+        window.set_rem_size(theme.font_size);
+        let appearance = ui::backdrop(theme.blur_window, theme.transparent);
+        if self.background != Some(appearance) {
+            self.background = Some(appearance);
+            window.set_background_appearance(appearance);
+        }
+
+        // Windows can only round a window's corners while it's opaque (DWM never rounds a
+        // per-pixel-alpha window), so this only takes effect once `backdrop` above lands on
+        // `Opaque`; Linux/FreeBSD round their own chrome directly instead, below.
+        #[cfg(target_os = "windows")]
+        {
+            let rounding = match window.is_fullscreen() {
+                true => ui::Rounding::Square,
+                false => Wisp::global(cx).settings.read(cx).window_rounding(),
+            };
+            if self.rounded != Some(rounding) {
+                self.rounded = Some(rounding);
+                state::apply_window_rounding(window, rounding, cx);
+            }
+        }
+
+        // AppKit lays the window out again while its toolbar changes and calls back into it, so
+        // the change waits until this frame has drawn. Fullscreen has no corners to pick, and
+        // AppKit keeps a fullscreen window's toolbar as a bar above the content, so the toolbar
+        // goes on the way in and the frame is picked again on the way out.
+        #[cfg(target_os = "macos")]
+        match window.is_fullscreen() {
+            true => {
+                if self.framed.take().is_some() {
+                    window.defer(cx, |window, cx| {
+                        state::apply_window_rounding(window, ui::Rounding::Square, cx);
+                    });
+                }
+            }
+            false => {
+                let settings = Wisp::global(cx).settings.read(cx);
+                let framed = (
+                    settings.window_rounding(),
+                    crate::chrome::traffic_lights(
+                        settings,
+                        ui::snapped(theme.metrics.title_bar, window),
+                    ),
+                );
+                if self.framed != Some(framed) {
+                    self.framed = Some(framed);
+                    window.defer(cx, move |window, cx| {
+                        state::apply_window_rounding(window, framed.0, cx);
+                        window.set_traffic_light_position(framed.1);
+                    });
+                }
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            let decorations = Wisp::global(cx).settings.read(cx).window_decorations();
+            if self.decorations != decorations {
+                self.decorations = decorations;
+                window.request_decorations(decorations);
+            }
+        }
+
+        // GPUI can't clip a subtree to a rounded parent (its content mask is a plain
+        // rectangle), so on Linux/FreeBSD each edge of the chrome that actually touches a
+        // corner rounds itself to match — see `chrome::window_radius`, and `TitleBar` /
+        // `PlayerBar` for the top and bottom edges. Rounding the root too keeps its own
+        // background quad correct and costs nothing.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let radius = crate::chrome::window_radius(Wisp::global(cx).settings.read(cx), cx, window);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        window.set_window_corner_radius(radius.unwrap_or_default());
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let radius: Option<gpui::Pixels> = None;
+
+        // The ambient field covers the window whole and carries the window's own opacity, so
+        // the page colour under it would only stack a second alpha beneath that and leave a
+        // see-through fullscreen reading nearly solid.
+        let ambient = matches!(self.view, RootView::Fullscreen) && ambient::shown(cx);
+
+        // The shell enters the way a page enters the workspace. An opaque window fades it
+        // under a scrim of the page colour, which leaves the workspace's cached views alone,
+        // and a see-through one fades the shell itself. The scrim reaches the bottom corners
+        // of the window, so it rounds them. No shell takes the veil. The renderer drops a
+        // backdrop inside a filtered layer, so fullscreen's frosted controls would show flat
+        // until the veil lifted.
+        let hidden = self.shell_hidden(window, cx);
+        let dissolving = theme.transparent;
+        // Opening fullscreen fades the player in while it zooms up from a little smaller. The zoom is a paint filter, which drops the backdrop
+        // blurs inside it, so it lets go as soon as what is left of it is under half a pixel and
+        // the frosted controls get their blur back while the fade finishes.
+        let zooming = self.fullscreen_hidden(window, cx);
+        let left = self.fullscreen_left(window, cx);
+        let away = zooming > 0. || left.is_some_and(|left| left > 0.);
+        if cx.try_global::<CoverAway>().is_none_or(|was| was.0 != away) {
+            cx.set_global(CoverAway(away));
+        }
+        let fade = 1. - zooming;
+        if cx.try_global::<CoverFade>().is_none_or(|was| was.0 != fade) {
+            cx.set_global(CoverFade(fade));
+        }
+        // The fullscreen button swaps in place for the whole move, the workspace's entrance
+        // included, since that scrim would otherwise dim the player bar's button once it is back.
+        let swap = match self.view {
+            RootView::Fullscreen if zooming > 0. => ShellSwap::Opening,
+            RootView::Workspace if left.is_some() || hidden > 0. => ShellSwap::Closing,
+            _ => ShellSwap::Settled,
+        };
+        if cx.try_global::<ShellSwap>().is_none_or(|was| *was != swap) {
+            cx.set_global(swap);
+        }
+        let viewport = window.viewport_size();
+        let reach = f32::from(viewport.width.max(viewport.height));
+        let zoom = (zooming * SHELL_ZOOM * reach / 2. >= 0.5).then_some(1. - SHELL_ZOOM * zooming);
+        let shell = match self.view {
+            RootView::Workspace => self.shells.workspace.clone().into_any_element(),
+            RootView::Fullscreen => self.shells.fullscreen.clone().into_any_element(),
+        };
+        // How far above the bottom of the window the toasts hang.
+        let floor = match self.view {
+            RootView::Workspace => PlayerBar::height(window, cx),
+            RootView::Fullscreen => FullscreenView::dock_height(cx),
+        };
+        // The shell on its way out keeps the theme it wore, so a light workspace stays light
+        // under the dark fullscreen coming in and the dark player stays dark over the workspace.
+        let parted = self.parted.unwrap_or(theme);
+        let bar = ui::snapped(theme.metrics.title_bar, window);
+        // While fullscreen opens, the workspace it leaves stays whole under the title bar and the
+        // player's ground fades in over it. A see-through window has nothing solid to cover, so
+        // there the workspace fades out as the ground comes in.
+        let opening = zooming > 0. && matches!(self.view, RootView::Fullscreen);
+        let leaving = opening.then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .when(dissolving, |this| this.opacity(zooming))
+                .child(parting(
+                    &parted,
+                    bar,
+                    radius,
+                    Some(Ground::Page),
+                    self.shells.workspace.clone(),
+                ))
+        });
+        let arriving = opening.then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(1. - zooming)
+                .map(|this| match ambient {
+                    true => this.child(self.ambient.clone()),
+                    false => this
+                        .bg(theme.background)
+                        .when_some(radius, |this, radius| this.rounded(radius)),
+                })
+        });
+        let shell = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .when(hidden > 0. && dissolving, |this| this.opacity(1. - hidden))
+                    .when(zooming > 0., |this| this.opacity(1. - zooming).occlude())
+                    .when_some(zoom, |this, zoom| this.layer_scale(zoom))
+                    .child(shell),
+            )
+            .when(hidden > 0. && !dissolving, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .when_some(radius, |this, radius| this.rounded_b(radius))
+                        .bg(theme.background)
+                        .opacity(hidden),
+                )
+            })
+            // The fullscreen player fades out over the workspace it gives way to.
+            // Its cover draws above the fade and flies down onto the player bar's.
+            .when_some(left, |this, left| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .top(-bar)
+                        .opacity(left * left)
+                        .child(parting(
+                            &parted,
+                            bar,
+                            radius,
+                            ambient::shown(cx).then(|| Ground::Field(self.ambient.clone())),
+                            self.shells.fullscreen.clone(),
+                        )),
+                )
+            })
+            // Deferred above the dialogs, which are deferred too, so a toast raised while one is
+            // open shows over it and its backdrop.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(floor)
+                    .child(deferred(self.toasts.clone()).with_priority(TOAST_LAYER)),
+            )
+            .children(self.dialogs.views())
+            .child(self.theme_invite.clone())
+            .child(self.powerbar.clone());
+
+        let root = div()
+            .relative()
+            .flex()
+            .font(self.font(cx))
+            .flex_col()
+            .size_full()
+            .when_some(radius, |this, radius| {
+                this.rounded(radius).overflow_hidden()
+            })
+            .when(!ambient && !opening, |this| this.bg(theme.background))
+            .text_color(theme.foreground)
+            .capture_any_mouse_down(|_, window, cx| {
+                if ui::cancel_middle_scroll(cx) {
+                    window.refresh();
+                    cx.stop_propagation();
+                }
+            })
+            .capture_any_mouse_up(|event, window, cx| {
+                if event.button == MouseButton::Middle
+                    && ui::release_middle_scroll(event.position, cx)
+                {
+                    window.refresh();
+                }
+            })
+            .on_mouse_up_out(MouseButton::Middle, |event, window, cx| {
+                if ui::release_middle_scroll(event.position, cx) {
+                    window.refresh();
+                }
+            })
+            .capture_key_down(|event, window, cx| {
+                if event.keystroke.key == "escape" && ui::cancel_middle_scroll(cx) {
+                    window.refresh();
+                    cx.stop_propagation();
+                }
+            })
+            .on_mouse_move(|event, window, cx| {
+                ui::update_middle_scroll(event.position, window, cx);
+            })
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                |_, _, cx| back(cx),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                |_, _, cx| forward(cx),
+            )
+            .on_action(cx.listener(|_, _: &NavigateBack, _, cx| back(cx)))
+            .on_action(cx.listener(|_, _: &NavigateForward, _, cx| forward(cx)))
+            .on_action(cx.listener(|this, _: &OpenFilter, window, cx| this.open_filter(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSearch, _, cx| this.open_search(cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.open_settings(cx)))
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(cx)))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, _, cx| this.toggle_fullscreen(cx)))
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
+            .on_action(|_: &ToggleWindowFullscreen, window, _| window.toggle_fullscreen())
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleQueue, _, cx| this.show_side(SideTab::Queue, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleLyrics, _, cx| this.show_side(SideTab::Lyrics, cx)),
+            )
+            .on_action(cx.listener(|this, _: &TogglePowerbar, window, cx| {
+                // The sign-in screen stands in for every shell, so there is nothing to search.
+                if !this.signing_in {
+                    Powerbar::toggle(window, cx);
+                }
+            }))
+            // The ambient background sits behind everything, title bar included.
+            .when(ambient && !opening, |this| this.child(self.ambient.clone()))
+            .children(leaving)
+            .children(arriving)
+            // The sign-in screen fills the whole window, under the bar.
+            .when(show_sign_in, |this| {
+                this.child(div().absolute().inset_0().child(self.login.clone()))
+            })
+            // The bar only changes when it is told to, so a frame drawn for the lyrics or the
+            // progress bar replays it rather than building it again.
+            .child(
+                self.title_bar.clone().cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(ui::snapped(theme.metrics.title_bar, window))
+                        .flex_none(),
+                ),
+            )
+            .when(!show_sign_in, |this| this.child(shell));
+        // A closed menu or dialog fades out here, over everything else in the window.
+        let root = root.child(ui::lingers());
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let root = root.child(WindowFrame::new());
+        root
+    }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "Wisp Dark",
+  "author": "WispMusic",
+  "version": 1,
+  "theme": {
+    "primary": "#c20c11",
+    "primary_foreground": "#fafafa",
+    "primary_hover": "#d92a2fb3",
+    "progress_bar": "#c20c11",
+    "selection": "#c20c11",
+    "sidebar_accent": "#c20c1133",
+    "table_active": "#c20c1133",
+    "table_active_border": "#c20c11"
+  }
+}

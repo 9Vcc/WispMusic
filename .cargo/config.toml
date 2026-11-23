@@ -1,0 +1,13 @@
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# 静态链接 CRT：去掉 vcruntime140.dll 依赖，让安装包在没装 VC++ 运行时的机器上也能跑。
+# UCRT（api-ms-win-crt-*）由 Win10/11 自带。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[alias]
+prof = "run --release --package wisp --features profiler"
+prober = "run --package music --example lyrics-prober --"
+# 一步构建 + 打包：cargo build-installer
+build-installer = "run -p xtask --release -- package"

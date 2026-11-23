@@ -1,0 +1,15 @@
+{
+  "name": "Wisp Light",
+  "author": "WispMusic",
+  "version": 1,
+  "theme": {
+    "primary": "#c20c11",
+    "primary_foreground": "#ffffff",
+    "primary_hover": "#9e0a0eb3",
+    "progress_bar": "#c20c11",
+    "selection": "#c20c11",
+    "sidebar_accent": "#c20c1122",
+    "table_active": "#c20c1122",
+    "table_active_border": "#c20c11"
+  }
+}

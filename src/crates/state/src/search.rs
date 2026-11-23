@@ -1,0 +1,1222 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
+use anyhow::Result;
+use gpui::{App, Context, Entity, Task};
+use music::link::{self, Linked};
+use music::{Album, ArtistRef, Found, MusicApi, Playlist, SavedArtist, Track};
+use serde::{Deserialize, Serialize};
+use tokio::task::AbortHandle;
+
+use crate::{Io, Library, Network, Session, SessionEvent, Shelf, Wisp, join};
+
+const DEBOUNCE: Duration = Duration::from_millis(250);
+const LIMIT: usize = 20;
+const EXACT: u32 = 100;
+const PREFIX: u32 = 80;
+const WORD: u32 = 60;
+const INSIDE: u32 = 40;
+const TITLE: u32 = 3;
+const ARTIST: u32 = 2;
+const ALBUM: u32 = 1;
+const NAME: u32 = 1;
+const TOP: u32 = 95;
+const TAIL: u32 = 35;
+const DERIVED: u32 = 80;
+const MINE: u32 = 60;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Song,
+    Artist,
+    Album,
+    Playlist,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 4] = [Kind::Song, Kind::Artist, Kind::Album, Kind::Playlist];
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArtistHit {
+    pub name: String,
+    pub id: Option<String>,
+    pub cover: Option<String>,
+    pub saved: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlbumHit {
+    pub id: String,
+    pub name: String,
+    pub artists: String,
+    pub artist_refs: Vec<ArtistRef>,
+    pub cover: Option<String>,
+    pub year: i32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlaylistHit {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub cover: Option<String>,
+}
+
+/// One result of a search. The search history keeps these too, so it serializes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Hit {
+    Song(Box<Track>),
+    Artist(ArtistHit),
+    Album(AlbumHit),
+    Playlist(PlaylistHit),
+}
+
+impl Hit {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Hit::Song(_) => Kind::Song,
+            Hit::Artist(_) => Kind::Artist,
+            Hit::Album(_) => Kind::Album,
+            Hit::Playlist(_) => Kind::Playlist,
+        }
+    }
+
+    /// The provider id of what the hit opens. A song or an artist the provider gave no id has
+    /// none, and the search history does not keep such a hit.
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            Hit::Song(track) => track.id.as_deref(),
+            Hit::Artist(artist) => artist.id.as_deref(),
+            Hit::Album(album) => Some(&album.id),
+            Hit::Playlist(list) => Some(&list.id),
+        }
+    }
+
+    /// Tells one hit from another across answers and in the history, by kind and id, or by
+    /// name when there is no id.
+    pub fn key(&self) -> String {
+        let (kind, name) = match self {
+            Hit::Song(track) => ("song", &track.name),
+            Hit::Artist(artist) => ("artist", &artist.name),
+            Hit::Album(album) => ("album", &album.name),
+            Hit::Playlist(list) => ("playlist", &list.name),
+        };
+        format!("{kind}:{}", self.id().unwrap_or(name))
+    }
+
+    /// Files the hit at the top of the search history of the provider it belongs to. A hit
+    /// without an id is not kept.
+    pub fn remember(&self, cx: &mut App) {
+        let wisp = Wisp::global(cx);
+        let Some(slug) = self.id().and_then(|id| wisp.session.read(cx).slug_for(id)) else {
+            return;
+        };
+        let hit = self.clone();
+        wisp.settings
+            .clone()
+            .update(cx, |settings, cx| settings.remember_pick(slug, hit, cx));
+    }
+
+    /// Drops the hit from the search history.
+    pub fn forget(&self, cx: &mut App) {
+        let key = self.key();
+        Wisp::global(cx)
+            .settings
+            .clone()
+            .update(cx, |settings, cx| settings.forget_pick(&key, cx));
+    }
+
+    /// What the listener chose out of searches on the providers signed in now, newest first.
+    pub fn recent(cx: &App) -> Vec<Hit> {
+        let wisp = Wisp::global(cx);
+        let slugs = wisp.session.read(cx).active_slugs();
+        wisp.settings.read(cx).picks(&slugs)
+    }
+}
+
+/// What the provider answered a search with, before it is ranked against the library.
+#[derive(Default)]
+pub(crate) struct Catalog {
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) albums: Vec<Album>,
+    pub(crate) playlists: Vec<Playlist>,
+    pub(crate) artists: Vec<SavedArtist>,
+}
+
+impl Catalog {
+    fn clear(&mut self) {
+        self.tracks.clear();
+        self.albums.clear();
+        self.playlists.clear();
+        self.artists.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tracks.is_empty()
+            && self.albums.is_empty()
+            && self.playlists.is_empty()
+            && self.artists.is_empty()
+    }
+}
+
+struct Query {
+    terms: Vec<String>,
+    whole: String,
+}
+
+impl Query {
+    fn new(query: &str) -> Self {
+        let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        Self {
+            whole: terms.join(" "),
+            terms,
+        }
+    }
+}
+
+struct Scored {
+    score: u32,
+    popularity: u32,
+    hit: Hit,
+}
+
+/// Aborts a provider request when the search task waiting on it is dropped, so a query the
+/// user typed past stops asking and stops retrying.
+struct Abort(AbortHandle);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A search against the provider and the library, ranked into hits as the answers land. The
+/// search page holds two: one for the results of a submitted query and one that suggests hits
+/// while the query is typed.
+pub struct Search {
+    query: String,
+    served: Option<String>,
+    /// The typed query or the linked item's name used to rank matching results.
+    matching: String,
+    /// The resolved item kept ahead of ordinary matches for the same name.
+    linked: Option<Hit>,
+    catalog: Catalog,
+    portraits: HashMap<String, String>,
+    hits: Vec<Hit>,
+    loading: bool,
+    error: Option<String>,
+    session: Entity<Session>,
+    library: Entity<Library>,
+    io: Io,
+    task: Option<Task<()>>,
+    faces: Option<Task<()>>,
+}
+
+impl Search {
+    pub fn new(
+        session: Entity<Session>,
+        library: Entity<Library>,
+        io: Io,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.subscribe(&session, |this, _, event, cx| match event {
+            SessionEvent::SignedOut => {
+                this.forget_results();
+                cx.notify();
+            }
+            SessionEvent::SignedIn => {
+                let pending = this.query.clone();
+                this.query.clear();
+                this.ask(&pending, cx);
+            }
+            SessionEvent::Reconnected | SessionEvent::WentOffline | SessionEvent::LocalChanged => {}
+        })
+        .detach();
+
+        cx.observe(&library, |this, _, cx| this.rank(cx)).detach();
+
+        Self {
+            query: String::new(),
+            served: None,
+            matching: String::new(),
+            linked: None,
+            catalog: Catalog::default(),
+            portraits: HashMap::new(),
+            hits: Vec::new(),
+            loading: false,
+            error: None,
+            session,
+            library,
+            io,
+            task: None,
+            faces: None,
+        }
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// The resolved item name used to search for matches to a pasted link.
+    pub fn linked_query(&self) -> Option<&str> {
+        self.linked.as_ref().map(|_| self.matching.as_str())
+    }
+
+    pub fn hits(&self) -> &[Hit] {
+        &self.hits
+    }
+
+    pub fn of(&self, kind: Kind) -> impl Iterator<Item = &Hit> {
+        self.hits.iter().filter(move |hit| hit.kind() == kind)
+    }
+
+    pub fn best(&self) -> Option<&Hit> {
+        self.hits.first()
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    fn forget_results(&mut self) {
+        self.task = None;
+        self.faces = None;
+        self.query.clear();
+        self.served = None;
+        self.matching.clear();
+        self.linked = None;
+        self.catalog.clear();
+        self.portraits.clear();
+        self.hits.clear();
+        self.loading = false;
+        self.error = None;
+    }
+
+    /// Debounces text searches and resolves active-provider links into metadata and name searches.
+    /// Changing the query cancels pending work and signing out clears the results.
+    pub fn ask(&mut self, query: &str, cx: &mut Context<Self>) {
+        let query = query.trim().to_owned();
+        let answered = self.loading || self.served.as_deref() == Some(query.as_str());
+        if query == self.query && answered {
+            return;
+        }
+        self.query = query.clone();
+        self.matching = query.clone();
+        self.linked = None;
+        self.error = None;
+        self.task = None;
+        let linked = self.session.read(cx).read_link(&query);
+        if linked.is_some() {
+            self.matching.clear();
+            self.catalog.clear();
+            self.faces = None;
+            self.portraits.clear();
+        }
+
+        if query.is_empty() {
+            self.task = None;
+            self.catalog.clear();
+            self.served = Some(String::new());
+            self.loading = false;
+            self.rank(cx);
+            return;
+        }
+
+        self.rank(cx);
+
+        let Some(client) = self.session.read(cx).client() else {
+            self.loading = false;
+            cx.notify();
+            return;
+        };
+
+        if let Some((slug, _)) = &linked
+            && self.session.read(cx).provider_slug() != Some(*slug)
+        {
+            self.loading = false;
+            cx.notify();
+            return;
+        }
+        self.loading = true;
+        cx.notify();
+
+        let io = self.io.clone();
+        self.task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DEBOUNCE).await;
+
+            let mut asked = query.clone();
+            if let Some((slug, mut linked)) = linked {
+                if linked == Linked::Short {
+                    let address = query.clone();
+                    let followed =
+                        join(io.spawn(async move { Ok(link::follow(&address).await) })).await;
+                    let resolved = this
+                        .update(cx, |this, cx| {
+                            let followed = followed.ok().flatten()?;
+                            let session = this.session.read(cx);
+                            std::iter::once(followed.address.as_str())
+                                .chain(link::addresses(&followed.page))
+                                .find_map(|address| {
+                                    let (owner, linked) = session.read_link(address)?;
+                                    (owner == slug && linked != Linked::Short).then_some(linked)
+                                })
+                        })
+                        .ok()
+                        .flatten();
+                    linked = resolved.unwrap_or(Linked::Short);
+                }
+                let api = client.clone();
+                let found =
+                    join(io.spawn(async move { linked_hit(api.as_ref(), linked).await })).await;
+                let Ok(hit) = found else {
+                    this.update(cx, |this, cx| {
+                        if this.query == query {
+                            this.loading = false;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                    return;
+                };
+                asked = hit_name(&hit).to_owned();
+                this.update(cx, |this, cx| {
+                    if this.query == query {
+                        this.matching = asked.clone();
+                        this.linked = Some(hit);
+                        this.rank(cx);
+                    }
+                })
+                .ok();
+            }
+
+            let request = io.spawn(async move { client.search_all(&asked).await });
+            let _abort = Abort(request.abort_handle());
+            let found = request
+                .await
+                .unwrap_or_else(|error| Found::failed(error.into()));
+
+            this.update(cx, |this, cx| {
+                if this.query != query {
+                    return;
+                }
+                this.loading = false;
+
+                // a part that failed keeps what it showed before, so a refused request
+                // never blanks the page; the query counts as served only once every part
+                // answered, so asking it again fetches the rest
+                let mut trouble = Vec::new();
+                let Catalog {
+                    tracks,
+                    albums: kept_albums,
+                    playlists: kept_playlists,
+                    artists: kept_artists,
+                } = std::mem::take(&mut this.catalog);
+                this.catalog = Catalog {
+                    tracks: salvaged(found.tracks, tracks, &mut trouble),
+                    albums: salvaged(found.albums, kept_albums, &mut trouble),
+                    playlists: salvaged(found.playlists, kept_playlists, &mut trouble),
+                    artists: salvaged(found.artists, kept_artists, &mut trouble),
+                };
+                match trouble.first() {
+                    Some(reason) => Network::failed(reason, cx),
+                    None => {
+                        Network::reached(cx);
+                        this.served = Some(query);
+                    }
+                }
+                trouble.dedup();
+                this.error =
+                    (!trouble.is_empty() && this.catalog.is_empty()).then(|| trouble.join(" · "));
+                this.rank(cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn fetch_portraits(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<String> = self
+            .hits
+            .iter()
+            .filter_map(|hit| match hit {
+                Hit::Artist(artist) if artist.cover.is_none() => artist.id.clone(),
+                Hit::Artist(_) => None,
+                Hit::Song(_) | Hit::Album(_) | Hit::Playlist(_) => None,
+            })
+            .filter(|id| !self.portraits.contains_key(id))
+            .collect();
+
+        if wanted.is_empty() {
+            return;
+        }
+
+        let Some(client) = self.session.read(cx).client() else {
+            return;
+        };
+
+        let io = self.io.clone();
+        let asked = wanted.clone();
+        self.faces = Some(cx.spawn(async move |this, cx| {
+            let found = join(io.spawn(async move { client.artist_images(wanted).await })).await;
+
+            this.update(cx, |this, cx| {
+                let Ok(found) = found else {
+                    return;
+                };
+                for id in asked {
+                    this.portraits.entry(id).or_default();
+                }
+                this.portraits.extend(found);
+                this.rank(cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn rank(&mut self, cx: &mut Context<Self>) {
+        let query = self.matching.trim();
+        if query.is_empty() {
+            self.hits.clear();
+            cx.notify();
+            return;
+        }
+
+        self.hits = {
+            let held = self.library.read(cx);
+            let state = held.state(Shelf::Streaming);
+            rank(
+                state.tracks(),
+                state.albums(),
+                state.playlists(),
+                &self.catalog,
+                &self.portraits,
+                query,
+            )
+        };
+        if let Some(linked) = &self.linked {
+            self.hits.retain(|hit| !same_hit(hit, linked));
+            self.hits.insert(0, linked.clone());
+        }
+        self.fetch_portraits(cx);
+        cx.notify();
+    }
+}
+
+/// Loads the linked item's metadata without changing the active provider or playback.
+async fn linked_hit(client: &dyn MusicApi, linked: Linked) -> Result<Hit> {
+    match linked {
+        Linked::Track(id) => Ok(Hit::Song(Box::new(client.track(&id).await?))),
+        Linked::Artist(id) => {
+            let artist = client.artist(&id).await?;
+            Ok(Hit::Artist(ArtistHit {
+                name: artist.name,
+                id: Some(id),
+                cover: artist.cover_large,
+                saved: 0,
+            }))
+        }
+        Linked::Album(id) => {
+            let album = client.album(&id).await?.album;
+            Ok(Hit::Album(AlbumHit {
+                id: album.id,
+                name: album.name,
+                artists: album.artists,
+                artist_refs: album.artist_refs,
+                cover: album.cover,
+                year: album.year,
+            }))
+        }
+        Linked::Playlist(id) => {
+            let playlist = client.playlist(&id).await?.playlist;
+            Ok(Hit::Playlist(PlaylistHit {
+                id: playlist.id,
+                name: playlist.name,
+                owner: playlist.owner,
+                cover: playlist.cover,
+            }))
+        }
+        _ => anyhow::bail!("link has no searchable metadata"),
+    }
+}
+
+fn hit_name(hit: &Hit) -> &str {
+    match hit {
+        Hit::Song(track) => &track.name,
+        Hit::Artist(artist) => &artist.name,
+        Hit::Album(album) => &album.name,
+        Hit::Playlist(playlist) => &playlist.name,
+    }
+}
+
+/// Compares provider ids so the linked item appears only once in the suggestions.
+fn same_hit(left: &Hit, right: &Hit) -> bool {
+    match (left, right) {
+        (Hit::Song(left), Hit::Song(right)) => left.id.is_some() && left.id == right.id,
+        (Hit::Artist(left), Hit::Artist(right)) => left.id.is_some() && left.id == right.id,
+        (Hit::Album(left), Hit::Album(right)) => left.id == right.id,
+        (Hit::Playlist(left), Hit::Playlist(right)) => left.id == right.id,
+        _ => false,
+    }
+}
+
+/// The hits for `asked`, best first: the provider's `catalog` and what the library holds that
+/// fits, artists drawn from both. The command line ranks with this too, so it finds what the
+/// search page finds.
+pub(crate) fn rank(
+    library: &[Track],
+    albums: &[Album],
+    playlists: &[Playlist],
+    catalog: &Catalog,
+    portraits: &HashMap<String, String>,
+    asked: &str,
+) -> Vec<Hit> {
+    let query = Query::new(asked);
+    if query.terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut all = songs(library, &catalog.tracks, &query);
+    all.extend(artists(library, catalog, albums, portraits, &query));
+    all.extend(albums_of(albums, library, catalog, &query));
+    all.extend(playlists_of(playlists, &catalog.playlists, &query));
+    order(&mut all);
+
+    all.into_iter().map(|scored| scored.hit).collect()
+}
+
+/// The hits of `kind` for `asked` in the local library alone, best first and at most `take` of
+/// them. `wisp play -s --local` and its siblings ask this, so they find what the search page
+/// finds on the local library, with no provider searched.
+pub(crate) fn matching(
+    tracks: &[Track],
+    albums: &[Album],
+    playlists: &[Playlist],
+    asked: &str,
+    kind: Kind,
+    take: usize,
+) -> Vec<Hit> {
+    rank(
+        tracks,
+        albums,
+        playlists,
+        &Catalog::default(),
+        &HashMap::new(),
+        asked,
+    )
+    .into_iter()
+    .filter(|hit| hit.kind() == kind)
+    .take(take)
+    .collect()
+}
+
+fn songs(library: &[Track], catalog: &[Track], query: &Query) -> Vec<Scored> {
+    let mut scored: Vec<Scored> = Vec::new();
+
+    for (track, rank) in sources(library, catalog) {
+        if rank.is_some() && kept(library, track) {
+            continue;
+        }
+        // A saved copy keeps the metadata it was stored with, which may predate a sale mark or
+        // a stream refusal; the provider's fresh row for the same id says how it plays now.
+        let track = match (rank, catalog.iter().find(|fresh| fresh.id == track.id)) {
+            (None, Some(fresh)) => fresh,
+            _ => track,
+        };
+
+        let fields = [
+            (TITLE, track.name.as_str()),
+            (ARTIST, track.artists.as_str()),
+            (ALBUM, track.album.as_str()),
+        ];
+        let Some(score) = favored(fit(&fields, query), rank).max(rank) else {
+            continue;
+        };
+
+        scored.push(Scored {
+            score,
+            popularity: track.popularity,
+            hit: Hit::Song(Box::new(track.clone())),
+        });
+    }
+
+    capped(scored)
+}
+
+fn albums_of(albums: &[Album], library: &[Track], catalog: &Catalog, query: &Query) -> Vec<Scored> {
+    let saved = albums.iter().map(|album| {
+        (
+            &album.id,
+            &album.name,
+            &album.artists,
+            &album.artist_refs,
+            &album.cover,
+            None,
+            0,
+            album.year,
+        )
+    });
+    let total = catalog.albums.len();
+    let found = catalog.albums.iter().enumerate().map(move |(at, album)| {
+        (
+            &album.id,
+            &album.name,
+            &album.artists,
+            &album.artist_refs,
+            &album.cover,
+            Some(placed(at, total)),
+            0,
+            album.year,
+        )
+    });
+    let derived = sources(library, &catalog.tracks).filter_map(|(track, rank)| {
+        let id = track.album_id.as_ref()?;
+        Some((
+            id,
+            &track.album,
+            &track.artists,
+            &track.artist_refs,
+            &track.cover,
+            rank,
+            track.popularity,
+            0,
+        ))
+    });
+
+    let mut scored: Vec<Scored> = Vec::new();
+    let mut seen: Vec<&String> = Vec::new();
+    for (id, name, artists, artist_refs, cover, rank, popularity, year) in
+        saved.chain(found).chain(derived)
+    {
+        let fields = [(TITLE, name.as_str()), (ARTIST, artists.as_str())];
+        let Some(score) = favored(fit(&fields, query), rank).max(inherited(rank)) else {
+            continue;
+        };
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+
+        scored.push(Scored {
+            score,
+            popularity,
+            hit: Hit::Album(AlbumHit {
+                id: id.clone(),
+                name: name.clone(),
+                artists: artists.clone(),
+                artist_refs: artist_refs.clone(),
+                cover: cover.clone(),
+                year,
+            }),
+        });
+    }
+
+    capped(scored)
+}
+
+fn playlists_of(playlists: &[Playlist], catalog: &[Playlist], query: &Query) -> Vec<Scored> {
+    let total = catalog.len();
+    let saved = playlists.iter().map(|playlist| (playlist, None));
+    let found = catalog
+        .iter()
+        .enumerate()
+        .map(move |(at, playlist)| (playlist, Some(placed(at, total))));
+
+    let mut scored: Vec<Scored> = Vec::new();
+    let mut seen: Vec<&String> = Vec::new();
+    for (playlist, rank) in saved.chain(found) {
+        let fields = [
+            (TITLE, playlist.name.as_str()),
+            (ARTIST, playlist.owner.as_str()),
+        ];
+        let Some(score) = favored(fit(&fields, query), rank).max(inherited(rank)) else {
+            continue;
+        };
+        if seen.contains(&&playlist.id) {
+            continue;
+        }
+        seen.push(&playlist.id);
+
+        scored.push(Scored {
+            score,
+            popularity: 0,
+            hit: Hit::Playlist(PlaylistHit {
+                id: playlist.id.clone(),
+                name: playlist.name.clone(),
+                owner: playlist.owner.clone(),
+                cover: playlist.cover.clone(),
+            }),
+        });
+    }
+
+    capped(scored)
+}
+
+/// The artists that fit `query`. The ones the provider's artist search found rank by their whole
+/// place in its answer, as found songs do. Artists drawn from songs get only part of their song's
+/// place, so they come after the found ones unless their name fits the query better. A plain video
+/// channel credited on a track or album is never offered as an artist.
+fn artists(
+    library: &[Track],
+    catalog: &Catalog,
+    albums: &[Album],
+    portraits: &HashMap<String, String>,
+    query: &Query,
+) -> Vec<Scored> {
+    let mut tallies: Vec<(u32, u32, ArtistHit)> = Vec::new();
+
+    let mut record = |artist: &ArtistRef, face: Option<&String>, score, popularity, mine| {
+        let name = &artist.name;
+        let id = artist.id.clone();
+        let cover = face
+            .or_else(|| id.as_ref().and_then(|id| portraits.get(id)))
+            .filter(|url| !url.is_empty())
+            .cloned();
+        match tallies
+            .iter_mut()
+            .find(|(_, _, current)| match (&current.id, &id) {
+                (Some(current), Some(incoming)) => current == incoming,
+                (None, _) | (_, None) => current.name == *name,
+            }) {
+            Some((best, top, current)) => {
+                *best = (*best).max(score);
+                *top = (*top).max(popularity);
+                current.saved += mine;
+                current.id = current.id.take().or(id);
+                current.cover = current.cover.take().or(cover);
+            }
+            None => tallies.push((
+                score,
+                popularity,
+                ArtistHit {
+                    name: name.clone(),
+                    id,
+                    cover,
+                    saved: mine,
+                },
+            )),
+        }
+    };
+
+    let total = catalog.artists.len();
+    for (at, found) in catalog.artists.iter().enumerate() {
+        let rank = Some(placed(at, total));
+        let Some(score) = favored(named(&found.name, query), rank).max(rank) else {
+            continue;
+        };
+        let artist = ArtistRef {
+            name: found.name.clone(),
+            id: Some(found.id.clone()),
+            channel: false,
+        };
+        record(&artist, found.cover.as_ref(), score, 0, 0);
+    }
+    for (track, rank) in sources(library, &catalog.tracks) {
+        for artist in track.artist_refs.iter().filter(|artist| !artist.channel) {
+            let Some(score) = favored(named(&artist.name, query), rank).max(inherited(rank)) else {
+                continue;
+            };
+            let mine = usize::from(rank.is_none());
+            record(artist, None, score, track.popularity, mine);
+        }
+    }
+    for album in albums {
+        for artist in album.artist_refs.iter().filter(|artist| !artist.channel) {
+            let Some(score) = favored(named(&artist.name, query), None) else {
+                continue;
+            };
+            record(artist, None, score, 0, 0);
+        }
+    }
+
+    capped(
+        tallies
+            .into_iter()
+            .map(|(score, popularity, artist)| Scored {
+                score,
+                popularity,
+                hit: Hit::Artist(artist),
+            })
+            .collect(),
+    )
+}
+
+fn sources<'a>(
+    library: &'a [Track],
+    catalog: &'a [Track],
+) -> impl Iterator<Item = (&'a Track, Option<u32>)> {
+    let total = catalog.len();
+
+    library.iter().map(|track| (track, None)).chain(
+        catalog
+            .iter()
+            .enumerate()
+            .map(move |(at, track)| (track, Some(placed(at, total)))),
+    )
+}
+
+fn placed(at: usize, total: usize) -> u32 {
+    if total <= 1 {
+        return TOP;
+    }
+    let last = total - 1;
+    TOP - (TOP - TAIL) * at.min(last) as u32 / last as u32
+}
+
+fn inherited(rank: Option<u32>) -> Option<u32> {
+    rank.map(|score| score * DERIVED / 100)
+}
+
+fn favored(score: Option<u32>, rank: Option<u32>) -> Option<u32> {
+    match rank {
+        Some(_) => score,
+        None => score.map(|score| score + MINE),
+    }
+}
+
+fn order(scored: &mut [Scored]) {
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then(right.popularity.cmp(&left.popularity))
+    });
+}
+
+fn capped(mut scored: Vec<Scored>) -> Vec<Scored> {
+    order(&mut scored);
+    scored.truncate(LIMIT);
+    scored
+}
+
+/// The rows a search part answered with, or the rows it showed before when the request
+/// failed. The failure is logged and recorded in `trouble`.
+fn salvaged<T>(found: Result<Vec<T>>, kept: Vec<T>, trouble: &mut Vec<String>) -> Vec<T> {
+    match found {
+        Ok(found) => found,
+        Err(error) => {
+            log::warn!("search: {error:#}");
+            trouble.push(format!("{error:#}"));
+            kept
+        }
+    }
+}
+
+fn kept(library: &[Track], track: &Track) -> bool {
+    track
+        .id
+        .as_ref()
+        .is_some_and(|id| library.iter().any(|kept| kept.id.as_ref() == Some(id)))
+}
+
+fn score(value: &str, term: &str) -> u32 {
+    let value = value.trim().to_lowercase();
+    if value == term {
+        return EXACT;
+    }
+    if value.starts_with(term) {
+        return PREFIX;
+    }
+    if value.split_whitespace().any(|word| word.starts_with(term)) {
+        return WORD;
+    }
+    match value.contains(term) {
+        true => INSIDE,
+        false => 0,
+    }
+}
+
+fn fit(fields: &[(u32, &str)], query: &Query) -> Option<u32> {
+    let ceiling = fields.iter().map(|(weight, _)| *weight).max()? * EXACT;
+    let best = |term: &str| {
+        fields
+            .iter()
+            .map(|(weight, value)| weight * score(value, term))
+            .max()
+            .unwrap_or(0)
+    };
+
+    let spread = query.terms.iter().try_fold(0, |total, term| {
+        let hit = best(term);
+        (hit > 0).then_some(total + hit)
+    })?;
+    let mean = spread * 100 / (ceiling * query.terms.len() as u32);
+
+    Some(mean.max(best(&query.whole) * 100 / ceiling).min(100))
+}
+
+fn named(value: &str, query: &Query) -> Option<u32> {
+    fit(&[(NAME, value)], query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rank(library: &[Track], albums: &[Album], catalog: &[Track], asked: &str) -> Vec<Hit> {
+        let catalog = Catalog {
+            tracks: catalog.to_vec(),
+            ..Catalog::default()
+        };
+
+        super::rank(library, albums, &[], &catalog, &HashMap::new(), asked)
+    }
+
+    fn track(name: &str, artists: &str, album: &str) -> Track {
+        Track {
+            id: Some(format!("{name}:{artists}")),
+            name: name.to_owned(),
+            playable: true,
+            artists: artists.to_owned(),
+            artist_refs: artists
+                .split(", ")
+                .map(|name| ArtistRef {
+                    name: name.to_owned(),
+                    id: None,
+                    channel: false,
+                })
+                .collect(),
+            album: album.to_owned(),
+            album_id: Some(album.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    fn liked(name: &str, artists: &str, album: &str, popularity: u32) -> Track {
+        Track {
+            popularity,
+            ..track(name, artists, album)
+        }
+    }
+
+    fn rhapsody() -> Track {
+        track("Bohemian Rhapsody", "Queen", "A Night at the Opera")
+    }
+
+    fn dora() -> Track {
+        track("Дорога", "Дора", "Дорадура")
+    }
+
+    fn titles(hits: &[Hit]) -> Vec<&str> {
+        hits.iter()
+            .filter_map(|hit| match hit {
+                Hit::Song(track) => Some(track.name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn count(hits: &[Hit], kind: Kind) -> usize {
+        hits.iter().filter(|hit| hit.kind() == kind).count()
+    }
+
+    #[test]
+    fn whole_string_query_matches() {
+        let hits = rank(&[rhapsody()], &[], &[], "bohemian rhapsody");
+        assert_eq!(titles(&hits), ["Bohemian Rhapsody"]);
+    }
+
+    #[test]
+    fn title_and_artist_terms_match_in_any_order() {
+        let hits = rank(&[rhapsody()], &[], &[], "queen bohemian");
+        assert_eq!(titles(&hits), ["Bohemian Rhapsody"]);
+    }
+
+    #[test]
+    fn every_term_must_match() {
+        let hits = rank(&[rhapsody()], &[], &[], "queen zeppelin");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn unmatched_catalog_entries_survive() {
+        let hits = rank(&[], &[], &[dora()], "dora");
+        assert_eq!(titles(&hits), ["Дорога"]);
+        assert_eq!(count(&hits, Kind::Artist), 1);
+        assert_eq!(count(&hits, Kind::Album), 1);
+    }
+
+    #[test]
+    fn a_saved_copy_takes_the_fresh_play_state_from_the_provider() {
+        let mut saved = rhapsody();
+        saved.playable = true;
+        let mut fresh = rhapsody();
+        fresh.playable = false;
+        fresh.paid = true;
+
+        let hits = rank(&[saved], &[], &[fresh], "Bohemian Rhapsody");
+        let Some(Hit::Song(track)) = hits.first() else {
+            panic!("the saved song is listed");
+        };
+        assert!(!track.playable);
+        assert!(track.paid);
+    }
+
+    #[test]
+    fn saved_track_is_listed_once() {
+        let saved = rhapsody();
+        let library = [saved.clone()];
+        let hits = rank(&library, &[], &[saved], "queen");
+        assert_eq!(titles(&hits), ["Bohemian Rhapsody"]);
+    }
+
+    #[test]
+    fn catalog_keeps_the_order_it_answered_with() {
+        let catalog = [
+            track("First", "Nobody", "One"),
+            track("Second", "Nobody", "Two"),
+            track("Third", "Nobody", "Three"),
+        ];
+        let hits = rank(&[], &[], &catalog, "lyric phrase");
+        assert_eq!(titles(&hits), ["First", "Second", "Third"]);
+    }
+
+    #[test]
+    fn library_exact_title_outranks_the_catalog_top() {
+        let hits = rank(&[rhapsody()], &[], &[dora()], "bohemian rhapsody");
+        assert_eq!(titles(&hits), ["Bohemian Rhapsody", "Дорога"]);
+    }
+
+    #[test]
+    fn a_library_hit_holds_its_place_when_the_catalog_answers() {
+        let library = [rhapsody()];
+        assert_eq!(
+            titles(&rank(&library, &[], &[], "bohe")),
+            ["Bohemian Rhapsody"]
+        );
+        assert_eq!(
+            titles(&rank(&library, &[], &[dora()], "bohe")),
+            ["Bohemian Rhapsody", "Дорога"]
+        );
+    }
+
+    #[test]
+    fn a_weak_library_hit_still_beats_the_catalog_top() {
+        let hits = rank(&[rhapsody()], &[], &[dora()], "hapsod");
+        assert_eq!(titles(&hits), ["Bohemian Rhapsody", "Дорога"]);
+    }
+
+    #[test]
+    fn popularity_breaks_ties() {
+        let library = [
+            liked("Fever", "Bullet For My Valentine", "Fever", 10),
+            liked("Fever", "Peggy Lee", "Black Coffee", 80),
+        ];
+        let hits = rank(&library, &[], &[], "fever");
+        let Some(Hit::Song(first)) = hits.first() else {
+            panic!("expected a song first");
+        };
+        assert_eq!(first.artists, "Peggy Lee");
+    }
+
+    #[test]
+    fn library_songs_are_counted_for_artists() {
+        let hits = rank(&[rhapsody()], &[], &[rhapsody()], "queen");
+        let Some(Hit::Artist(artist)) = hits.iter().find(|hit| hit.kind() == Kind::Artist) else {
+            panic!("expected an artist hit");
+        };
+        assert_eq!(artist.saved, 1);
+    }
+
+    #[test]
+    fn artists_with_the_same_name_keep_separate_ids() {
+        let mut first = track("One", "Echo", "First");
+        first.artist_refs[0].id = Some("artist-one".to_owned());
+        let mut second = track("Two", "Echo", "Second");
+        second.artist_refs[0].id = Some("artist-two".to_owned());
+
+        let hits = rank(&[], &[], &[first, second], "echo");
+        let ids: Vec<_> = hits
+            .iter()
+            .filter_map(|hit| match hit {
+                Hit::Artist(artist) => artist.id.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"artist-one"));
+        assert!(ids.contains(&"artist-two"));
+    }
+
+    #[test]
+    fn artist_pictures_come_from_portraits() {
+        let mut portrait = track("One", "Echo", "First");
+        portrait.artist_refs[0].id = Some("artist-one".to_owned());
+        portrait.cover = Some("https://album-cover".to_owned());
+
+        let portraits = HashMap::from([("artist-one".to_owned(), "https://portrait".to_owned())]);
+        let hits = super::rank(
+            &[portrait],
+            &[],
+            &[],
+            &Catalog::default(),
+            &portraits,
+            "echo",
+        );
+
+        let Some(Hit::Artist(artist)) = hits.iter().find(|hit| hit.kind() == Kind::Artist) else {
+            panic!("expected an artist hit");
+        };
+        assert_eq!(artist.cover.as_deref(), Some("https://portrait"));
+    }
+
+    fn local_album(id: &str, name: &str, artists: &str) -> Album {
+        Album {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            artists: artists.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn local_matching_finds_a_song_of_its_kind() {
+        let library = [rhapsody()];
+        let hits = matching(&library, &[], &[], "rhapsody", Kind::Song, 1);
+        assert_eq!(titles(&hits), vec!["Bohemian Rhapsody"]);
+    }
+
+    #[test]
+    fn local_matching_finds_an_album_of_its_kind() {
+        let albums = [local_album("album-a", "A Night at the Opera", "Queen")];
+        let hits = matching(&[], &albums, &[], "night opera", Kind::Album, 1);
+        assert_eq!(count(&hits, Kind::Album), 1);
+        assert!(matches!(&hits[0], Hit::Album(album) if album.id == "album-a"));
+    }
+
+    #[test]
+    fn local_matching_finds_an_artist_of_its_kind() {
+        let library = [rhapsody()];
+        let hits = matching(&library, &[], &[], "queen", Kind::Artist, 1);
+        assert!(matches!(&hits[0], Hit::Artist(artist) if artist.name == "Queen"));
+    }
+
+    #[test]
+    fn local_matching_leaves_out_other_kinds() {
+        let library = [rhapsody()];
+        let hits = matching(&library, &[], &[], "queen", Kind::Album, 20);
+        assert!(hits.iter().all(|hit| hit.kind() == Kind::Album));
+    }
+
+    #[test]
+    fn local_matching_takes_at_most_the_asked_number() {
+        let library = [
+            track("Night Train", "Echo", "One"),
+            track("Night Owl", "Echo", "Two"),
+        ];
+        let hits = matching(&library, &[], &[], "night", Kind::Song, 1);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn local_matching_is_empty_when_nothing_fits() {
+        let library = [rhapsody()];
+        let albums = [local_album("album-a", "A Night at the Opera", "Queen")];
+        assert!(matching(&library, &albums, &[], "zzzz", Kind::Song, 20).is_empty());
+        assert!(matching(&library, &albums, &[], "zzzz", Kind::Album, 20).is_empty());
+        assert!(matching(&library, &albums, &[], "zzzz", Kind::Artist, 20).is_empty());
+    }
+}

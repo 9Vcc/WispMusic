@@ -1,0 +1,148 @@
+name: Release
+
+# 推 v* 标签触发：在 GitHub runner 上构建 Windows 安装包，再发到 CNB 更新仓库。
+# 发布链路：cargo build-installer（xtask：release 构建 + makensis）
+#          → node scripts/publish-cnb.mjs（安装包传 CNB Release 附件，带 sha256 + minisign 签名的
+#            update-gpui.json 推到更新仓库 main）。
+# 本机也能用同一条脚本发布（CNB_TOKEN=xxx node scripts/publish-cnb.mjs）。
+#
+# 同一条流水线还会在本仓库建 GitHub Release（安装包；本仓库是私有的，只有仓库成员能下载）。
+# 保留策略：GitHub 与 CNB 都只保留当前最新一版 Release 和 tag，发布成功后自动删除更旧的版本。
+#
+# 需要的仓库配置（Settings → Secrets and variables → Actions）：
+#   secrets.CNB_TOKEN         CNB 访问令牌（需 repo-release:rw + repo-code:rw）
+#   secrets.TAURI_PRIVATE_KEY Tauri 更新私钥（沿用旧版本，minisign 签名）
+#   secrets.TAURI_PASSWORD    Tauri 更新私钥密码
+#   vars.CNB_REPO            更新仓库（group/repo，须与客户端端点一致）
+on:
+  push:
+    tags:
+      - "v*"
+
+# 同一个 tag 只允许一条流水线在跑：tag 被反复重推时避免并发抢建 Release / 并发推清单。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    # gh release create/upload 需要写权限（用内置 GITHUB_TOKEN）。
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure NSIS
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+          }
+
+      # 客户端把更新清单地址编译进 exe：这里必须与 vars.CNB_REPO 指向同一个更新仓库。
+      - name: Pin the update endpoint
+        shell: pwsh
+        run: |
+          if (-not $env:CNB_REPO) { throw "缺少 vars.CNB_REPO，无法确定更新仓库" }
+          "WISP_UPDATE_ENDPOINT=https://cnb.cool/$env:CNB_REPO/-/git/raw/main/update-gpui.json" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        env:
+          CNB_REPO: ${{ vars.CNB_REPO }}
+
+      - name: Build installer
+        run: cargo build-installer
+        env:
+          WISP_UPDATE_ENDPOINT: https://cnb.cool/${{ vars.CNB_REPO }}/-/git/raw/main/update-gpui.json
+
+      - name: Publish updater to CNB
+        run: node scripts/publish-cnb.mjs
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPO: ${{ vars.CNB_REPO }}
+          TAG_NAME: ${{ github.ref_name }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PASSWORD: ${{ secrets.TAURI_PASSWORD || secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # GitHub Release（私有仓库）：安装包。
+      # 更新说明取 .github/workflows/CHANGELOG.md 的版本段落；tag 重推时覆盖附件。
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          node --input-type=module -e "const m = await import('./scripts/changelog-notes.mjs'); const fs = await import('node:fs/promises'); const notes = await m.readChangelogNotes('.github/workflows/CHANGELOG.md', process.env.TAG_NAME); await fs.writeFile('release-notes.md', notes || '（未提供更新说明，见 .github/workflows/CHANGELOG.md）', 'utf8');"
+
+          $asset = Get-Item target/installer/*-setup.exe | Select-Object -First 1
+          if (-not $asset) { throw "缺少发布产物：target/installer/*-setup.exe" }
+          $assets = @("target/installer/$($asset.Name)")
+          foreach ($f in $assets) {
+            if (-not (Test-Path $f)) { throw "缺少发布产物：$f" }
+          }
+
+          gh release view $env:TAG_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:TAG_NAME --notes-file release-notes.md
+            gh release upload $env:TAG_NAME @assets --clobber
+          } else {
+            gh release create $env:TAG_NAME --title "WispMusic $env:TAG_NAME" --notes-file release-notes.md @assets
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release 发布失败" }
+
+      # 只保留最新一版：GitHub 删掉比当前版本旧的所有 Release 和 tag；
+      # CNB 侧由 scripts/publish-cnb.mjs 保留 1 个 Release（KEEP_VERSIONS=1）并删除旧 tag。
+      - name: Prune old GitHub releases and tags
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $versionMatch = [regex]::Match($env:TAG_NAME, '^v?(\d+)\.(\d+)\.(\d+)')
+          if (-not $versionMatch.Success) {
+            Write-Warning "tag 不是语义化版本，跳过旧版本清理：$env:TAG_NAME"
+            exit 0
+          }
+          $currentVersion = [version]("{0}.{1}.{2}" -f $versionMatch.Groups[1].Value, $versionMatch.Groups[2].Value, $versionMatch.Groups[3].Value)
+
+          function Test-OlderVersionTag([string]$tag) {
+            $m = [regex]::Match($tag, '^v?(\d+)\.(\d+)\.(\d+)')
+            if (-not $m.Success) { return $false }
+            $v = [version]("{0}.{1}.{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value)
+            return $v -lt $currentVersion
+          }
+
+          $releaseTags = @(gh api "repos/$env:GITHUB_REPOSITORY/releases" --paginate --jq '.[].tag_name')
+          if ($LASTEXITCODE -ne 0) { throw "列出 GitHub Release 失败" }
+          foreach ($tag in $releaseTags) {
+            if ($tag -and (Test-OlderVersionTag $tag)) {
+              Write-Host "→ 删除旧 Release：$tag"
+              gh release delete $tag --yes
+              if ($LASTEXITCODE -ne 0) { throw "删除旧 Release 失败：$tag" }
+            }
+          }
+
+          $refs = @(gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate --jq '.[].ref')
+          if ($LASTEXITCODE -ne 0) { throw "列出 GitHub 标签失败" }
+          foreach ($ref in $refs) {
+            $tag = $ref -replace '^refs/tags/', ''
+            if (-not $tag -or -not (Test-OlderVersionTag $tag)) { continue }
+            Write-Host "→ 删除旧 tag：$tag"
+            gh api -X DELETE "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) { throw "删除旧 tag 失败：$tag" }
+          }
+
+          Write-Host "✓ 旧版本已清理，保留 $env:TAG_NAME"

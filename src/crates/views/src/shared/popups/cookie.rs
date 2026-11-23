@@ -1,0 +1,168 @@
+use std::rc::Rc;
+
+use gpui::accesskit::Role;
+use gpui::{App, Entity, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px};
+use i18n::{FluentArgs, Value as _, lookup, t};
+use ui::{ActiveTheme as _, Button, Field, Form, Input, Modal, Text};
+
+use crate::shared::steps::steps;
+
+type Action = Rc<dyn Fn(&(), &mut Window, &mut App)>;
+
+/// The walkthrough for the manual cookie sign-in: the page to send the user to and the keys of
+/// every string the dialog shows. NetEase signs in with one cookie found by name, so the flow
+/// names the site and the cookie and the strings fill them in.
+struct Guide {
+    url: &'static str,
+    /// The site the devtools show, and the cookie to copy.
+    site: &'static str,
+    cookie: &'static str,
+    title: &'static str,
+    hint: &'static str,
+    steps: [&'static str; 4],
+    note: &'static str,
+}
+
+const NETEASE: Guide = Guide {
+    url: "https://music.163.com",
+    site: "music.163.com",
+    cookie: "MUSIC_U",
+    title: "login-cookie-named-title",
+    hint: "login-cookie-named-hint",
+    steps: [
+        "login-cookie-named-step-1",
+        "login-cookie-named-step-2",
+        "login-cookie-named-step-3",
+        "login-cookie-named-step-4",
+    ],
+    note: "login-cookie-named-note",
+};
+
+/// The guide the manual sign-in shows. Wisp signs in to NetEase only, so there is one.
+fn guide() -> &'static Guide {
+    &NETEASE
+}
+
+#[derive(IntoElement)]
+pub(crate) struct CookiePrompt {
+    provider: SharedString,
+    secret: Entity<Input>,
+    submit: Option<Action>,
+    cancel: Option<Action>,
+}
+
+impl CookiePrompt {
+    pub(crate) fn new(provider: SharedString, secret: Entity<Input>) -> Self {
+        Self {
+            provider,
+            secret,
+            submit: None,
+            cancel: None,
+        }
+    }
+
+    /// The hint key the paste field should carry, set on the input when the manual sign-in
+    /// starts so it follows the language like every other hint.
+    pub(crate) fn hint() -> &'static str {
+        guide().hint
+    }
+
+    pub(crate) fn on_submit(
+        mut self,
+        handler: impl Fn(&(), &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.submit = Some(Rc::new(handler));
+        self
+    }
+
+    pub(crate) fn on_cancel(
+        mut self,
+        handler: impl Fn(&(), &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.cancel = Some(Rc::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for CookiePrompt {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            provider,
+            secret,
+            submit,
+            cancel,
+        } = self;
+        let dismissed = cancel.clone();
+        let (submitted, escaped) = (submit.clone(), cancel.clone());
+        let theme = *cx.theme();
+        let guide = guide();
+
+        let mut args = FluentArgs::new();
+        args.set("provider", provider.as_ref());
+        args.set("site", guide.site.value());
+        args.set("cookie", guide.cookie.value());
+
+        Modal::new("cookie-prompt", lookup(guide.title, Some(&args)))
+            .w(px(560.))
+            .child(
+                Button::new("open-cookie-provider")
+                    .label(lookup("login-cookie-open", Some(&args)))
+                    .icon("icons/external-link.svg")
+                    .outline()
+                    .on_click(move |_, _, cx| cx.open_url(guide.url)),
+            )
+            .child(steps(
+                guide.steps.iter().map(|key| lookup(key, Some(&args))),
+            ))
+            .child(
+                div()
+                    .id("cookie-note")
+                    .role(Role::Paragraph)
+                    .aria_label(lookup(guide.note, Some(&args)))
+                    .child(lookup(guide.note, Some(&args)))
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(theme.text(Text::Small))
+                    .text_color(theme.muted_foreground),
+            )
+            .child(
+                Form::new("cookie-form")
+                    .field(Field::new(&secret, cx))
+                    .on_submit(move |_, window, cx| {
+                        if let Some(submit) = &submitted {
+                            submit(&(), window, cx);
+                        }
+                    })
+                    .on_dismiss(move |_, window, cx| {
+                        if let Some(cancel) = &escaped {
+                            cancel(&(), window, cx);
+                        }
+                    }),
+            )
+            .action(
+                Button::new("cancel-cookies")
+                    .ghost()
+                    .label(t!("common-cancel"))
+                    .on_click(move |_, window, cx| {
+                        if let Some(cancel) = &cancel {
+                            cancel(&(), window, cx);
+                        }
+                    }),
+            )
+            .action(
+                Button::new("submit-cookies")
+                    .label(t!("login-cookie-submit"))
+                    .primary()
+                    .on_click(move |_, window, cx| {
+                        if let Some(submit) = &submit {
+                            submit(&(), window, cx);
+                        }
+                    }),
+            )
+            .on_dismiss(move |_, window, cx| {
+                if let Some(dismissed) = &dismissed {
+                    dismissed(&(), window, cx);
+                }
+            })
+    }
+}

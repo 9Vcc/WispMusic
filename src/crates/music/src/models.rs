@@ -1,0 +1,791 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+/// One climax segment of a song, in milliseconds from its start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClimaxMark {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// A size of the same cover that a provider can name without fetching anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverSize {
+    /// Big enough for a header or a desktop widget.
+    Large,
+    /// The original upload, for a cover that fills the screen.
+    Full,
+}
+
+/// What playback does when a track ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Repeat {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserProfile {
+    pub id: String,
+    pub display_name: String,
+    /// A picture for the account, when the provider hands one out. `None` falls back to the
+    /// initials of `display_name`.
+    pub avatar: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserDetail {
+    pub id: String,
+    pub name: String,
+    pub avatar: Option<String>,
+    pub followers: Option<u64>,
+    pub following: Option<u64>,
+    pub playlists: Vec<Playlist>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Contributor {
+    pub id: String,
+    pub name: String,
+    pub avatar: Option<String>,
+}
+
+impl Contributor {
+    pub fn unnamed(id: impl Into<String>) -> Self {
+        let id = id.into();
+        Self {
+            name: id.clone(),
+            id,
+            avatar: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtistRef {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// True when the credit is a plain video channel and not an artist page, as for fan
+    /// uploads. Search does not offer such a channel as an artist.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub channel: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Credit {
+    pub name: String,
+    pub role: String,
+    pub id: Option<String>,
+}
+
+/// A song or episode as a provider lists it. The default is an unplayable track with no id, so a
+/// caller that builds one from `..Default::default()` sets `playable` itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Track {
+    pub id: Option<String>,
+    pub name: String,
+    pub playable: bool,
+    /// Sold on its own and not yet unlocked by this account, which is why it is grey.
+    pub paid: bool,
+    pub artists: String,
+    pub artist_refs: Vec<ArtistRef>,
+    pub album: String,
+    /// Who the album is credited to, as the provider names it. Empty when the provider does not
+    /// say, rather than the track's own artists.
+    pub album_artist: String,
+    pub album_id: Option<String>,
+    pub cover: Option<String>,
+    pub duration: Duration,
+    pub added_at: Option<i64>,
+    pub added_by: Option<Arc<Contributor>>,
+    pub playcount: Option<u64>,
+    pub popularity: u32,
+    pub explicit: bool,
+    pub track_number: u32,
+    pub disc_number: u32,
+    pub tags: Vec<String>,
+    pub languages: Vec<String>,
+    pub credits: Vec<Credit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub owner: String,
+    pub owner_id: String,
+    pub owned: bool,
+    pub collaborative: bool,
+    pub blend: bool,
+    pub public: bool,
+    pub cover: Option<String>,
+    /// How many tracks the playlist holds. Zero also stands for a count the provider does not
+    /// report, as for a station it fills in itself, so a screen leaves it out rather than showing
+    /// it.
+    pub track_count: u32,
+    pub modified_at: Option<i64>,
+    /// The provider chooses the tracks itself, as for a Navidrome smart playlist, so none can
+    /// be added, removed or moved by hand even by its owner.
+    pub read_only: bool,
+}
+
+impl Playlist {
+    /// Whether the listener can add, remove or move this playlist's tracks.
+    pub fn takes_tracks(&self) -> bool {
+        (self.owned || self.collaborative) && !self.read_only
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReleaseType {
+    #[default]
+    Album,
+    Single,
+    Compilation,
+    Ep,
+    Audiobook,
+    Podcast,
+}
+
+impl ReleaseType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Album => "Album",
+            Self::Single => "Single",
+            Self::Compilation => "Compilation",
+            Self::Ep => "EP",
+            Self::Audiobook => "Audiobook",
+            Self::Podcast => "Podcast",
+        }
+    }
+
+    /// Reads the MusicBrainz release types a tag or a server lists, such as
+    /// `["album", "compilation"]` or a single `"EP; Live"`, in any case. A primary EP or single
+    /// wins over a compilation, and a release naming neither is an album.
+    pub fn from_musicbrainz<'a>(
+        types: impl IntoIterator<Item = &'a str>,
+        compilation: bool,
+    ) -> Self {
+        let mut named = compilation.then_some(Self::Compilation);
+        let parts = types
+            .into_iter()
+            .flat_map(|types| types.split([';', '/', ',', '\0']))
+            .map(str::trim);
+        for part in parts {
+            match part.to_ascii_lowercase().as_str() {
+                "ep" => return Self::Ep,
+                "single" => return Self::Single,
+                "compilation" => named = Some(Self::Compilation),
+                _ => {}
+            }
+        }
+        named.unwrap_or(Self::Album)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Album {
+    pub id: String,
+    pub name: String,
+    pub artists: String,
+    pub artist_refs: Vec<ArtistRef>,
+    pub cover: Option<String>,
+    pub cover_large: Option<String>,
+    pub release_type: ReleaseType,
+    pub year: i32,
+    pub track_count: u32,
+    pub release_date: String,
+    pub label: String,
+    pub copyrights: Vec<String>,
+    pub added_at: Option<i64>,
+}
+
+impl Album {
+    /// Credits the album to `artist` when it names no one. A provider calls this on releases
+    /// read from an artist's own listing, which often leaves the artist out of each entry.
+    pub fn credit(mut self, artist: &ArtistRef) -> Self {
+        if self.artists.is_empty() && self.artist_refs.is_empty() && !artist.name.is_empty() {
+            self.artists = artist.name.clone();
+            self.artist_refs = vec![artist.clone()];
+        }
+        self
+    }
+
+    /// The record label to show, trimmed. `None` when the provider names no label or the
+    /// placeholder MusicBrainz tags a release with when it has none (`[no label]`).
+    pub fn label_name(&self) -> Option<&str> {
+        let label = self.label.trim();
+        match label.is_empty() || is_no_label(label) {
+            true => None,
+            false => Some(label),
+        }
+    }
+
+    /// The copyright lines to show: the provider's own, minus any that credit the `[no label]`
+    /// placeholder. Empty when the provider gives none.
+    pub fn copyright_lines(&self) -> Vec<&str> {
+        self.copyrights
+            .iter()
+            .map(String::as_str)
+            .filter(|line| !line.to_lowercase().contains(NO_LABEL))
+            .collect()
+    }
+}
+
+/// The label MusicBrainz tags a release with when it has none.
+const NO_LABEL: &str = "[no label]";
+
+/// Whether `label` is the `[no label]` placeholder, in any letter case.
+fn is_no_label(label: &str) -> bool {
+    label.eq_ignore_ascii_case(NO_LABEL)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AlbumDetail {
+    pub album: Album,
+    pub tracks: Vec<Track>,
+}
+
+/// What an album page fills in once its tracks are already on screen: the releases the
+/// provider lists as related, with more from the same artist first and similar artists'
+/// releases topping the rail up, plus the similar artists themselves for the rail's
+/// artists tab. Every list replaces what the page held, and an empty one leaves that
+/// part alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AlbumCatalogue {
+    pub also_like: Vec<Album>,
+    pub similar: Vec<SavedArtist>,
+}
+
+impl AlbumCatalogue {
+    pub fn is_empty(&self) -> bool {
+        self.also_like.is_empty() && self.similar.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Genre {
+    pub id: String,
+    pub name: String,
+    pub cover: Option<String>,
+}
+
+/// One card of a browse shelf. A provider's home and genre pages mix whatever the shelf holds,
+/// so a track or an artist sits beside albums and playlists in the same row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GenreItem {
+    Playlist(Playlist),
+    Album(Album),
+    Genre(Genre),
+    Track(Track),
+    Artist(SavedArtist),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GenreSection {
+    pub title: String,
+    pub items: Vec<GenreItem>,
+    /// A provider genre id for the shelf's full page, when the provider can load more than
+    /// this feed carried. None keeps the full page on the feed's items.
+    pub more: Option<String>,
+}
+
+/// What one search found for every kind it looks for. Each kind keeps its own outcome, so a
+/// part the provider refused leaves the others standing.
+#[derive(Debug)]
+pub struct Found {
+    pub tracks: anyhow::Result<Vec<Track>>,
+    pub albums: anyhow::Result<Vec<Album>>,
+    pub playlists: anyhow::Result<Vec<Playlist>>,
+    pub artists: anyhow::Result<Vec<SavedArtist>>,
+}
+
+impl Found {
+    /// Every kind failed with `error`, for a provider that asks for all of them in one request.
+    pub fn failed(error: anyhow::Error) -> Self {
+        let again = || anyhow::anyhow!("{error:#}");
+        Self {
+            albums: Err(again()),
+            playlists: Err(again()),
+            artists: Err(again()),
+            tracks: Err(error),
+        }
+    }
+
+    /// Whether no kind came back at all.
+    pub fn is_failed(&self) -> bool {
+        self.tracks.is_err()
+            && self.albums.is_err()
+            && self.playlists.is_err()
+            && self.artists.is_err()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HomeFeed {
+    /// What the user has been playing lately, in every shape the provider lists it: songs and
+    /// videos, but also the albums, playlists and artists they came from.
+    pub listen_again: Vec<GenreItem>,
+    pub quick_picks: Option<Vec<Track>>,
+    pub sections: Vec<GenreSection>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GenreDetail {
+    pub name: String,
+    pub sections: Vec<GenreSection>,
+    /// The offset the provider wants for the next page, or None when this is all of it.
+    pub next_offset: Option<usize>,
+    pub total: Option<usize>,
+}
+
+impl GenreDetail {
+    /// The picture a tile for this genre wears: the first album cover on the page, else the
+    /// first playlist cover.
+    pub fn cover(&self) -> Option<String> {
+        let items = || self.sections.iter().flat_map(|section| &section.items);
+        let album = items().find_map(|item| match item {
+            GenreItem::Album(album) => album.cover.clone(),
+            _ => None,
+        });
+        album.or_else(|| {
+            items().find_map(|item| match item {
+                GenreItem::Playlist(playlist) => playlist.cover.clone(),
+                _ => None,
+            })
+        })
+    }
+}
+
+/// What reading a playlist file into the library came to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportedPlaylist {
+    /// The playlist made from the file, or `None` when none of its songs is in the library,
+    /// in which case nothing was made.
+    pub playlist: Option<Playlist>,
+    /// The file's name without its extension, which the new playlist is called.
+    pub name: String,
+    /// How many entries named a file the library does not hold, and so were left out.
+    pub skipped: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackTags {
+    pub title: String,
+    /// The track's artists, one name each, in the order the file credits them.
+    pub artists: Vec<String>,
+    pub album: String,
+    pub album_artist: String,
+    pub track_number: String,
+    pub track_total: String,
+    pub disc_number: String,
+    pub disc_total: String,
+    pub year: String,
+    pub genre: String,
+    pub composer: String,
+    pub publisher: String,
+    pub isrc: String,
+    pub comment: String,
+    pub lyrics: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlaylistDetail {
+    pub playlist: Playlist,
+    pub tracks: Vec<Track>,
+    pub continuation: Option<String>,
+}
+
+/// Which end of a list holds the songs added last, for a list that comes in the order its songs
+/// were added but has no date on each. A Date added sort on such a list follows its order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    OldestFirst,
+    NewestFirst,
+}
+
+impl Arrival {
+    /// Puts a row the listener just added where the provider will list it: last in an
+    /// oldest-first list, first in a newest-first one.
+    pub fn admit<T>(self, rows: &mut Vec<T>, row: T) {
+        match self {
+            Self::OldestFirst => rows.push(row),
+            Self::NewestFirst => rows.insert(0, row),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArtistProfile {
+    pub name: String,
+    pub cover_large: Option<String>,
+    pub biography: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedArtist {
+    pub id: String,
+    pub name: String,
+    pub cover: Option<String>,
+    pub added_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Artist {
+    pub name: String,
+    pub cover_large: Option<String>,
+    /// A wide picture for the top of the artist page, when the provider keeps one apart from
+    /// the portrait in `cover_large`.
+    pub banner: Option<String>,
+    pub biography: Option<String>,
+    pub monthly_listeners: Option<u64>,
+    /// How many accounts follow the artist, when the provider counts followers apart from
+    /// listeners. Left empty rather than zero when the provider does not say.
+    pub followers: Option<u64>,
+    pub top_tracks: Vec<Track>,
+    pub albums: Vec<Album>,
+}
+
+/// What an artist page fills in once its overview is already on screen. Every list
+/// replaces what `MusicApi::artist` answered with, and an empty one leaves that part alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArtistCatalogue {
+    pub albums: Vec<Album>,
+    pub top_tracks: Vec<Track>,
+    /// What the artist guests on, from the provider's appears-on listing.
+    pub appears_on: Vec<Album>,
+}
+
+impl ArtistCatalogue {
+    pub fn is_empty(&self) -> bool {
+        self.albums.is_empty() && self.top_tracks.is_empty() && self.appears_on.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Lyrics {
+    Plain {
+        text: String,
+        /// One line for each line of `text`, blank where that line needs no romanization.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        romanized: Option<RomanizedText>,
+    },
+    Synced {
+        lines: Arc<[LyricsLine]>,
+    },
+}
+
+/// No lyrics at all, as empty plain text.
+impl Default for Lyrics {
+    fn default() -> Self {
+        Self::Plain {
+            text: String::new(),
+            romanized: None,
+        }
+    }
+}
+
+impl Lyrics {
+    pub fn plain(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let romanized = crate::lyrics::romanize::plain(&text);
+        Self::Plain { text, romanized }
+    }
+
+    pub fn synced(&self) -> bool {
+        matches!(self, Self::Synced { .. })
+    }
+
+    pub fn worded(&self) -> bool {
+        match self {
+            Self::Plain { .. } => false,
+            Self::Synced { lines } => lines.iter().any(LyricsLine::worded),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Plain { text, .. } => text.trim().is_empty(),
+            Self::Synced { lines } => lines.is_empty(),
+        }
+    }
+
+    pub fn span(&self) -> Option<Duration> {
+        let Self::Synced { lines } = self else {
+            return None;
+        };
+        lines
+            .iter()
+            .map(|line| line.end.unwrap_or(line.start))
+            .max()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricsLine {
+    pub start: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<Duration>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub romanized: Option<RomanizedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<LyricsWord>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secondary: Vec<LyricsLane>,
+    #[serde(default, skip_serializing_if = "Voice::lead")]
+    pub voice: Voice,
+}
+
+impl LyricsLine {
+    pub fn worded(&self) -> bool {
+        self.words.as_ref().is_some_and(|words| !words.is_empty())
+            || self.secondary.iter().any(LyricsLane::worded)
+    }
+
+    pub fn sung_end(&self) -> Option<Duration> {
+        let primary = self
+            .words
+            .as_ref()
+            .and_then(|words| words.iter().rev().find(|word| !word.text.trim().is_empty()))
+            .map(|word| word.end.max(word.start).max(self.start))
+            .or(self.end);
+        self.secondary
+            .iter()
+            .filter_map(LyricsLane::sung_end)
+            .chain(primary)
+            .max()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricsLane {
+    pub start: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<Duration>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub romanized: Option<RomanizedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<LyricsWord>>,
+}
+
+impl LyricsLane {
+    pub fn worded(&self) -> bool {
+        self.words.as_ref().is_some_and(|words| !words.is_empty())
+    }
+
+    pub fn sung_end(&self) -> Option<Duration> {
+        self.words
+            .as_ref()
+            .and_then(|words| words.iter().rev().find(|word| !word.text.trim().is_empty()))
+            .map(|word| word.end.max(word.start).max(self.start))
+            .or(self.end)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RomanizedText {
+    pub text: String,
+    pub writing_system: WritingSystem,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WritingSystem {
+    Japanese,
+    Chinese,
+    Korean,
+    Cyrillic,
+    Greek,
+    Arabic,
+    #[default]
+    Other,
+}
+
+impl WritingSystem {
+    pub const ALL: [Self; 7] = [
+        Self::Japanese,
+        Self::Chinese,
+        Self::Korean,
+        Self::Cyrillic,
+        Self::Greek,
+        Self::Arabic,
+        Self::Other,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Voice {
+    #[default]
+    Lead,
+    Counter,
+}
+
+impl Voice {
+    pub fn lead(&self) -> bool {
+        matches!(self, Self::Lead)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LyricsWord {
+    pub start: Duration,
+    pub end: Duration,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackKey {
+    pub provider: &'static str,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LyricsQuery {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration: Duration,
+    pub track: Option<TrackKey>,
+}
+
+impl LyricsQuery {
+    pub fn id_for(&self, provider: &str) -> Option<&str> {
+        self.track
+            .as_ref()
+            .filter(|track| track.provider == provider)
+            .map(|track| track.id.as_str())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LyricsHit {
+    pub source: &'static str,
+    pub trust: u32,
+    /// [wisp] 候选的来源细分（如「官方推荐歌词」「ugc」）与推荐星级（0-100），
+    /// 只有带这部分元数据的来源（酷狗）才会填。
+    pub badge: Option<String>,
+    pub score: Option<u32>,
+    pub lyrics: Lyrics,
+    pub instrumental: bool,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration: Option<Duration>,
+    pub writers: Vec<String>,
+}
+
+/// Something the provider keeps sidebar pins for, with whether it is pinned now. The uri is
+/// the provider's own and is what `MusicApi::set_pinned` takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinTarget {
+    pub uri: String,
+    pub name: String,
+    pub subtitle: String,
+    pub cover: Option<String>,
+    pub kind: PinTargetKind,
+    pub pinned: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinTargetKind {
+    Playlist,
+    Album,
+    Artist,
+    LikedSongs,
+    Audiobook,
+    Show,
+    Folder,
+}
+
+/// How a provider answered a pin change. `LimitReached` means it turned the pin away for
+/// holding too many already, and `Outside` that it can only pin what is in the listener's
+/// library. Either way the pin stays a local one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinOutcome {
+    Updated,
+    LimitReached,
+    Outside,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labelled(label: &str, copyrights: &[&str]) -> Album {
+        Album {
+            label: label.to_owned(),
+            copyrights: copyrights.iter().map(|line| (*line).to_owned()).collect(),
+            ..Album::default()
+        }
+    }
+
+    #[test]
+    fn no_label_placeholder_shows_no_label_or_copyright() {
+        let album = labelled("[no label]", &["℗ 2020 [No Label]"]);
+        assert_eq!(album.label_name(), None);
+        assert!(album.copyright_lines().is_empty());
+        assert_eq!(labelled(" [NO LABEL] ", &[]).label_name(), None);
+    }
+
+    #[test]
+    fn real_label_and_copyrights_are_kept() {
+        let album = labelled(" Warp ", &["℗ 2020 Warp Records", "© 2020 Warp"]);
+        assert_eq!(album.label_name(), Some("Warp"));
+        assert_eq!(
+            album.copyright_lines(),
+            ["℗ 2020 Warp Records", "© 2020 Warp"]
+        );
+    }
+
+    #[test]
+    fn missing_label_is_unchanged() {
+        let album = labelled("", &[]);
+        assert_eq!(album.label_name(), None);
+        assert!(album.copyright_lines().is_empty());
+        assert_eq!(labelled("  ", &["© 2020 Someone"]).label_name(), None);
+        assert_eq!(
+            labelled("", &["© 2020 Someone"]).copyright_lines(),
+            ["© 2020 Someone"]
+        );
+    }
+
+    #[test]
+    fn musicbrainz_types_name_the_release() {
+        let cases = [
+            (&["ep"][..], false, ReleaseType::Ep),
+            (&["EP", "Live"], false, ReleaseType::Ep),
+            (&["single"], false, ReleaseType::Single),
+            (&["album", "compilation"], false, ReleaseType::Compilation),
+            (&["Album; Compilation"], false, ReleaseType::Compilation),
+            (&["ep/compilation"], false, ReleaseType::Ep),
+            (&["album"], true, ReleaseType::Compilation),
+            (&["album", "soundtrack"], false, ReleaseType::Album),
+            (&[], false, ReleaseType::Album),
+        ];
+        for (types, compilation, expected) in cases {
+            assert_eq!(
+                ReleaseType::from_musicbrainz(types.iter().copied(), compilation),
+                expected,
+                "{types:?}"
+            );
+        }
+    }
+}

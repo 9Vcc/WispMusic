@@ -1,0 +1,271 @@
+use std::cmp::Ordering;
+use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis};
+
+use gpui::{AnyElement, App, Entity, SharedString};
+use i18n::t;
+use music::SavedArtist;
+use state::{Library, LibraryPart, LibraryState, Origin, Playback, Shelf};
+use ui::rank::{ESSENTIAL, HANDY};
+use ui::{Cell, ColumnSpec, Menu, Pin, Sort, TableSource, Width};
+
+use crate::shared::blend::{self, Joined, Reach};
+use crate::shared::cells::{self, DATE, NUMBER};
+use crate::shared::menus::artist_menu;
+use crate::shared::pins::Pinned as _;
+use crate::shared::text::{folded, holds};
+use crate::shared::tracks::initial;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArtistField {
+    Index,
+    Cover,
+    Name,
+    AddedAt,
+    LikedAt,
+}
+
+const COLUMN: ColumnSpec<ArtistField> = ColumnSpec::filling(ArtistField::Index);
+
+const INDEX: ColumnSpec<ArtistField> = ColumnSpec::numbering(ArtistField::Index, NUMBER);
+
+const COVER: ColumnSpec<ArtistField> = ColumnSpec::artwork(ArtistField::Cover);
+
+const NAME: ColumnSpec<ArtistField> = ColumnSpec {
+    field: ArtistField::Name,
+    key: "name",
+    header: "column-name",
+    rank: ESSENTIAL,
+    ..COLUMN
+};
+
+const ADDED_AT: ColumnSpec<ArtistField> = ColumnSpec {
+    field: ArtistField::AddedAt,
+    key: "added-at",
+    header: "column-date-added",
+    width: Width::Fixed(DATE),
+    rank: HANDY,
+    first: Sort::Descending,
+    ..COLUMN
+};
+
+/// The day a favorite was made, for a shelf that lists its whole catalog and so dates each row by
+/// when it joined. It stays off until the listener turns it on, and sorts from the sort menu.
+const LIKED_AT: ColumnSpec<ArtistField> = ColumnSpec {
+    field: ArtistField::LikedAt,
+    key: "liked-at",
+    header: "column-date-liked",
+    optional: true,
+    ..ADDED_AT
+};
+
+pub(super) const COLUMNS: &[ColumnSpec<ArtistField>] = &[INDEX, COVER, NAME, ADDED_AT, LIKED_AT];
+
+pub(super) struct ArtistSource {
+    library: Entity<Library>,
+    playback: Entity<Playback>,
+    starred: bool,
+    /// The shelf the Local only or Streaming only filter keeps the artists to.
+    reach: Reach,
+}
+
+impl ArtistSource {
+    pub(super) fn shelved(library: Entity<Library>, playback: Entity<Playback>) -> Self {
+        Self {
+            library,
+            playback,
+            starred: false,
+            reach: Reach::default(),
+        }
+    }
+
+    /// Whether the page badges its local artists, see `Reach::marks_local`.
+    pub(super) fn marks_local(&self, cx: &App) -> bool {
+        self.reach.marks_local(self.artists(cx).mixed())
+    }
+
+    fn index_cell(&self, cell: &Cell<ArtistField>, artist: &SavedArtist, cx: &App) -> AnyElement {
+        let origin = Origin::artist(artist.id.clone()).named(artist.name.clone());
+        let playing = self.playback.read(cx).playing_from(&origin, cx);
+        let press = cells::toggle(&self.playback, playing, move |playback, cx| {
+            playback.play_origin(origin.clone(), cx)
+        });
+
+        cells::index(cell, playing, true, None, None, press, cx)
+    }
+
+    pub(super) fn at(&self, row: usize, cx: &App) -> Option<SavedArtist> {
+        self.artists(cx).get(row).cloned()
+    }
+
+    /// The artists of both shelves, the streaming ones first.
+    fn artists<'a>(&self, cx: &'a App) -> Joined<'a, SavedArtist> {
+        blend::joined(self.library.read(cx), LibraryState::artists)
+    }
+
+    /// Whether a shelf with artists listed lists more than the favorites, so a favorites filter
+    /// has something to do.
+    fn catalog(&self, cx: &App) -> bool {
+        let library = self.library.read(cx);
+        [Shelf::Streaming, Shelf::Local].into_iter().any(|shelf| {
+            library.shape(shelf).is_catalog() && !library.state(shelf).artists().is_empty()
+        })
+    }
+
+    /// The day the listener favorited an artist, when a catalog shelf knows it.
+    fn liked_at(&self, artist: &SavedArtist, cx: &App) -> Option<i64> {
+        self.library
+            .read(cx)
+            .liked_at(LibraryPart::Artists, &artist.id)
+    }
+}
+
+impl TableSource for ArtistSource {
+    type Field = ArtistField;
+
+    fn columns(&self) -> &'static [ColumnSpec<ArtistField>] {
+        COLUMNS
+    }
+
+    fn rows(&self, cx: &App) -> usize {
+        self.artists(cx).len()
+    }
+
+    fn matches(&self, row: usize, query: &str, cx: &App) -> bool {
+        self.artists(cx).get(row).is_some_and(|artist| {
+            if self.starred && !self.library.read(cx).saved_artist(&artist.id) {
+                return false;
+            }
+            if !self.reach.keeps(&artist.id) {
+                return false;
+            }
+            holds(&artist.name, query)
+        })
+    }
+
+    fn filter_axes(&self, cx: &App) -> Vec<Filter> {
+        let mut axes = Vec::new();
+        if self.catalog(cx) {
+            axes.push(Filter::Flag(FlagAxis {
+                key: "filter-favorites",
+                label: t!("filter-favorites"),
+                on: self.starred,
+            }));
+        }
+        axes.extend(self.reach.axes(self.artists(cx).mixed()));
+        axes
+    }
+
+    fn filter(&mut self, change: FilterChange, _cx: &App) -> bool {
+        if self.reach.filter(&change) {
+            return true;
+        }
+        match change {
+            FilterChange::Flag("filter-favorites", value) => {
+                self.starred = value;
+                true
+            }
+            FilterChange::Reset => {
+                self.starred = false;
+                self.reach = Reach::default();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn filtered(&self, _cx: &App) -> bool {
+        self.starred || self.reach.active()
+    }
+
+    fn playing(&self, row: usize, cx: &App) -> bool {
+        self.artists(cx).get(row).is_some_and(|artist| {
+            let origin = Origin::artist(artist.id.clone());
+            self.playback.read(cx).playing_from(&origin, cx).is_some()
+        })
+    }
+
+    fn is_loading(&self, cx: &App) -> bool {
+        blend::waiting(self.library.read(cx), LibraryPart::Artists)
+    }
+
+    fn pin(&self, row: usize, cx: &App) -> Option<Pin> {
+        self.artists(cx).get(row)?.pin()
+    }
+
+    fn picking(&self) -> bool {
+        true
+    }
+
+    fn context_menu(&self, rows: &[usize], _visible: &[ArtistField], cx: &App) -> Option<Menu> {
+        Some(artist_menu(
+            self.at(*rows.first()?, cx)?,
+            self.playback.clone(),
+            false,
+            cx,
+        ))
+    }
+
+    fn populated(&self, field: ArtistField, cx: &App) -> bool {
+        match field {
+            ArtistField::LikedAt => self.library.read(cx).dates_likes(LibraryPart::Artists),
+            _ => true,
+        }
+    }
+
+    fn cell(&self, cell: Cell<ArtistField>, cx: &mut App) -> AnyElement {
+        let theme = *cx.theme();
+        let muted = theme.muted_foreground;
+
+        let Some(artist) = self.artists(cx).get(cell.row) else {
+            return cells::blank(&cell);
+        };
+
+        if cell.field == ArtistField::Index {
+            return self.index_cell(&cell, artist, cx);
+        }
+
+        match cell.field {
+            ArtistField::Cover => cells::avatar(&cell, artist.cover.clone()),
+            ArtistField::Name => cells::name(
+                &cell,
+                artist.name.clone(),
+                theme.foreground,
+                self.marks_local(cx) && Shelf::of(&artist.id).local(),
+            ),
+            ArtistField::AddedAt => cells::dim(&cell, cells::stamp(artist.added_at), muted),
+            ArtistField::LikedAt => {
+                cells::dim(&cell, cells::stamp(self.liked_at(artist, cx)), muted)
+            }
+            ArtistField::Index => cells::blank(&cell),
+        }
+    }
+
+    fn compare(&self, field: ArtistField, a: usize, b: usize, cx: &App) -> Ordering {
+        let artists = self.artists(cx);
+        let at = |index: usize| artists.get(index);
+
+        match field {
+            ArtistField::Name => folded(
+                at(a).map(|artist| artist.name.as_str()).unwrap_or_default(),
+                at(b).map(|artist| artist.name.as_str()).unwrap_or_default(),
+            ),
+            ArtistField::AddedAt => at(a)
+                .map(|artist| artist.added_at)
+                .cmp(&at(b).map(|artist| artist.added_at)),
+            ArtistField::LikedAt => {
+                let liked = |index| at(index).and_then(|artist| self.liked_at(artist, cx));
+                liked(a).cmp(&liked(b))
+            }
+            ArtistField::Index | ArtistField::Cover => a.cmp(&b),
+        }
+    }
+
+    fn group(&self, field: ArtistField, row: usize, cx: &App) -> Option<SharedString> {
+        let artist = self.artists(cx).get(row)?;
+
+        match field {
+            ArtistField::Name => Some(initial(&artist.name)),
+            _ => None,
+        }
+    }
+}

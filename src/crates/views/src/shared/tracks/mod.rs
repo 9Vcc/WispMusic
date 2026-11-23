@@ -1,0 +1,874 @@
+mod columns;
+mod sieve;
+mod sort;
+
+use i18n::t;
+use std::cell::RefCell;
+use std::cmp::Ordering;
+use std::rc::Rc;
+use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis, RangeAxis, Unit};
+
+use crate::shared::menus::{ItemMenu, TrackColumns};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, App, Entity, Hsla, InteractiveElement as _, IntoElement as _, SharedString,
+    Styled as _, WeakEntity,
+};
+use music::{Arrival, Track};
+use router::Destination;
+use state::{
+    Detail, History, Library, LibraryPart, Origin, Playback, Reorder, Shelf, Wisp,
+};
+use ui::{
+    Button, Cell, ColumnSpec, Menu, Pending, Pin, ROW_GROUP, RowMoves, Scrollbar, TableSource,
+    TableState,
+};
+
+use crate::shared::blend::{Joined, Reach};
+use crate::shared::cells;
+use crate::shared::pins::{Pinned as _, origin_tag};
+
+pub(crate) use columns::{
+    HISTORY_COLUMNS, LIBRARY_COLUMNS, SONGS_COLUMNS, TrackField, album_columns, artist_columns,
+    playlist_columns,
+};
+pub(crate) use sieve::TrackSieve;
+pub(crate) use sort::initial;
+
+use sort::hits;
+
+/// How strongly an unsaved track's heart shows on its row.
+const SETTLED: f32 = 0.5;
+
+/// The current track, its `Playback::control` and its queue origin. A screen keeps the last
+/// status and redraws only when it changes, including a move between collections of the same song.
+pub(crate) type PlaybackStatus = (Option<String>, Option<bool>, Option<Origin>);
+
+pub(crate) fn playback_status(playback: &Entity<Playback>, cx: &App) -> PlaybackStatus {
+    let playback = playback.read(cx);
+    let track = playback.track().and_then(|track| track.id.clone());
+    (track, playback.control(), playback.origin(cx).cloned())
+}
+pub(crate) trait Tracks: 'static {
+    fn tracks<'a>(&self, cx: &'a App) -> Joined<'a, Track>;
+    fn is_loading(&self, cx: &App) -> bool;
+
+    /// The skeleton rows the table draws before the first tracks arrive. A list that leaves
+    /// the default fills the viewport with them while it loads.
+    fn pending(&self, cx: &App) -> Option<Pending> {
+        self.is_loading(cx).then_some(Pending::Screen)
+    }
+
+    /// The order the rows were added in, for a list with no date on each row. None for a list
+    /// that has dates or comes in some other order.
+    fn arrival(&self, _cx: &App) -> Option<Arrival> {
+        None
+    }
+}
+
+pub(crate) fn first_playable(table: &Entity<TableState<TrackSource>>, cx: &App) -> Option<usize> {
+    let state = table.read(cx);
+    let delegate = state.delegate();
+
+    (0..delegate.row_count()).find(|display| {
+        delegate
+            .source()
+            .peek(delegate.row(*display), cx)
+            .is_some_and(|track| track.playable)
+    })
+}
+
+pub(crate) fn holds(table: &Entity<TableState<TrackSource>>, id: &str, cx: &App) -> bool {
+    let state = table.read(cx);
+    let delegate = state.delegate();
+
+    (0..delegate.row_count()).any(|display| {
+        delegate
+            .source()
+            .peek(delegate.row(display), cx)
+            .is_some_and(|track| track.id.as_deref() == Some(id))
+    })
+}
+
+pub(crate) fn whence(table: &Entity<TableState<TrackSource>>, cx: &App) -> Option<Origin> {
+    table.read(cx).delegate().source().whence(cx)
+}
+
+pub(crate) fn ordered(table: &Entity<TableState<TrackSource>>, cx: &App) -> Vec<Track> {
+    let state = table.read(cx);
+    let delegate = state.delegate();
+
+    (0..delegate.row_count())
+        .filter_map(|display| delegate.source().at(delegate.row(display), cx))
+        .collect()
+}
+
+pub(crate) fn drop_picked(table: &Entity<TableState<TrackSource>>, cx: &mut App) {
+    drop_picked_if(table, |_| true, cx);
+}
+
+/// Drops the picked rows that `keep` holds to, and leaves the rest of the pick alone.
+pub(crate) fn drop_picked_if(
+    table: &Entity<TableState<TrackSource>>,
+    keep: impl Fn(&Track) -> bool,
+    cx: &mut App,
+) {
+    let rows = table.read(cx).delegate().picked();
+    if rows.is_empty() {
+        return;
+    }
+    let (tracks, playlist, history) = {
+        let state = table.read(cx);
+        let source = state.delegate().source();
+        let tracks: Vec<Track> = rows
+            .iter()
+            .filter_map(|&row| source.at(row, cx))
+            .filter(|track| keep(track))
+            .collect();
+        (tracks, source.playlist.clone(), source.history.clone())
+    };
+    if tracks.is_empty() {
+        return;
+    }
+    forget(&tracks, playlist.as_ref(), history.as_ref(), cx);
+    table.update(cx, |table, cx| {
+        table.delegate_mut().clear_selection();
+        cx.notify();
+    });
+}
+
+fn forget(
+    tracks: &[Track],
+    playlist: Option<&Entity<Detail>>,
+    history: Option<&Entity<History>>,
+    cx: &mut App,
+) {
+    if let Some(detail) = playlist {
+        let ids: Vec<String> = tracks.iter().filter_map(|track| track.id.clone()).collect();
+        if !ids.is_empty() {
+            detail.update(cx, |detail, cx| detail.remove_tracks_from_playlist(ids, cx));
+        }
+        return;
+    }
+    if let Some(history) = history {
+        history.update(cx, |history, cx| {
+            for track in tracks {
+                history.remove(track, cx);
+            }
+        });
+        return;
+    }
+    let library = Wisp::global(cx).library.clone();
+    library.update(cx, |library, cx| {
+        library.save_tracks(tracks.to_vec(), false, cx)
+    });
+}
+
+type Whence = Rc<dyn Fn(&App) -> Option<Origin>>;
+
+pub(crate) struct TrackSource {
+    columns: &'static [ColumnSpec<TrackField>],
+    whence: Option<Whence>,
+    provider: Rc<dyn Tracks>,
+    playback: Entity<Playback>,
+    is_liked: Option<Entity<Library>>,
+    /// Whether the rows are the library's own, both shelves of it, and only a catalog shelf's
+    /// rows carry hearts.
+    shelved: bool,
+    /// The shelf the Local only or Streaming only filter keeps the library rows to.
+    reach: Reach,
+    album: Option<Entity<Detail>>,
+    playlist: Option<Entity<Detail>>,
+    history: Option<Entity<History>>,
+    menu: ItemMenu,
+    table: Option<WeakEntity<TableState<TrackSource>>>,
+    sieve: TrackSieve,
+    spread: RefCell<Option<Spread>>,
+}
+
+struct Spread {
+    stamp: usize,
+    extent: Option<(f32, f32)>,
+}
+
+/// What the number at the head of a row counts.
+#[derive(Clone, Copy, PartialEq)]
+enum Numbering {
+    /// The row's place in the list, for anything that is not an album in order.
+    Listing,
+    /// The track's own number on the album.
+    Track,
+    /// The track's number behind its disc, for an album that spans more than one.
+    Disc,
+}
+
+/// The disc a track sits on. Providers disagree on what an absent disc tag means, so a
+/// single-disc album reads as disc one either way.
+fn disc(track: &Track) -> u32 {
+    track.disc_number.max(1)
+}
+
+impl TrackSource {
+    pub(crate) fn new(
+        columns: &'static [ColumnSpec<TrackField>],
+        provider: impl Tracks,
+        playback: Entity<Playback>,
+        playlist_scrollbar: Entity<Scrollbar>,
+        cx: &mut App,
+    ) -> Self {
+        Self {
+            columns,
+            whence: None,
+            provider: Rc::new(provider),
+            playback,
+            is_liked: None,
+            shelved: false,
+            reach: Reach::default(),
+            album: None,
+            playlist: None,
+            history: None,
+            menu: ItemMenu::new(playlist_scrollbar, cx),
+            table: None,
+            sieve: TrackSieve::default(),
+            spread: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn set_columns(&mut self, columns: &'static [ColumnSpec<TrackField>]) -> bool {
+        let changed = !std::ptr::eq(self.columns.as_ptr(), columns.as_ptr());
+        self.columns = columns;
+        changed
+    }
+
+    /// The shortest and longest track in the whole list, `None` only when the list is empty.
+    /// The span deliberately ignores the sieve and the search, so narrowing the table can never
+    /// shrink the slider that did the narrowing and leave the user with no way back.
+    pub(crate) fn extent(&self, cx: &App) -> Option<(f32, f32)> {
+        let tracks = self.provider.tracks(cx);
+        let stamp = tracks.len();
+        if let Some(spread) = self.spread.borrow().as_ref()
+            && spread.stamp == stamp
+        {
+            return spread.extent;
+        }
+
+        let mut low = f32::MAX;
+        let mut high = f32::MIN;
+        for track in tracks {
+            let seconds = track.duration.as_secs_f32();
+            low = low.min(seconds);
+            high = high.max(seconds);
+        }
+        let extent = (low <= high).then_some((low, high));
+        *self.spread.borrow_mut() = Some(Spread { stamp, extent });
+
+        extent
+    }
+
+    // resolved when play starts
+    pub(crate) fn from(mut self, whence: impl Fn(&App) -> Option<Origin> + 'static) -> Self {
+        self.whence = Some(Rc::new(whence));
+        self
+    }
+
+    pub(crate) fn whence(&self, cx: &App) -> Option<Origin> {
+        self.whence.as_ref().and_then(|whence| whence(cx))
+    }
+
+    /// The origin tag a song dragged from this table carries, for a move. A song its playlist
+    /// holds more than once stays a copy, since the provider would take out every copy and the
+    /// Undo would bring back one.
+    fn origin_tag(&self, track: &Track, tracks: Joined<'_, Track>, cx: &App) -> Option<String> {
+        let origin = self.whence(cx)?;
+        let once = origin.whence != state::Whence::Playlist
+            || tracks.iter().filter(|other| other.id == track.id).count() == 1;
+        once.then(|| origin_tag(&origin)).flatten()
+    }
+
+    pub(crate) fn table(mut self, table: WeakEntity<TableState<TrackSource>>) -> Self {
+        self.table = Some(table);
+        self
+    }
+
+    pub(crate) fn with_liked(mut self, library: Entity<Library>) -> Self {
+        self.is_liked = Some(library);
+        self
+    }
+
+    /// Marks the rows as the library's own. A shelf listing more than its favorites gets hearts
+    /// and a favorites filter, and the Local only and Streaming only filters are offered. Needs
+    /// `with_liked`, which supplies the library these ask.
+    pub(crate) fn shelved(mut self) -> Self {
+        self.shelved = true;
+        self
+    }
+
+    /// Whether the table badges its local tracks, which only a library page that mixes both
+    /// shelves does, see `Reach::marks_local`.
+    pub(crate) fn marks_local(&self, cx: &App) -> bool {
+        self.shelved && self.reach.marks_local(self.provider.tracks(cx).mixed())
+    }
+
+    /// Whether a library row of `shelf` sits among more than the favorites, so its heart says
+    /// something.
+    fn catalog(&self, shelf: Shelf, cx: &App) -> bool {
+        match (self.shelved, &self.is_liked) {
+            (true, Some(library)) => library.read(cx).shape(shelf).is_catalog(),
+            _ => false,
+        }
+    }
+
+    /// Whether any shelf with songs listed here is a catalog, so a favorites filter has
+    /// something to drop.
+    fn starrable(&self, cx: &App) -> bool {
+        let Some(library) = self.is_liked.as_ref().filter(|_| self.shelved) else {
+            return false;
+        };
+        let library = library.read(cx);
+        [Shelf::Streaming, Shelf::Local].into_iter().any(|shelf| {
+            library.shape(shelf).is_catalog() && !library.state(shelf).tracks().is_empty()
+        })
+    }
+
+    /// How the rows of this table are numbered. A catalog shelf holds only the files it was
+    /// given, so an album there is numbered by each track's own place in it and a missing file
+    /// leaves a gap.
+    fn numbering(&self, cx: &App) -> Numbering {
+        let Some(id) = self.album.as_ref().and_then(|album| album.read(cx).id()) else {
+            return Numbering::Listing;
+        };
+        let tracks = self.provider.tracks(cx);
+        let first = tracks.first().map(disc);
+        if tracks.iter().any(|track| Some(disc(track)) != first) {
+            return Numbering::Disc;
+        }
+        if !Wisp::global(cx)
+            .library
+            .read(cx)
+            .shape(Shelf::of(id))
+            .is_catalog()
+        {
+            return Numbering::Listing;
+        }
+        Numbering::Track
+    }
+
+    /// The label a row rests at, or `None` to let the cell count the rows.
+    fn number(&self, track: &Track, cx: &App) -> Option<SharedString> {
+        if track.track_number == 0 {
+            return None;
+        }
+
+        match self.numbering(cx) {
+            Numbering::Listing => None,
+            Numbering::Track => Some(track.track_number.to_string().into()),
+            Numbering::Disc => Some(format!("{}.{}", disc(track), track.track_number).into()),
+        }
+    }
+
+    fn starred(&self, track: &Track, cx: &App) -> bool {
+        match (&self.is_liked, track.id.as_deref()) {
+            (Some(library), Some(id)) => library.read(cx).saved(id),
+            _ => false,
+        }
+    }
+
+    /// The day the listener favorited a track, when a catalog shelf knows it.
+    fn liked_at(&self, track: &Track, cx: &App) -> Option<i64> {
+        let (Some(library), Some(id)) = (&self.is_liked, track.id.as_deref()) else {
+            return None;
+        };
+        library.read(cx).liked_at(LibraryPart::Tracks, id)
+    }
+
+    pub(crate) fn with_playlist(mut self, detail: Entity<Detail>) -> Self {
+        self.playlist = Some(detail);
+        self
+    }
+
+    pub(crate) fn with_album(mut self, detail: Entity<Detail>) -> Self {
+        self.album = Some(detail);
+        self
+    }
+
+    pub(crate) fn with_history(mut self, history: Entity<History>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    fn artist_cell(&self, cell: &Cell<TrackField>, track: &Track, color: Hsla) -> AnyElement {
+        cells::artists(
+            cell,
+            track.artist_refs.clone(),
+            track.artists.clone(),
+            color,
+        )
+    }
+
+    fn album_cell(&self, cell: &Cell<TrackField>, track: &Track, color: Hsla) -> AnyElement {
+        let Some(album) = track.album_id.clone() else {
+            return cells::dim(cell, track.album.clone(), color);
+        };
+
+        cells::link(
+            cell,
+            "album",
+            track.album.clone(),
+            color,
+            Destination::Album(album.into()),
+        )
+    }
+
+    /// Whether a row can start playback now, which a track that has to be streamed cannot while
+    /// the network is gone.
+    fn plays_now(&self, track: &Track, cx: &App) -> bool {
+        track.playable
+            && self
+                .playback
+                .read(cx)
+                .unreachable_reason(track, cx)
+                .is_none()
+    }
+
+    fn index_cell(&self, cell: &Cell<TrackField>, track: &Track, cx: &App) -> AnyElement {
+        let playing = self.now_playing(cell.row, cx);
+        let playable = self.plays_now(track, cx);
+        let (preload, press) = match playable {
+            false => (None, None),
+            true => {
+                let playback = self.playback.clone();
+                let source = self.provider.clone();
+                let at = cell.row;
+                let preload: Option<cells::Tap> = Some(Box::new(move |cx| {
+                    let Some(track) = source.tracks(cx).get(at).cloned() else {
+                        return;
+                    };
+                    playback.update(cx, |playback, _| playback.preload(&track));
+                }));
+                let provider = self.provider.clone();
+                let table = self.table.clone();
+                let whence = self.whence.clone();
+                let row = cell.row;
+                let display = cell.display;
+                let press = cells::toggle(&self.playback, playing, move |playback, cx| {
+                    let from = whence.as_ref().and_then(|whence| whence(cx));
+                    match table.as_ref().and_then(|table| table.upgrade()) {
+                        Some(table) => playback.start(ordered(&table, cx), display, from, cx),
+                        None => playback.start(provider.tracks(cx).to_vec(), row, from, cx),
+                    }
+                });
+                (preload, press)
+            }
+        };
+
+        let number = self.number(track, cx);
+
+        cells::index(cell, playing, playable, number, preload, press, cx)
+    }
+
+    fn title_cell(
+        &self,
+        cell: &Cell<TrackField>,
+        track: &Track,
+        color: Option<Hsla>,
+        cx: &App,
+    ) -> AnyElement {
+        cells::title(
+            cell,
+            track.name.clone(),
+            color,
+            track.explicit.then(|| t!("song-explicit")),
+            track.paid.then(|| t!("song-paid")),
+            None,
+            match self.marks_local(cx)
+                && track.id.as_deref().is_some_and(|id| Shelf::of(id).local())
+            {
+                true => Some(cells::local_badge(cell.row)),
+                false => None,
+            },
+            self.liked_button(cell, track, cx),
+        )
+    }
+
+    fn liked_button(&self, cell: &Cell<TrackField>, track: &Track, cx: &App) -> Option<AnyElement> {
+        let library = self.is_liked.as_ref()?;
+        let id = track.id.clone()?;
+        // on a saved shelf every listed track is a favorite, so the heart would say nothing
+        if self.shelved && !self.catalog(Shelf::of(&id), cx) {
+            return None;
+        }
+        let theme = *cx.theme();
+        let state = library.read(cx);
+        let saved = state.saved(&id);
+        let pending = state.pending(&id);
+        let library = library.clone();
+        let source = self.provider.clone();
+        let at = cell.row;
+
+        Some(
+            Button::new(("toggle-liked-track", cell.row))
+                .ghost()
+                .backgroundless()
+                .small()
+                .icon(match saved {
+                    true => "icons/heart-filled.svg",
+                    false => "icons/heart.svg",
+                })
+                .tooltip(match saved {
+                    true => "menu-remove-from-library",
+                    false => "menu-add-to-library",
+                })
+                .tint(match saved {
+                    true => theme.primary,
+                    false => theme.muted_foreground.opacity(SETTLED),
+                })
+                .when(!saved, |this| {
+                    this.invisible()
+                        .group_hover(ROW_GROUP, |style| style.visible())
+                })
+                .disabled(pending)
+                .on_click(move |_, _, cx| {
+                    let Some(track) = source.tracks(cx).get(at).cloned() else {
+                        return;
+                    };
+                    library.update(cx, |library, cx| library.toggle(track, cx));
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The row's `Playback::control` when it holds the current track. A track listed twice
+    /// counts only at its first row.
+    pub(crate) fn now_playing(&self, row: usize, cx: &App) -> Option<bool> {
+        let playback = self.playback.read(cx);
+        let current = playback.track()?.id.as_deref()?;
+        let tracks = self.provider.tracks(cx);
+        if tracks.get(row)?.id.as_deref() != Some(current) {
+            return None;
+        }
+        let sole = tracks
+            .iter()
+            .position(|track| track.id.as_deref() == Some(current))?;
+
+        (sole == row).then(|| playback.control()).flatten()
+    }
+
+    pub(crate) fn at(&self, row: usize, cx: &App) -> Option<Track> {
+        self.provider.tracks(cx).get(row).cloned()
+    }
+
+    pub(crate) fn peek<'a>(&self, row: usize, cx: &'a App) -> Option<&'a Track> {
+        self.provider.tracks(cx).get(row)
+    }
+
+    pub(crate) fn menu(&self) -> &ItemMenu {
+        &self.menu
+    }
+}
+
+impl TableSource for TrackSource {
+    type Field = TrackField;
+
+    fn columns(&self) -> &'static [ColumnSpec<TrackField>] {
+        self.columns
+    }
+
+    fn rows(&self, cx: &App) -> usize {
+        self.provider.tracks(cx).len()
+    }
+
+    /// A list that comes in the order it was added shows no Date added column, even once a
+    /// song added here has been stamped with today's date.
+    fn populated(&self, field: TrackField, cx: &App) -> bool {
+        if field == TrackField::AddedAt && self.provider.arrival(cx).is_some() {
+            return false;
+        }
+        if field == TrackField::LikedAt {
+            return self
+                .is_liked
+                .as_ref()
+                .is_some_and(|library| library.read(cx).dates_likes(LibraryPart::Tracks));
+        }
+        let tracks = self.provider.tracks(cx);
+        if tracks.is_empty() {
+            return true;
+        }
+
+        match field {
+            TrackField::Artists => tracks.iter().any(|track| !track.artists.is_empty()),
+            TrackField::Album => tracks.iter().any(|track| !track.album.is_empty()),
+            TrackField::Genre => tracks.iter().any(|track| !track.tags.is_empty()),
+            TrackField::AddedAt | TrackField::PlayedAt => {
+                tracks.iter().any(|track| track.added_at.is_some())
+            }
+            TrackField::AddedBy => tracks.iter().any(|track| track.added_by.is_some()),
+            TrackField::Plays => tracks.iter().any(|track| track.playcount.is_some()),
+            _ => true,
+        }
+    }
+
+    /// A list that comes in the order it was added sorts by Date added through that order.
+    fn sorts_by(&self, field: TrackField, cx: &App) -> bool {
+        match field {
+            TrackField::AddedAt if self.provider.arrival(cx).is_some() => true,
+            _ => self.populated(field, cx),
+        }
+    }
+
+    fn matches(&self, row: usize, query: &str, cx: &App) -> bool {
+        self.peek(row, cx).is_some_and(|track| {
+            if !self.sieve.keeps(track) {
+                return false;
+            }
+            if self.sieve.favorites && !self.starred(track, cx) {
+                return false;
+            }
+            let id = track.id.as_deref();
+            if self.reach.active() && !id.is_some_and(|id| self.reach.keeps(id)) {
+                return false;
+            }
+            hits(track, query)
+        })
+    }
+
+    fn filter_axes(&self, cx: &App) -> Vec<Filter> {
+        let duration = self.extent(cx).map(|bounds| {
+            Filter::Range(
+                RangeAxis {
+                    key: "filter-duration",
+                    label: t!("filter-duration"),
+                    bounds,
+                    value: self.sieve.duration.unwrap_or(bounds),
+                    unit: Unit::Clock,
+                    values: None,
+                }
+                .clamped(),
+            )
+        });
+
+        let mut axes: Vec<Filter> = duration.into_iter().collect();
+        axes.push(Filter::Flag(FlagAxis {
+            key: "filter-hide-explicit",
+            label: t!("filter-hide-explicit"),
+            on: self.sieve.hide_explicit,
+        }));
+        if self.starrable(cx) {
+            axes.push(Filter::Flag(FlagAxis {
+                key: "filter-favorites",
+                label: t!("filter-favorites"),
+                on: self.sieve.favorites,
+            }));
+        }
+        if self.shelved {
+            axes.extend(self.reach.axes(self.provider.tracks(cx).mixed()));
+        }
+        axes
+    }
+
+    fn filter(&mut self, change: FilterChange, _cx: &App) -> bool {
+        if self.reach.filter(&change) {
+            return true;
+        }
+        match change {
+            FilterChange::Range("filter-duration", value) => {
+                self.sieve.duration = Some(value);
+                true
+            }
+            FilterChange::Flag("filter-hide-explicit", value) => {
+                self.sieve.hide_explicit = value;
+                true
+            }
+            FilterChange::Flag("filter-favorites", value) => {
+                self.sieve.favorites = value;
+                true
+            }
+            FilterChange::Reset => {
+                self.sieve = Default::default();
+                self.reach = Reach::default();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn filtered(&self, _cx: &App) -> bool {
+        self.sieve.active() || self.reach.active()
+    }
+
+    fn playing(&self, row: usize, cx: &App) -> bool {
+        self.now_playing(row, cx).is_some()
+    }
+
+    fn is_loading(&self, cx: &App) -> bool {
+        self.provider.is_loading(cx)
+    }
+
+    /// Why a track that has to be streamed cannot play while the network is gone, in the words
+    /// of the toast picking it would raise.
+    fn tip(&self, row: usize, cx: &App) -> Option<SharedString> {
+        let track = self.provider.tracks(cx).get(row)?;
+        let reason = self.playback.read(cx).unreachable_reason(track, cx)?;
+        Some(i18n::lookup(reason.key(), None))
+    }
+
+    fn pending(&self, cx: &App) -> Option<Pending> {
+        self.provider.pending(cx)
+    }
+
+    /// The track's title and artists, which is what a screen reader announces for its row.
+    fn name(&self, row: usize, cx: &App) -> Option<SharedString> {
+        let track = self.provider.tracks(cx).get(row)?;
+        Some(match track.artists.is_empty() {
+            true => SharedString::from(track.name.clone()),
+            false => t!(
+                "track-row-name",
+                title = track.name.as_str(),
+                artists = track.artists.as_str()
+            ),
+        })
+    }
+
+    fn row_key(&self, row: usize, cx: &App) -> Option<SharedString> {
+        let id = self.provider.tracks(cx).get(row)?.id.clone()?;
+        Some(id.into())
+    }
+
+    fn pin(&self, row: usize, cx: &App) -> Option<Pin> {
+        let tracks = self.provider.tracks(cx);
+        let track = tracks.get(row)?;
+        Some(track.pin()?.origin(self.origin_tag(track, tracks, cx)))
+    }
+
+    fn cell(&self, cell: Cell<TrackField>, cx: &mut App) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+
+        let Some(track) = self.provider.tracks(cx).get(cell.row) else {
+            return cells::blank(&cell);
+        };
+
+        if cell.field == TrackField::Index {
+            return self.index_cell(&cell, track, cx);
+        }
+        let faded = muted.opacity(0.5);
+        let (title, detail) = match self.plays_now(track, cx) {
+            true => (None, muted),
+            false => (Some(faded), faded),
+        };
+
+        match cell.field {
+            TrackField::Cover => cells::artwork(&cell, track.cover.clone()),
+            TrackField::Title => self.title_cell(&cell, track, title, cx),
+            TrackField::Artists => self.artist_cell(&cell, track, detail),
+            TrackField::Album => self.album_cell(&cell, track, detail),
+            TrackField::Genre => cells::dim(&cell, track.tags.join(", "), detail),
+            TrackField::AddedAt => cells::credited(
+                &cell,
+                track.added_by.as_deref(),
+                cells::stamp(track.added_at),
+                detail,
+            ),
+            TrackField::LikedAt => {
+                cells::dim(&cell, cells::stamp(self.liked_at(track, cx)), detail)
+            }
+            TrackField::AddedBy => match track.added_by.as_deref() {
+                Some(added) => cells::added_by(&cell, added, detail),
+                None => cells::blank(&cell),
+            },
+            TrackField::PlayedAt => {
+                cells::dim(&cell, cells::relative_stamp(track.added_at), detail)
+            }
+            TrackField::Plays => cells::dim(
+                &cell,
+                track.playcount.map(cells::count).unwrap_or_default(),
+                detail,
+            ),
+            TrackField::Duration => cells::length(&cell, track.duration, detail),
+            TrackField::Index => cells::blank(&cell),
+        }
+    }
+
+    fn picking(&self) -> bool {
+        true
+    }
+
+    fn context_menu(&self, rows: &[usize], visible: &[TrackField], cx: &App) -> Option<Menu> {
+        let tracks: Vec<Track> = rows.iter().filter_map(|&row| self.at(row, cx)).collect();
+        if tracks.is_empty() {
+            return None;
+        }
+        let columns = match Wisp::global(cx).settings.read(cx).adaptive_menu() {
+            true => TrackColumns {
+                album: visible.contains(&TrackField::Album),
+                artists: visible.contains(&TrackField::Artists),
+            },
+            false => TrackColumns::default(),
+        };
+        if let Some(history) = &self.history {
+            return Some(
+                self.menu
+                    .for_history_tracks(&tracks, history.clone(), columns, cx),
+            );
+        }
+        Some(match (&self.album, &self.playlist) {
+            (Some(detail), _) => {
+                let id = detail.read(cx).id()?;
+                self.menu.for_album_tracks(&tracks, id, columns, cx)
+            }
+            (_, Some(detail)) => {
+                self.menu
+                    .for_playlist_tracks(&tracks, detail.clone(), columns, cx)
+            }
+            (None, None) => self.menu.for_table_tracks(&tracks, columns, cx),
+        })
+    }
+
+    /// A playlist's rows move when its provider keeps the order, and are refused with a
+    /// message when the playlist is the listener's but the provider keeps none.
+    fn row_moves(&self, cx: &App) -> RowMoves {
+        let Some(detail) = &self.playlist else {
+            return RowMoves::Off;
+        };
+        match detail.read(cx).reorder(cx) {
+            Reorder::On => RowMoves::On,
+            Reorder::Unsupported | Reorder::Ruled => RowMoves::Refused,
+            Reorder::Off => RowMoves::Off,
+        }
+    }
+
+    fn context_menu_will_open(&self, _rows: &[usize], cx: &App) {
+        self.menu.reset(cx);
+    }
+
+    fn compare(&self, field: TrackField, a: usize, b: usize, cx: &App) -> Ordering {
+        let tracks = self.provider.tracks(cx);
+        match (field, self.provider.arrival(cx)) {
+            (TrackField::AddedAt, Some(arrival)) => sort::by_arrival(arrival, a, b),
+            (TrackField::LikedAt, _) => {
+                let at = |row| tracks.get(row).and_then(|track| self.liked_at(track, cx));
+                at(a).cmp(&at(b))
+            }
+            _ => sort::compare(tracks, field, a, b),
+        }
+    }
+
+    fn group(&self, field: TrackField, row: usize, cx: &App) -> Option<SharedString> {
+        sort::group(self.provider.tracks(cx), field, row)
+    }
+}
+
+#[cfg(test)]
+mod fixture {
+    use std::time::Duration;
+
+    use music::Track;
+
+    pub(super) fn track(seconds: u64, explicit: bool, playable: bool) -> Track {
+        Track {
+            id: Some("id".to_owned()),
+            playable,
+            duration: Duration::from_secs(seconds),
+            explicit,
+            ..Default::default()
+        }
+    }
+}

@@ -1,0 +1,432 @@
+use std::io::{self, BufReader, Read, Write};
+use std::process::ExitCode;
+
+use crate::args;
+use crate::commands::{Format, Kind, Local, Repeat, Request};
+use crate::wire::{self, Failure, LyricsStatus, QueueEntryKind, Reply, Value};
+
+/// The running Wisp refused the command, or the exchange broke.
+const FAILED: u8 = 1;
+/// No Wisp runs to send the command to. clap already takes 2 for usage errors.
+const NOT_RUNNING: u8 = 3;
+/// The headers of `wisp providers` and `wisp search`.
+const PROVIDERS: [&str; 2] = ["provider", "status"];
+const HITS: [&str; 5] = ["type", "title", "by", "length", "link"];
+
+/// Carries out a command that needs no running Wisp.
+pub fn local(local: Local) -> ExitCode {
+    match local {
+        Local::Completions(shell) => args::completions(shell),
+    }
+    ExitCode::SUCCESS
+}
+
+/// Sends `request` over `stream`, prints the reply in `format` and gives the code to exit with.
+pub fn run<S: Read + Write>(stream: &mut S, request: &Request, format: Format) -> ExitCode {
+    if request.streams() {
+        return follow(stream, request);
+    }
+    // TODO: the messages here come from Fluent once render lands
+    match wire::exchange(stream, request) {
+        Ok(Reply::Done) => ExitCode::SUCCESS,
+        Ok(Reply::Value(value)) => {
+            let printed = match format {
+                Format::Text => show(&value),
+                Format::Json => json(&value),
+            };
+            if !printed.is_empty() {
+                println!("{printed}");
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(Reply::Failed(failure)) => {
+            eprintln!("wisp: {}", describe(&failure));
+            ExitCode::from(FAILED)
+        }
+        Err(wire::Error::Closed) => {
+            eprintln!("wisp: the running Wisp did not answer; it may be older, restart it");
+            ExitCode::from(FAILED)
+        }
+        Err(error) => {
+            eprintln!("wisp: {error}");
+            ExitCode::from(FAILED)
+        }
+    }
+}
+
+/// Sends a request answered by a stream, `wisp watch`, and prints each reply as one line of
+/// JSON as it arrives, whatever the format, since a line per change is what a script reads.
+/// It ends when Wisp closes the stream, by quitting, or at the first line written after
+/// nothing reads them any more, as when they go into `head`.
+fn follow<S: Read + Write>(stream: &mut S, request: &Request) -> ExitCode {
+    if let Err(error) = wire::send(stream, request) {
+        eprintln!("wisp: {error}");
+        return ExitCode::from(FAILED);
+    }
+    let mut reader = BufReader::new(stream);
+    let mut out = io::stdout().lock();
+    loop {
+        match wire::receive::<Reply>(&mut reader) {
+            Ok(Reply::Value(value)) => {
+                let written = writeln!(out, "{}", json(&value)).and_then(|()| out.flush());
+                if written.is_err() {
+                    return ExitCode::SUCCESS;
+                }
+            }
+            Ok(Reply::Done) => {}
+            Ok(Reply::Failed(failure)) => {
+                eprintln!("wisp: {}", describe(&failure));
+                return ExitCode::from(FAILED);
+            }
+            Err(wire::Error::Closed) => return ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("wisp: {error}");
+                return ExitCode::from(FAILED);
+            }
+        }
+    }
+}
+
+/// Says that no Wisp runs, for a command that has nowhere to go.
+pub fn not_running() -> ExitCode {
+    eprintln!("wisp: Wisp is not running");
+    ExitCode::from(NOT_RUNNING)
+}
+
+/// A queried value for a person: the track as JSON, a list as a table, anything else as a
+/// bare word.
+fn show(value: &Value) -> String {
+    match value {
+        Value::Current(current) => serde_json::to_string_pretty(current).unwrap_or_default(),
+        Value::Volume(level) => level.to_string(),
+        Value::Muted(muted) => match muted {
+            true => "on".to_owned(),
+            false => "off".to_owned(),
+        },
+        Value::Shuffle(on) => match on {
+            true => "on".to_owned(),
+            false => "off".to_owned(),
+        },
+        Value::Repeat(repeat) => match repeat {
+            Repeat::Off => "off",
+            Repeat::All => "all",
+            Repeat::One => "one",
+        }
+        .to_owned(),
+        Value::Providers(providers) => table(
+            PROVIDERS,
+            providers.iter().map(|provider| {
+                let status = match (provider.current, provider.stored) {
+                    (true, _) => "current",
+                    (false, true) => "connected",
+                    (false, false) => "not connected",
+                };
+                [provider.slug.clone(), status.to_owned()]
+            }),
+        ),
+        Value::Provider(slug) => slug.clone().unwrap_or_default(),
+        Value::Hits(hits) if hits.is_empty() => String::new(),
+        Value::Hits(hits) => table(
+            HITS,
+            hits.iter().map(|hit| {
+                let kind = match hit.kind {
+                    Kind::Song => "song",
+                    Kind::Album => "album",
+                    Kind::Artist => "artist",
+                    Kind::Playlist => "playlist",
+                };
+                [
+                    kind.to_owned(),
+                    hit.title.clone(),
+                    hit.by.clone(),
+                    hit.duration.map(clock).unwrap_or_default(),
+                    hit.link.clone(),
+                ]
+            }),
+        ),
+        Value::Queue(queue) => show_queue(queue),
+        Value::Lyrics(lyrics) => show_lyrics(lyrics),
+        Value::Liked(liked) => match liked {
+            true => "on".to_owned(),
+            false => "off".to_owned(),
+        },
+    }
+}
+
+/// The queue for a person: each section headed, one track per line in play order, with the
+/// tracks queued by hand and the recommendations marked.
+fn show_queue(queue: &wire::QueueSnapshot) -> String {
+    if queue.previous.is_empty() && queue.current.is_none() && queue.upcoming.is_empty() {
+        return "Queue is empty.".to_owned();
+    }
+    let line = |entry: &wire::QueueEntry| {
+        let track = &entry.track;
+        let mark = match entry.kind {
+            QueueEntryKind::Context => String::new(),
+            QueueEntryKind::Queued => " [queued]".to_owned(),
+            QueueEntryKind::Suggested => " [suggested]".to_owned(),
+        };
+        format!(
+            "{} - {} ({}) {}{}",
+            track.title,
+            track.artists.join(", "),
+            track.album,
+            clock(track.duration),
+            mark
+        )
+    };
+    let mut lines = Vec::new();
+    if !queue.previous.is_empty() {
+        lines.push("Previous:".to_owned());
+        lines.extend(queue.previous.iter().map(line));
+    }
+    if let Some(current) = &queue.current {
+        lines.push("Now playing:".to_owned());
+        lines.push(line(current));
+    }
+    if !queue.upcoming.is_empty() {
+        lines.push("Up next:".to_owned());
+        lines.extend(queue.upcoming.iter().map(line));
+    }
+    if queue.truncated {
+        lines.push(format!(
+            "(only the {} most recent previous and next upcoming tracks are shown)",
+            wire::QUEUE_LIMIT
+        ));
+    }
+    lines.join("\n")
+}
+
+/// The lyrics for a person: a word on why there are none, else one line each with the time it
+/// starts at when synced and its romanization under it when there is one.
+fn show_lyrics(lyrics: &wire::LyricsSnapshot) -> String {
+    let said = match lyrics.state {
+        LyricsStatus::Idle => "No lyrics are loaded.",
+        LyricsStatus::Disabled => "Lyrics are turned off.",
+        LyricsStatus::Loading => "Loading the lyrics.",
+        LyricsStatus::Instrumental => "Instrumental.",
+        LyricsStatus::Missing => "No lyrics found.",
+        LyricsStatus::Failed => "The lyrics could not be loaded.",
+        LyricsStatus::Ready => "",
+    };
+    if !said.is_empty() {
+        return said.to_owned();
+    }
+    let mut lines = Vec::new();
+    for line in &lyrics.lines {
+        lines.push(match line.start_ms {
+            Some(start) => format!("[{}] {}", clock(start / 1000), line.text),
+            None => line.text.clone(),
+        });
+        lines.extend(
+            line.romanized
+                .iter()
+                .map(|romanized| format!("  {romanized}")),
+        );
+    }
+    if lyrics.truncated {
+        lines.push(format!(
+            "(only the first {} lines are shown)",
+            wire::LYRICS_LIMIT
+        ));
+    }
+    lines.join("\n")
+}
+
+/// A queried value for a script, as one line of JSON without the envelope around it.
+fn json(value: &Value) -> String {
+    let printed = match value {
+        Value::Current(current) => serde_json::to_string(current),
+        Value::Volume(level) => serde_json::to_string(level),
+        Value::Muted(muted) => serde_json::to_string(muted),
+        Value::Shuffle(on) => serde_json::to_string(on),
+        Value::Repeat(repeat) => serde_json::to_string(repeat),
+        Value::Providers(providers) => serde_json::to_string(providers),
+        Value::Provider(slug) => serde_json::to_string(slug),
+        Value::Hits(hits) => serde_json::to_string(hits),
+        Value::Queue(queue) => serde_json::to_string(queue),
+        Value::Lyrics(lyrics) => serde_json::to_string(lyrics),
+        Value::Liked(liked) => serde_json::to_string(liked),
+    };
+    printed.unwrap_or_default()
+}
+
+/// Rows under a header, every column but the last padded to its widest cell so the next one
+/// lines up. The last is left as it is, so a line ends without trailing spaces.
+fn table<const N: usize>(header: [&str; N], rows: impl Iterator<Item = [String; N]>) -> String {
+    let rows: Vec<[String; N]> = std::iter::once(header.map(str::to_owned))
+        .chain(rows)
+        .collect();
+    let mut widths = [0; N];
+    for row in &rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    rows.iter()
+        .map(|row| {
+            let mut line = String::new();
+            for (index, cell) in row.iter().enumerate() {
+                match index + 1 == N {
+                    true => line.push_str(cell),
+                    false => line.push_str(&format!("{cell:<width$}  ", width = widths[index])),
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whole seconds as `m:ss`, or `h:mm:ss` past an hour.
+fn clock(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    match hours {
+        0 => format!("{minutes}:{seconds:02}"),
+        _ => format!("{hours}:{minutes:02}:{seconds:02}"),
+    }
+}
+
+fn describe(failure: &Failure) -> String {
+    match failure {
+        Failure::Version(v) => format!("the running Wisp speaks protocol {v}; restart it"),
+        Failure::Malformed => {
+            "the running Wisp could not read the command; if it is older, restart it".to_owned()
+        }
+        Failure::Unsupported => "this command is not supported yet".to_owned(),
+        Failure::SignedOut => "no provider is signed in".to_owned(),
+        Failure::NoCurrentTrack => "there is no current track".to_owned(),
+        Failure::MissingTrackId => "the current track has no provider id".to_owned(),
+        Failure::OtherProvider { link, current } => {
+            format!("the link is for {link}, but {current} is the current provider")
+        }
+        Failure::Unqueueable(item) => format!("'{item}' cannot be queued"),
+        Failure::Unreadable(path) => format!("cannot read '{path}'"),
+        Failure::Unfetched(link) => format!("cannot fetch '{link}'"),
+        Failure::UnknownProvider(slug) => {
+            format!("no provider is called '{slug}'; see `wisp providers`")
+        }
+        Failure::NoAccount(name) => format!("{name} has no account to switch to; sign in first"),
+        Failure::SignInFailed(name) => format!("{name} did not sign in"),
+        Failure::Busy => "Wisp is busy; try again in a moment".to_owned(),
+        Failure::FavoriteUpdateFailed => {
+            "could not update the current track's favorite state".to_owned()
+        }
+        Failure::NothingFound(query) => format!("nothing found for '{query}'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::{QueueEntry, QueueSnapshot, Track};
+
+    fn entry(title: &str, kind: QueueEntryKind) -> QueueEntry {
+        QueueEntry {
+            track: Track {
+                id: Some(title.to_owned()),
+                title: title.to_owned(),
+                artists: vec!["artist".to_owned()],
+                album: "album".to_owned(),
+                cover: Some("cover".to_owned()),
+                duration: 125,
+            },
+            kind,
+        }
+    }
+
+    #[test]
+    fn an_empty_queue_prints_as_empty_in_both_formats() {
+        let value = Value::Queue(QueueSnapshot::default());
+        assert_eq!(show(&value), "Queue is empty.");
+        assert_eq!(
+            json(&value),
+            "{\"previous\":[],\"current\":null,\"upcoming\":[],\"truncated\":false}"
+        );
+    }
+
+    #[test]
+    fn a_queue_prints_in_order_with_its_kinds_marked() {
+        let value = Value::Queue(QueueSnapshot::bounded(
+            vec![entry("before", QueueEntryKind::Context)],
+            Some(entry("now", QueueEntryKind::Context)),
+            vec![
+                entry("by-hand", QueueEntryKind::Queued),
+                entry("similar", QueueEntryKind::Suggested),
+            ],
+        ));
+        let text = show(&value);
+        let order: Vec<_> = ["before", "now", "by-hand", "similar"]
+            .iter()
+            .map(|title| text.find(title).unwrap())
+            .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        assert!(text.contains("[queued]"), "{text}");
+        assert!(text.contains("[suggested]"), "{text}");
+        let printed = json(&value);
+        assert!(printed.contains("\"cover\":\"cover\""), "{printed}");
+        assert!(printed.contains("\"duration\":125"), "{printed}");
+    }
+
+    fn line(start_ms: Option<u64>, text: &str, romanized: Option<&str>) -> wire::LyricsLine {
+        wire::LyricsLine {
+            start_ms,
+            text: text.to_owned(),
+            romanized: romanized.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn lyrics_that_are_not_there_say_why_in_a_word() {
+        let said = |state| show(&Value::Lyrics(wire::LyricsSnapshot::without(state)));
+        assert_eq!(said(LyricsStatus::Missing), "No lyrics found.");
+        assert_eq!(said(LyricsStatus::Loading), "Loading the lyrics.");
+        assert_eq!(said(LyricsStatus::Instrumental), "Instrumental.");
+        assert_eq!(said(LyricsStatus::Disabled), "Lyrics are turned off.");
+    }
+
+    #[test]
+    fn synced_lyrics_print_their_times_and_romanization() {
+        let lines = vec![
+            line(Some(62_500), "こんにちは", Some("konnichiwa")),
+            line(Some(65_000), "", None),
+        ];
+        let value = Value::Lyrics(wire::LyricsSnapshot::without(LyricsStatus::Ready).bounded(
+            true,
+            lines,
+            Some(0),
+        ));
+        assert_eq!(show(&value), "[1:02] こんにちは\n  konnichiwa\n[1:05] ");
+        let printed = json(&value);
+        assert!(printed.contains("\"start_ms\":62500"), "{printed}");
+        assert!(
+            printed.contains("\"next\":{\"start_ms\":65000"),
+            "{printed}"
+        );
+    }
+
+    #[test]
+    fn plain_lyrics_print_as_they_are() {
+        let lines = vec![line(None, "one", None), line(None, "two", None)];
+        let value = Value::Lyrics(
+            wire::LyricsSnapshot::without(LyricsStatus::Ready).bounded(false, lines, None),
+        );
+        assert_eq!(show(&value), "one\ntwo");
+    }
+
+    #[test]
+    fn mute_state_prints_as_on_off_or_json_boolean() {
+        assert_eq!(show(&Value::Muted(true)), "on");
+        assert_eq!(show(&Value::Muted(false)), "off");
+        assert_eq!(json(&Value::Muted(true)), "true");
+        assert_eq!(json(&Value::Muted(false)), "false");
+    }
+
+    #[test]
+    fn favorite_state_prints_as_on_off_or_json_boolean() {
+        assert_eq!(show(&Value::Liked(true)), "on");
+        assert_eq!(show(&Value::Liked(false)), "off");
+        assert_eq!(json(&Value::Liked(true)), "true");
+        assert_eq!(json(&Value::Liked(false)), "false");
+    }
+}
