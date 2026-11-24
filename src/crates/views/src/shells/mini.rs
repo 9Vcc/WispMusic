@@ -83,20 +83,15 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
     );
     let playback = Wisp::global(cx).playback.clone();
     let settings = Wisp::global(cx).settings.clone();
-    let acrylic = {
-        let settings = settings.read(cx);
-        settings.transparent() && settings.blur_window()
-    };
     let Ok(opened) = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin,
                 size: size(px(WIDTH), px(BAR)),
             })),
-            window_background: match acrylic {
-                true => WindowBackgroundAppearance::Blurred,
-                false => WindowBackgroundAppearance::Transparent,
-            },
+            // The window stays transparent: a system acrylic layer fills the window's own
+            // rectangle (including its frame), leaving a square grey sheet around the card.
+            window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::PopUp,
             titlebar: None,
             is_resizable: false,
@@ -277,15 +272,12 @@ fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
 
 struct MiniPlayer {
     playback: Entity<Playback>,
-    settings: Entity<AppSettings>,
     expanded: bool,
     /// The queue's scroll, kept between renders so it does not jump to the top.
     scroll: UniformListScrollHandle,
     seek: ScrubberState,
     volume: ScrubberState,
     pending_seek: Option<f32>,
-    /// What the window background was last told, so it changes only with the settings.
-    acrylic: Option<bool>,
     #[cfg(target_os = "windows")]
     shape: Option<(f32, f32, f32)>,
 }
@@ -301,34 +293,23 @@ impl MiniPlayer {
         cx.observe(&ticks, |_, _, cx| cx.notify()).detach();
         cx.observe(&playback, |_, _, cx| cx.notify()).detach();
         cx.observe(&queue, |_, _, cx| cx.notify()).detach();
+        // Theme changes arrive as a settings notification; the window itself has nothing to
+        // reconfigure, since it stays transparent.
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             playback,
-            settings,
             expanded: false,
             scroll: UniformListScrollHandle::new(),
             seek: ScrubberState::new("mini-seek"),
             volume: ScrubberState::new("mini-volume"),
             pending_seek: None,
-            acrylic: None,
             #[cfg(target_os = "windows")]
             shape: None,
         }
     }
 
-    /// Keeps the window's own background and rounded shape in step with the settings and size.
-    fn sync_window(&mut self, window: &mut Window, cx: &App) {
-        let acrylic = {
-            let settings = self.settings.read(cx);
-            settings.transparent() && settings.blur_window()
-        };
-        if self.acrylic != Some(acrylic) {
-            self.acrylic = Some(acrylic);
-            window.set_background_appearance(match acrylic {
-                true => WindowBackgroundAppearance::Blurred,
-                false => WindowBackgroundAppearance::Transparent,
-            });
-        }
+    /// Keeps the window's rounded shape in step with its size.
+    fn sync_window(&mut self, window: &mut Window) {
         #[cfg(target_os = "windows")]
         {
             let size = window.viewport_size();
@@ -879,7 +860,7 @@ impl MiniPlayer {
 
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_window(window, cx);
+        self.sync_window(window);
         let theme = *cx.theme();
 
         div().size_full().child(
