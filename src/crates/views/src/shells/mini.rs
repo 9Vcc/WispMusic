@@ -29,7 +29,7 @@ const CARD_RADIUS: f32 = 14.;
 /// The card's inner spacing, cover and type, all fixed with the window.
 const PAD: f32 = 12.;
 const GAP: f32 = 8.;
-const COVER: f32 = 44.;
+const COVER: f32 = 48.;
 const COVER_RADIUS: f32 = 8.;
 const TITLE_SIZE: f32 = 13.;
 const CAPTION_SIZE: f32 = 11.;
@@ -39,6 +39,8 @@ const BAR_EDGE: f32 = 4.;
 const BAR_HIT: f32 = 10.;
 const BAR_LINE: f32 = 4.;
 const BAR_WEIGHT: f32 = 3.;
+/// The seek line starts after the cover, as in the old mini player.
+const TRACK_LEFT: f32 = PAD + COVER + GAP;
 /// The expanded queue's row height, side padding and heading.
 const ROW: f32 = 32.;
 const ROW_PAD: f32 = 6.;
@@ -221,8 +223,10 @@ fn round_window(window: &Window, width: Pixels, height: Pixels, scale: f32) {
 }
 
 #[cfg(target_os = "windows")]
-fn place(window: &Window, origin: Point<Pixels>, height: f32) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+fn move_window(window: &Window, origin: Point<Pixels>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
     let Some(handle) = hwnd(window) else {
         return;
     };
@@ -233,15 +237,20 @@ fn place(window: &Window, origin: Point<Pixels>, height: f32) {
             std::ptr::null_mut(),
             (origin.x.as_f32() * scale).round() as i32,
             (origin.y.as_f32() * scale).round() as i32,
-            (WIDTH * scale).round() as i32,
-            (height * scale).round() as i32,
-            SWP_NOACTIVATE | SWP_NOZORDER,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
         );
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn place(window: &mut Window, _origin: Point<Pixels>, height: f32) {
+fn move_window(_window: &Window, _origin: Point<Pixels>) {}
+
+fn place(window: &mut Window, origin: Point<Pixels>, height: f32) {
+    move_window(window, origin);
+    // Let GPUI resize the window itself, so the frame that follows already knows the new
+    // viewport; a bare SetWindowPos leaves the newly exposed strip blank for a frame.
     window.resize(size(px(WIDTH), px(height)));
 }
 
@@ -343,8 +352,6 @@ impl MiniPlayer {
             }
             false => (self.resting.take().unwrap_or(frame.origin), BAR),
         };
-        place(window, origin, height);
-        window.refresh();
         self.expanded = expanded;
         #[cfg(target_os = "windows")]
         {
@@ -357,6 +364,8 @@ impl MiniPlayer {
                     .scroll_to_item(sections.past, ScrollStrategy::Center);
             }
         }
+        place(window, origin, height);
+        window.refresh();
         cx.notify();
     }
 
@@ -375,6 +384,7 @@ impl MiniPlayer {
             .filter(|artists| !artists.is_empty())
             .unwrap_or_else(|| t!("player-nothing-playing"));
         let cover = track.and_then(|track| track.cover);
+        let shuffle = playback.shown_shuffle(cx);
         let ratio = match duration.as_secs_f32() > 0. {
             true => (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.),
             false => 0.,
@@ -406,25 +416,48 @@ impl MiniPlayer {
                     )
                     .child(
                         div()
+                            .group("mini-info")
+                            .relative()
                             .flex()
                             .flex_1()
                             .min_w_0()
+                            .h_full()
                             .flex_col()
-                            .gap(px(1.))
+                            .justify_center()
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_size(px(TITLE_SIZE))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.popover_foreground)
-                                    .child(title),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .group_hover("mini-info", |style| style.opacity(0.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(TITLE_SIZE))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(CAPTION_SIZE))
+                                            .text_color(theme.muted_foreground)
+                                            .child(artist),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_size(px(CAPTION_SIZE))
-                                    .text_color(theme.muted_foreground)
-                                    .child(artist),
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .invisible()
+                                    .group_hover("mini-info", |style| style.visible())
+                                    .child(previous(&self.playback, false, cx))
+                                    .child(toggle(&self.playback, false, false, cx))
+                                    .child(next(&self.playback, false, cx)),
                             ),
                     )
                     .child(
@@ -432,15 +465,26 @@ impl MiniPlayer {
                             .flex()
                             .flex_none()
                             .items_center()
-                            .child(previous(&self.playback, false, cx))
-                            .child(toggle(&self.playback, false, false, cx))
-                            .child(next(&self.playback, false, cx)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
+                            .child(
+                                Button::new("mini-shuffle")
+                                    .ghost()
+                                    .small()
+                                    .icon("icons/shuffle.svg")
+                                    .tooltip_above("player-shuffle")
+                                    .selected(shuffle)
+                                    .tint(match shuffle {
+                                        true => theme.primary,
+                                        false => theme.muted_foreground,
+                                    })
+                                    .on_click({
+                                        let playback = self.playback.clone();
+                                        move |_, _, cx| {
+                                            playback.update(cx, |playback, cx| {
+                                                playback.toggle_shuffle(cx)
+                                            })
+                                        }
+                                    }),
+                            )
                             .child(
                                 Button::new("mini-expand")
                                     .ghost()
@@ -480,7 +524,7 @@ impl MiniPlayer {
                 div()
                     .id("mini-progress")
                     .absolute()
-                    .left(px(BAR_INSET))
+                    .left(px(TRACK_LEFT))
                     .right(px(BAR_INSET))
                     .bottom(px(BAR_EDGE))
                     .h(px(BAR_HIT))
@@ -490,7 +534,7 @@ impl MiniPlayer {
                     .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         cx.stop_propagation();
                         let width = window.viewport_size().width;
-                        let left = px(BAR_INSET);
+                        let left = px(TRACK_LEFT);
                         let right = width - px(BAR_INSET);
                         let span = (right - left).max(px(1.));
                         let ratio = ((event.position.x - left) / span).clamp(0., 1.);
@@ -514,7 +558,7 @@ impl MiniPlayer {
                             .top(px(BAR_LINE))
                             .h(px(BAR_WEIGHT))
                             .rounded_full()
-                            .bg(theme.border),
+                            .bg(theme.foreground.opacity(0.12)),
                     )
                     .child(
                         div()
@@ -524,7 +568,7 @@ impl MiniPlayer {
                             .h(px(BAR_WEIGHT))
                             .w(relative(ratio))
                             .rounded_full()
-                            .bg(theme.popover_foreground),
+                            .bg(theme.primary),
                     )
             })
     }
@@ -645,7 +689,7 @@ impl MiniPlayer {
             .gap(px(6.))
             .px(px(ROW_PAD))
             .rounded(px(6.))
-            .text_color(theme.popover_foreground)
+            .text_color(theme.foreground)
             .when(current, |this| this.bg(theme.secondary))
             .hover(|this| this.bg(theme.secondary_hover))
             .cursor_pointer()
@@ -701,21 +745,17 @@ impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window(window, cx);
         let theme = *cx.theme();
-        let opacity = {
-            let look = self.settings.read(cx).look();
-            match look.transparent {
-                true => 1. - look.transparency,
-                false => 1.,
-            }
-        };
 
         div().size_full().child(
             div()
                 .id("mini-card")
                 .relative()
+                .flex()
+                .flex_col()
                 .size_full()
                 .rounded(px(CARD_RADIUS))
-                .bg(theme.popover.opacity(opacity))
+                .bg(theme.background)
+                .text_color(theme.foreground)
                 .overflow_hidden()
                 .child(self.bar(cx))
                 .when(self.expanded, |this| this.child(self.panel(cx))),
