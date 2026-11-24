@@ -68,13 +68,21 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
     }
     let main = window.window_handle();
     let frame = window.bounds();
-    let origin = point(
+    let desired = point(
         frame.origin.x + (frame.size.width - px(WIDTH)) / 2.,
         frame.origin.y + frame.size.height / 4.,
     );
+    // Pick the place once, with room for the expanded panel. Folding never moves the window,
+    // so repeated expands cannot drift.
+    let origin = room(
+        Bounds {
+            origin: desired,
+            size: size(px(WIDTH), px(BAR)),
+        },
+        cx,
+    );
     let playback = Wisp::global(cx).playback.clone();
     let settings = Wisp::global(cx).settings.clone();
-    let collapsed = origin;
     let acrylic = {
         let settings = settings.read(cx);
         settings.transparent() && settings.blur_window()
@@ -105,7 +113,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
                 cx.remove_global::<MiniSession>();
                 true
             });
-            cx.new(|cx| MiniPlayer::new(playback, settings, collapsed, cx))
+            cx.new(|cx| MiniPlayer::new(playback, settings, cx))
         },
     ) else {
         return;
@@ -223,38 +231,6 @@ fn round_window(window: &Window, width: Pixels, height: Pixels, scale: f32) {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn move_window(window: &Window, origin: Point<Pixels>) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
-    };
-    let Some(handle) = hwnd(window) else {
-        return;
-    };
-    let scale = window.scale_factor();
-    unsafe {
-        SetWindowPos(
-            handle,
-            std::ptr::null_mut(),
-            (origin.x.as_f32() * scale).round() as i32,
-            (origin.y.as_f32() * scale).round() as i32,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn move_window(_window: &Window, _origin: Point<Pixels>) {}
-
-fn place(window: &mut Window, origin: Point<Pixels>, height: f32) {
-    move_window(window, origin);
-    // Let GPUI resize the window itself, so the frame that follows already knows the new
-    // viewport; a bare SetWindowPos leaves the newly exposed strip blank for a frame.
-    window.resize(size(px(WIDTH), px(height)));
-}
-
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
 fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
     let displays = cx.displays();
@@ -282,11 +258,6 @@ struct MiniPlayer {
     playback: Entity<Playback>,
     settings: Entity<AppSettings>,
     expanded: bool,
-    /// The collapsed window's place. It follows the window when the user drags it there, so
-    /// repeated folds return to the same spot instead of reading a stale in-flight position.
-    collapsed: Point<Pixels>,
-    /// Whether the window's move observer is installed.
-    watched: bool,
     /// The queue's scroll, kept between renders so it does not jump to the top.
     scroll: UniformListScrollHandle,
     seek: ScrubberState,
@@ -302,7 +273,6 @@ impl MiniPlayer {
     fn new(
         playback: Entity<Playback>,
         settings: Entity<AppSettings>,
-        collapsed: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
         let ticks = playback.read(cx).ticks().clone();
@@ -315,8 +285,6 @@ impl MiniPlayer {
             playback,
             settings,
             expanded: false,
-            collapsed,
-            watched: false,
             scroll: UniformListScrollHandle::new(),
             seek: ScrubberState::new("mini-seek"),
             volume: ScrubberState::new("mini-volume"),
@@ -356,14 +324,6 @@ impl MiniPlayer {
         if self.expanded == expanded {
             return;
         }
-        let frame = Bounds {
-            origin: self.collapsed,
-            size: size(px(WIDTH), px(BAR)),
-        };
-        let (origin, height) = match expanded {
-            true => (room(frame, cx), EXPANDED),
-            false => (self.collapsed, BAR),
-        };
         self.expanded = expanded;
         #[cfg(target_os = "windows")]
         {
@@ -378,7 +338,15 @@ impl MiniPlayer {
         } else {
             self.pending_seek = None;
         }
-        place(window, origin, height);
+        // Height only: the window's top-left is chosen once on entry and never moves, so
+        // folding in and out cannot accumulate an offset.
+        window.resize(size(
+            px(WIDTH),
+            px(match expanded {
+                true => EXPANDED,
+                false => BAR,
+            }),
+        ));
         window.refresh();
         cx.notify();
     }
@@ -890,17 +858,6 @@ impl MiniPlayer {
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window(window, cx);
-        if !self.watched {
-            self.watched = true;
-            cx.observe_window_bounds(window, |this, window, _cx| {
-                // Track the user's own placement only while folded at the folded size, so a
-                // late resize from a fold cannot move the anchor.
-                if !this.expanded && window.viewport_size().height <= px(BAR + 1.) {
-                    this.collapsed = window.bounds().origin;
-                }
-            })
-            .detach();
-        }
         let theme = *cx.theme();
 
         div().size_full().child(
@@ -912,6 +869,8 @@ impl Render for MiniPlayer {
                 .size_full()
                 .rounded(px(CARD_RADIUS))
                 .bg(theme.background)
+                .border_1()
+                .border_color(theme.foreground.opacity(0.22))
                 .text_color(theme.foreground)
                 .overflow_hidden()
                 .child(self.bar(cx))
