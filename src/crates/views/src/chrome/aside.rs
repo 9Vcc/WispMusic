@@ -442,8 +442,10 @@ impl Aside {
         }
     }
 
-    pub(crate) fn strip(&mut self) {
+    pub(crate) fn strip(&mut self, cx: &mut Context<Self>) {
         self.titled = false;
+        self.stroke
+            .update(cx, |stroke, cx| stroke.set_titled(false, cx));
     }
 
     /// Whether the pointer is parked on the panel's scrollbar. Fullscreen
@@ -3183,7 +3185,7 @@ fn lifted(row: Div, sung: &Sung) -> Div {
 
 /// How much a window grows fullscreen lyrics past `LYRICS_FRAME`. The tighter of its width and
 /// height decides, and a window no larger than the frame, stacked layouts included, keeps 1.
-fn lyrics_frame_scale(viewport: Size<Pixels>) -> f32 {
+pub(super) fn lyrics_frame_scale(viewport: Size<Pixels>) -> f32 {
     (viewport.width / LYRICS_FRAME.width)
         .min(viewport.height / LYRICS_FRAME.height)
         .clamp(1., LYRICS_FRAME_MOST)

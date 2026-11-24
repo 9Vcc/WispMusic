@@ -226,7 +226,7 @@ impl FullscreenView {
             false => SideTab::Queue,
         });
         let aside = cx.new(|cx| Aside::new(queue.clone(), playback.clone(), shown, cx));
-        aside.update(cx, |aside, _| aside.strip());
+        aside.update(cx, |aside, cx| aside.strip(cx));
         let me = cx.entity_id();
         let playlist_scrollbar = cx.new(|_| Scrollbar::inset().watching(me));
         let version_scroll = cx.new(|_| Scrollbar::inset().watching(me));

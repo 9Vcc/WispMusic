@@ -23,6 +23,8 @@ use music::{Lyrics, LyricsLine};
 use state::{AppSettings, Io, Playback};
 use ui::ActiveTheme as _;
 
+use super::aside::lyrics_frame_scale;
+
 const STROKE_SCATTER_MS: f64 = 320.;
 const CELL_MIN: f32 = 26.;
 const CELL_MAX: f32 = 46.;
@@ -183,14 +185,15 @@ fn split_columns(timings: &[Timing]) -> Vec<Column> {
     columns
 }
 
-fn cell_size(stage_height: f32, column_length: usize) -> f32 {
+fn cell_size(stage_height: f32, column_length: usize, scale: f32) -> f32 {
+    let scale = scale.clamp(0.5, 3.);
     if stage_height <= 0. || column_length == 0 {
-        return CELL_MAX;
+        return CELL_MAX * scale;
     }
     let available = stage_height * COLUMN_HEIGHT_RATIO;
     (available / column_length as f32)
         .floor()
-        .clamp(CELL_MIN, CELL_MAX)
+        .clamp(CELL_MIN * scale, CELL_MAX * scale)
 }
 
 #[derive(Clone, Copy)]
@@ -472,6 +475,8 @@ pub(super) struct StrokeLyrics {
     settings: gpui::Entity<AppSettings>,
     stage: Rc<Cell<Bounds<Pixels>>>,
     stage_height: f32,
+    titled: bool,
+    scale: f32,
     revision: u64,
     cache: HashMap<char, Option<Arc<Hanzi>>>,
     fetching: HashSet<char>,
@@ -499,6 +504,8 @@ impl StrokeLyrics {
             settings,
             stage: Rc::new(Cell::new(Bounds::default())),
             stage_height: 0.,
+            titled: true,
+            scale: 1.,
             revision: 0,
             cache: HashMap::new(),
             fetching: HashSet::new(),
@@ -507,6 +514,19 @@ impl StrokeLyrics {
             pending: None,
             switch_at: None,
             out_at: None,
+        }
+    }
+
+    pub(super) fn set_titled(&mut self, titled: bool, cx: &mut Context<Self>) {
+        self.titled = titled;
+        cx.notify();
+    }
+
+    fn current_scale(&self, window: &Window, cx: &App) -> f32 {
+        let settings = self.settings.read(cx);
+        match self.titled {
+            true => settings.panel_lyrics_scale(),
+            false => settings.fullscreen_lyrics_scale() * lyrics_frame_scale(window.viewport_size()),
         }
     }
 
@@ -635,7 +655,7 @@ impl StrokeLyrics {
             .map(|column| column.indices.len())
             .max()
             .unwrap_or(1);
-        let cell = cell_size(self.stage_height, max_column);
+        let cell = cell_size(self.stage_height, max_column, self.scale);
         let safe = self.stage_height * STAGE_SAFE_RATIO;
         let translations = line
             .secondary
@@ -936,6 +956,7 @@ impl Render for StrokeLyrics {
         if bounds.size.height > px(0.) && bounds.size.height.as_f32() != self.stage_height {
             self.stage_height = bounds.size.height.as_f32();
         }
+        self.scale = self.current_scale(window, cx);
         if let Some(scene) = self.scene.as_mut() {
             let max_column = scene
                 .columns
@@ -943,7 +964,7 @@ impl Render for StrokeLyrics {
                 .map(|column| column.indices.len())
                 .max()
                 .unwrap_or(1);
-            let cell = cell_size(self.stage_height, max_column);
+            let cell = cell_size(self.stage_height, max_column, self.scale);
             if (cell - scene.cell).abs() > 0.5 {
                 scene.cell = cell;
                 scene.safe = self.stage_height * STAGE_SAFE_RATIO;
@@ -1139,9 +1160,10 @@ mod tests {
 
     #[test]
     fn cells_stay_readable_and_fit_the_stage() {
-        assert_eq!(cell_size(560., 10), 38.);
-        assert_eq!(cell_size(80., 10), CELL_MIN);
-        assert_eq!(cell_size(560., 2), CELL_MAX);
+        assert_eq!(cell_size(560., 10, 1.), 38.);
+        assert_eq!(cell_size(80., 10, 1.), CELL_MIN);
+        assert_eq!(cell_size(560., 2, 1.), CELL_MAX);
+        assert!(cell_size(560., 2, 1.2) > cell_size(560., 2, 1.));
     }
 
     #[test]
