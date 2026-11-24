@@ -221,7 +221,8 @@ fn surface(window: &mut Window) {
 #[cfg(target_os = "windows")]
 fn set_window_frame(window: &Window, shown: bool) {
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
+        DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT,
+        DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
     };
     let Some(handle) = hwnd(window) else {
         return;
@@ -230,12 +231,22 @@ fn set_window_frame(window: &Window, shown: bool) {
         true => DWMNCRP_ENABLED,
         false => DWMNCRP_DISABLED,
     };
+    let border = match shown {
+        true => DWMWA_COLOR_DEFAULT,
+        false => DWMWA_COLOR_NONE,
+    };
     unsafe {
         DwmSetWindowAttribute(
             handle,
             DWMWA_NCRENDERING_POLICY as u32,
             &policy as *const _ as *const std::ffi::c_void,
             std::mem::size_of_val(&policy) as u32,
+        );
+        DwmSetWindowAttribute(
+            handle,
+            DWMWA_BORDER_COLOR as u32,
+            &border as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&border) as u32,
         );
     }
 }
