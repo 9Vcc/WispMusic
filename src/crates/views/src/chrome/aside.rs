@@ -77,6 +77,8 @@ const LYRICS_FRAME: Size<Pixels> = size(px(1152.), px(648.));
 const LYRICS_FRAME_MOST: f32 = 2.;
 const PINNED_SHARE: f32 = 0.25;
 const PIN: f32 = 0.5;
+/// How many lyric rows above the vertical middle the sung line sits.
+const PIN_LIFT_LINES: f32 = 2.;
 // how far a row falls behind, in verse sizes
 const LAG: f32 = 24.;
 // never past this share
@@ -1286,6 +1288,7 @@ impl Aside {
             karaoke_lyrics,
             romanization_scripts,
             blur_lyrics,
+            lyrics_blur_amount,
             fade_lyrics,
             edge_feather_lyrics,
             distance_scale_lyrics,
@@ -1300,6 +1303,7 @@ impl Aside {
                     .romanized_lyrics()
                     .then(|| settings.romanization_scripts()),
                 settings.blur_lyrics(),
+                settings.lyrics_blur_amount(),
                 settings.fade_lyrics(),
                 settings.edge_feather_lyrics(),
                 settings.distance_scale_lyrics(),
@@ -1484,7 +1488,7 @@ impl Aside {
                 if breathing && active_line.is_some() {
                     window.request_animation_frame();
                 }
-                let blur = verse * BLUR;
+                let blur = verse * BLUR * lyrics_blur_amount;
                 let sharpen = self.sharpen_progress(window);
                 // with motion turned down a press is simply on or off
                 let sink = match animations {
@@ -1492,6 +1496,7 @@ impl Aside {
                     false => 1.,
                 };
                 let view = scroll.bounds();
+                let pin_lift = self.lyric_line_height(window, cx) * PIN_LIFT_LINES;
                 if hazing && scroll.bounds_for_item(0).is_none() {
                     window.request_animation_frame();
                 }
@@ -1535,7 +1540,7 @@ impl Aside {
                         let softness = match hazing && instrumental_line != Some(index) {
                             true => clearing(
                                 notes_touch,
-                                viewport_haze(&scroll, notes_row, view, blur, notes_translation),
+                                viewport_haze(&scroll, notes_row, view, blur, notes_translation, pin_lift),
                             ),
                             false => 0.,
                         };
@@ -1617,7 +1622,7 @@ impl Aside {
                     let settled =
                         !active && !departing && !karaoke && !self.handled(Warm::Verse(index));
                     let spared = (measured && settled && self.was_settled.get(row) == Some(&true))
-                        .then(|| viewport_place(&scroll, row, view, translation))
+                        .then(|| viewport_place(&scroll, row, view, translation, px(0.)))
                         .flatten()
                         .filter(|place| {
                             place.top + place.height < -view.size.height * SPARE_MARGIN
@@ -1795,11 +1800,11 @@ impl Aside {
                         });
 
                     let softness = match hazing && Some(index) != active_line {
-                        true => haze(viewport_haze(&scroll, row, view, blur, translation)),
+                        true => haze(viewport_haze(&scroll, row, view, blur, translation, pin_lift)),
                         false => 0.,
                     };
                     let row_blur = match (blur_lyrics, background_line_singing(line, active, position)) {
-                        (true, true) => BACKGROUND_SINGING_BLUR,
+                        (true, true) => BACKGROUND_SINGING_BLUR * lyrics_blur_amount,
                         (true, false) => blur,
                         (false, _) => Pixels::ZERO,
                     };
@@ -2089,11 +2094,27 @@ impl Aside {
             .checked_sub(1)
             .and_then(|last| scroll.bounds_for_item(last))
             .map_or(px(0.), |item| item.size.height);
+        let lift = self.lyric_line_height(window, cx) * PIN_LIFT_LINES;
+        let pin = (view * PIN - lift).max(px(REST));
 
         (
-            snapped((view * PIN).max(px(REST)), window),
-            snapped((view * (1. - PIN) - tail).max(px(REST)), window),
+            snapped(pin, window),
+            snapped((view - pin - tail).max(px(REST)), window),
         )
+    }
+
+    fn lyric_line_height(&self, window: &Window, cx: &App) -> Pixels {
+        let theme = *cx.theme();
+        let frame_scale = match self.titled {
+            true => 1.,
+            false => lyrics_frame_scale(window.viewport_size()),
+        };
+        let scale = match self.titled {
+            true => self.settings.read(cx).panel_lyrics_scale(),
+            false => self.settings.read(cx).fullscreen_lyrics_scale(),
+        } * frame_scale;
+        let (verse, _) = verse_sizes(self.titled, scale, &theme);
+        active_verse_size(verse) * ui::LEADING
     }
 
     fn anchor_verse(&mut self) {
@@ -2182,6 +2203,7 @@ impl Aside {
             item.origin.y,
             view.size.height,
             scroll.max_offset().y,
+            self.lyric_line_height(window, cx) * PIN_LIFT_LINES,
         );
         if !self.aiming {
             // The verse was put before its rows had their final sizes, so the place it belongs
@@ -3405,8 +3427,14 @@ fn wrap_fragment_widths(widths: &[Pixels], breaks: &[bool], width: Pixels) -> Ve
     rows
 }
 
-fn anchored_lyrics_offset(view: Pixels, item: Pixels, height: Pixels, reach: Pixels) -> Pixels {
-    let delta = view - item + height * PIN;
+fn anchored_lyrics_offset(
+    view: Pixels,
+    item: Pixels,
+    height: Pixels,
+    reach: Pixels,
+    lift: Pixels,
+) -> Pixels {
+    let delta = view - item + height * PIN - lift;
     delta.clamp(-reach, px(0.))
 }
 
@@ -3563,6 +3591,7 @@ fn viewport_place(
     row: usize,
     view: Bounds<Pixels>,
     shift: Pixels,
+    lift: Pixels,
 ) -> Option<Place> {
     let height = view.size.height;
     let item = scroll.bounds_for_item(row)?;
@@ -3570,12 +3599,12 @@ fn viewport_place(
         return None;
     }
     let top = item.origin.y - view.origin.y + scroll.offset().y + shift;
-    let travel = top - height * PIN;
-    let reach = height
-        * match travel >= px(0.) {
-            true => 1. - PIN,
-            false => PIN,
-        };
+    let target = height * PIN - lift;
+    let travel = top - target;
+    let reach = match travel >= px(0.) {
+        true => height - target,
+        false => target,
+    };
     Some(Place {
         top,
         height: item.size.height,
@@ -3590,8 +3619,9 @@ fn viewport_haze(
     view: Bounds<Pixels>,
     margin: Pixels,
     drift: Pixels,
+    lift: Pixels,
 ) -> f32 {
-    let Some(place) = viewport_place(scroll, row, view, drift) else {
+    let Some(place) = viewport_place(scroll, row, view, drift, lift) else {
         return 0.;
     };
     if place.top + place.height + margin < px(0.) || place.top - margin > view.size.height {
@@ -3638,7 +3668,7 @@ fn lag_spring(along: f32, preset: LyricMotionPreset) -> SpringConfig {
 
 // incoming rows last
 fn viewport_along(scroll: &ScrollHandle, row: usize, view: Bounds<Pixels>, downward: bool) -> f32 {
-    let Some(place) = viewport_place(scroll, row, view, px(0.)) else {
+    let Some(place) = viewport_place(scroll, row, view, px(0.), px(0.)) else {
         return 0.;
     };
     match downward {
@@ -3949,14 +3979,15 @@ mod tests {
 
     #[test]
     fn lyrics_follow_uses_unscrolled_item_bounds() {
-        let offset = anchored_lyrics_offset(px(0.), px(200.), px(100.), px(500.));
+        let offset = anchored_lyrics_offset(px(0.), px(200.), px(100.), px(500.), px(0.));
 
         assert_eq!(offset, px(-150.));
     }
 
     #[test]
     fn lyrics_follow_preserves_a_subpixel_target() {
-        let offset = anchored_lyrics_offset(px(0.25), px(200.125), px(100.5), px(500.));
+        let offset =
+            anchored_lyrics_offset(px(0.25), px(200.125), px(100.5), px(500.), px(0.));
 
         assert!((offset.as_f32() - -149.625).abs() < 0.001);
     }

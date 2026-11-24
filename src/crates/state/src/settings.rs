@@ -419,6 +419,8 @@ struct Values {
     lyrics_prefer_word_synced: bool,
     karaoke_lyrics: bool,
     blur_lyrics: bool,
+    /// Multiplier on the blur of background lyrics, 1.0 being the default strength.
+    lyrics_blur_amount: f32,
     fade_lyrics: bool,
     edge_feather_lyrics: bool,
     distance_scale_lyrics: bool,
@@ -686,6 +688,7 @@ impl Default for Values {
             lyrics_prefer_word_synced: true,
             karaoke_lyrics: true,
             blur_lyrics: true,
+            lyrics_blur_amount: 1.,
             fade_lyrics: true,
             edge_feather_lyrics: true,
             distance_scale_lyrics: false,
@@ -1301,6 +1304,10 @@ impl AppSettings {
 
     pub fn blur_lyrics(&self) -> bool {
         self.values.blur_lyrics
+    }
+
+    pub fn lyrics_blur_amount(&self) -> f32 {
+        self.values.lyrics_blur_amount
     }
 
     pub fn fade_lyrics(&self) -> bool {
@@ -1932,6 +1939,11 @@ impl AppSettings {
 
     pub fn set_blur_lyrics(&mut self, blur: bool, cx: &mut Context<Self>) {
         self.values.blur_lyrics = blur;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_lyrics_blur_amount(&mut self, amount: f32, cx: &mut Context<Self>) {
+        self.values.lyrics_blur_amount = amount.clamp(0., 2.);
         self.schedule_save(cx);
     }
 
@@ -3467,6 +3479,7 @@ mod tests {
     fn lyric_effects_keep_the_current_look_and_round_trip_the_motion_preset() {
         let values = Values::default();
         assert!(values.fade_lyrics);
+        assert_eq!(values.lyrics_blur_amount, 1.);
         assert!(values.edge_feather_lyrics);
         assert!(!values.distance_scale_lyrics);
         assert!(!values.breathing_lyrics);

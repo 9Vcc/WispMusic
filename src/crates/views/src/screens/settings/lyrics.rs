@@ -32,21 +32,25 @@ impl SettingsView {
             return groups;
         }
         groups.push(
-            Group::new("settings-group-display", "icons/mic-vocal.svg").rows([
-                Slot::LyricOffsetDefault,
-                Slot::Karaoke,
-                Slot::BlurLyrics,
-                Slot::FadeLyrics,
-                Slot::EdgeFeatherLyrics,
-                Slot::DistanceScaleLyrics,
-                Slot::BreathingLyrics,
-                Slot::GapDotsLyrics,
-                Slot::ParallaxLyrics,
-                Slot::LyricsMotion,
-                Slot::Romanized,
-                Slot::PanelLyricsSize,
-                Slot::FullscreenLyricsSize,
-            ]),
+            Group::new("settings-group-display", "icons/mic-vocal.svg")
+                .rows([
+                    Slot::LyricOffsetDefault,
+                    Slot::Karaoke,
+                    Slot::Romanized,
+                    Slot::PanelLyricsSize,
+                    Slot::FullscreenLyricsSize,
+                ])
+                .folded([
+                    Slot::BlurLyrics,
+                    Slot::LyricsBlurAmount,
+                    Slot::FadeLyrics,
+                    Slot::EdgeFeatherLyrics,
+                    Slot::DistanceScaleLyrics,
+                    Slot::BreathingLyrics,
+                    Slot::GapDotsLyrics,
+                    Slot::ParallaxLyrics,
+                    Slot::LyricsMotion,
+                ]),
         );
         groups.push(
             Group::new("settings-group-sources", "icons/list-music.svg")
@@ -479,6 +483,42 @@ impl SettingsView {
                     this.settings.update(cx, |settings, cx| apply(settings, !on, cx));
                 }))
                 .into_any_element(),
+        )
+    }
+
+    pub(super) fn lyrics_blur_amount_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let amount = self.settings.read(cx).lyrics_blur_amount();
+        let step =
+            move |suffix: &'static str, label: &'static str, name: &'static str, delta: f32| {
+                let wanted = (amount + delta).clamp(0., 2.);
+
+                Button::new(SharedString::from(format!("lyrics-blur-{suffix}")))
+                    .label(label)
+                    .name(i18n::lookup(name, None))
+                    .small()
+                    .outline()
+                    .disabled(wanted == amount)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings
+                            .update(cx, |settings, cx| settings.set_lyrics_blur_amount(wanted, cx));
+                        cx.notify();
+                    }))
+            };
+
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(step("smaller", "\u{2212}", "settings-font-smaller", -0.1))
+            .child(ui::spoken(
+                "lyrics-blur-value",
+                format!("{}%", (amount * 100.).round() as i64),
+            ))
+            .child(step("larger", "+", "settings-font-larger", 0.1));
+
+        self.row(
+            t!("settings-lyrics-blur-amount"),
+            actions.into_any_element(),
         )
     }
 

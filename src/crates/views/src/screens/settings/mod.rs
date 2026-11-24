@@ -93,6 +93,7 @@ enum Slot {
     LyricOffsetDefault,
     Karaoke,
     BlurLyrics,
+    LyricsBlurAmount,
     FadeLyrics,
     EdgeFeatherLyrics,
     DistanceScaleLyrics,
@@ -183,6 +184,8 @@ struct Group {
     icon: Option<&'static str>,
     cards: Option<Slot>,
     rows: Vec<Slot>,
+    /// Rows shown inside the group's dropdown rather than on the page itself.
+    folded: Vec<Slot>,
 }
 
 impl Group {
@@ -193,6 +196,7 @@ impl Group {
             icon: Some(icon),
             cards: None,
             rows: Vec::new(),
+            folded: Vec::new(),
         }
     }
 
@@ -203,6 +207,7 @@ impl Group {
             icon: None,
             cards: None,
             rows: Vec::new(),
+            folded: Vec::new(),
         }
     }
 
@@ -217,9 +222,18 @@ impl Group {
         self
     }
 
+    /// Rows kept behind the group's dropdown, out of the page's own flow.
+    fn folded(mut self, rows: impl IntoIterator<Item = Slot>) -> Self {
+        self.folded.extend(rows);
+        self
+    }
+
     /// Every setting the group shows, cards first.
     fn slots(&self) -> impl Iterator<Item = Slot> + '_ {
-        self.cards.into_iter().chain(self.rows.iter().copied())
+        self.cards
+            .into_iter()
+            .chain(self.rows.iter().copied())
+            .chain(self.folded.iter().copied())
     }
 }
 
@@ -241,6 +255,8 @@ pub struct SettingsView {
     /// What the tab scrolls into view once it is laid out: the setting a search result opened,
     /// or the section a route named.
     reveal: Option<Reveal>,
+    /// Whether the lyrics page's effect dropdown is open.
+    lyric_effects_open: bool,
     /// Where a lyrics source dragged over the priority list would land, as a gap between the
     /// enabled sources. `None` while the drop would leave the order as it is.
     lyrics_drop_gap: Option<usize>,
@@ -441,6 +457,7 @@ impl SettingsView {
             search,
             query: String::new(),
             reveal: None,
+            lyric_effects_open: false,
             lyrics_drop_gap: None,
             scrollbar: cx.new(|_| Scrollbar::new(ScrollHandle::new()).watching(me)),
             layout_revision: 0,
@@ -803,6 +820,10 @@ impl SettingsView {
                 t!("settings-blur-lyrics"),
                 t!("settings-blur-lyrics-detail"),
             ),
+            Slot::LyricsBlurAmount => (
+                t!("settings-lyrics-blur-amount"),
+                t!("settings-lyrics-blur-amount-detail"),
+            ),
             Slot::FadeLyrics => (
                 t!("settings-fade-lyrics"),
                 t!("settings-fade-lyrics-detail"),
@@ -1010,6 +1031,7 @@ impl SettingsView {
             Slot::PanelLyricsSize => self.panel_lyrics_size_row(cx),
             Slot::FullscreenLyricsSize => self.fullscreen_lyrics_size_row(cx),
             Slot::BlurLyrics => self.blur_lyrics_row(cx),
+            Slot::LyricsBlurAmount => self.lyrics_blur_amount_row(cx),
             Slot::FadeLyrics => self.fade_lyrics_row(cx),
             Slot::EdgeFeatherLyrics => self.edge_feather_lyrics_row(cx),
             Slot::DistanceScaleLyrics => self.distance_scale_lyrics_row(cx),
@@ -1105,6 +1127,7 @@ impl SettingsView {
             icon,
             cards,
             rows,
+            folded,
         } = group;
         let heading = title.map(|key| {
             let label = i18n::lookup(key, None);
@@ -1119,13 +1142,44 @@ impl SettingsView {
             let cards = self.cards(slot, window, cx);
             self.revealing(Reveal::Slot(slot), cards, cx)
         });
-        let rows = rows
+        let mut rows = rows
             .into_iter()
             .map(|slot| {
                 let row = self.slot_element(slot, window, cx);
                 self.revealing(Reveal::Slot(slot), row, cx)
             })
             .collect::<Vec<_>>();
+        if !folded.is_empty() {
+            let revealed = folded
+                .iter()
+                .copied()
+                .find(|slot| self.reveal == Some(Reveal::Slot(*slot)));
+            let open = self.lyric_effects_open || revealed.is_some();
+            let label = match open {
+                true => t!("settings-lyrics-effects-close"),
+                false => t!("settings-lyrics-effects-open"),
+            };
+            let control = ui::Button::new("lyrics-effects-toggle")
+                .small()
+                .outline()
+                .label(label.clone())
+                .icon(match open {
+                    true => "icons/chevron-down.svg",
+                    false => "icons/chevron-right.svg",
+                })
+                .name(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.lyric_effects_open = !open;
+                    cx.notify();
+                }));
+            rows.push(self.row(t!("settings-lyrics-effects"), control.into_any_element()));
+            if open {
+                for slot in folded {
+                    let row = self.slot_element(slot, window, cx);
+                    rows.push(self.revealing(Reveal::Slot(slot), row, cx));
+                }
+            }
+        }
         let rows = (!rows.is_empty()).then(|| {
             div()
                 .flex()
@@ -1215,10 +1269,13 @@ impl SettingsView {
                     .enumerate()
                     .map(|(index, group)| {
                         // A search target must lay out even off screen so its reveal marker
-                        // can position the scroll. The other groups keep their cached heights.
-                        if self.reveal.is_some_and(|reveal| {
-                            group.slots().any(|slot| reveal == Reveal::Slot(slot))
-                        }) {
+                        // can position the scroll. A folded group also follows its own open
+                        // state, so it is rebuilt rather than kept at a cached height.
+                        if !group.folded.is_empty()
+                            || self.reveal.is_some_and(|reveal| {
+                                group.slots().any(|slot| reveal == Reveal::Slot(slot))
+                            })
+                        {
                             return self.group(group, window, cx);
                         }
                         self.lazy((page.id(), index + 3), cx, move |this, window, cx| {
