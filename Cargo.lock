@@ -8214,11 +8214,13 @@ dependencies = [
  "log",
  "music",
  "open",
+ "raw-window-handle",
  "router",
  "serde_json",
  "state",
  "ui",
  "unicode-bidi",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

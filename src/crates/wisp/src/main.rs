@@ -311,6 +311,11 @@ fn destination(linked: &Linked) -> Option<Destination> {
 }
 
 fn show_window(cx: &mut App) {
+    // [wisp] mini 模式开着时，呼出主窗口即退出 mini，先把 mini 关掉。
+    if views::dismiss_mini(cx) {
+        cx.activate(true);
+        return;
+    }
     // [wisp] 只对主窗口操作：托盘菜单窗口打开时 windows().first() 会拿到它。
     let Some(main) = cx.try_global::<MainWindow>() else {
         dock::show(true);
@@ -337,6 +342,11 @@ enum WindowAction {
 
 /// Shows the window when it is hidden, minimized or closed, and hides it when it is visible.
 fn toggle_window(cx: &mut App) {
+    // [wisp] mini 模式激活时（包括 mini 被暂时隐藏），托盘左击唤回 mini，而不是主窗口。
+    if views::reveal_mini(cx) {
+        cx.activate(true);
+        return;
+    }
     // and_then 的闭包会持有 cx 的借用，与里面 update 的可变借用冲突；
     // 改成 match，把 handle clone 出来后借用即结束。
     let visible = match cx.try_global::<MainWindow>() {

@@ -222,6 +222,18 @@ impl PlayerBar {
         }
     }
 
+    fn mini_button(&self) -> AnyElement {
+        Button::new("player-mini")
+            .ghost()
+            .small()
+            .icon("icons/picture-in-picture.svg")
+            .tooltip_above("player-mini")
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                crate::shells::mini::enter(window, cx)
+            })
+            .into_any_element()
+    }
+
     fn now_playing(
         &self,
         room: bool,
@@ -505,9 +517,10 @@ impl Render for PlayerBar {
         };
         // [wisp] 共享收听按钮的位置改放变速控件，始终可用。
         let picker = true;
-        // [wisp] 播放模式键排在音量左侧，也算一颗音量前的图标按钮。
+        // [wisp] 播放模式键排在音量左侧，也算一颗音量前的图标按钮；mini 键同理。
         let tools = 1
             + usize::from(picker)
+            + 1
             + match sides.is_some() {
                 true => usize::from(lyrics) + usize::from(!fm),
                 false => 0,
@@ -581,6 +594,7 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
+                        .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
             (false, PlayerBarLayout::Centered) => base
@@ -622,6 +636,7 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
+                        .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
             (false, PlayerBarLayout::Compact) => base
@@ -636,6 +651,7 @@ impl Render for PlayerBar {
                 .child(buttons)
                 .child(play_mode(&self.playback, false, cx))
                 .child(self.sound(cx))
+                .child(self.mini_button())
                 .child(self.fullscreen_button(cx)),
             // The two sides share what the middle leaves them evenly, so the transport and the
             // seek bar stay centred. `classic` works out how wide the middle is and how the
@@ -667,6 +683,7 @@ impl Render for PlayerBar {
                             .child(buttons)
                             .child(play_mode(&self.playback, false, cx))
                             .child(self.sound(cx))
+                            .child(self.mini_button())
                             .child(self.fullscreen_button(cx)),
                     )
             }

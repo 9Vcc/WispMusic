@@ -31,6 +31,9 @@ player-next = 下一首
 player-climax = 跳到高潮开头
 player-fullscreen = 全屏
 player-fullscreen-leave = 退出全屏
+player-mini = 迷你模式
+mini-restore = 回到主窗口
+mini-close = 隐藏迷你播放器
 lyric-collapse = 收起
 fullscreen-artwork = 封面
 
