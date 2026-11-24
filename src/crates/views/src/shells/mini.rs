@@ -7,12 +7,13 @@
 //! asks for a blurred desktop when blurring is on. The list expands to the live queue.
 
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, IntoElement, MouseButton,
-    MouseUpEvent, Pixels, Point, Render, ScrollStrategy, SharedString, UniformListScrollHandle,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px,
+    MouseUpEvent, Pixels, Point, Render, ScrollStrategy, SharedString, Task,
+    UniformListScrollHandle, Window, WindowBounds, WindowKind, WindowOptions, div, point, px,
     relative, size, svg, uniform_list,
 };
 use i18n::t;
@@ -24,8 +25,8 @@ use crate::shared::transport::{next, play_mode, previous, toggle};
 const WIDTH: f32 = 360.;
 const BAR: f32 = 72.;
 const EXPANDED: f32 = 360.;
-/// The transparent margin between the window and its rounded card.
-const CARD_RADIUS: f32 = 14.;
+/// Matches the system corner radius DWM gives a rounded window.
+const CARD_RADIUS: f32 = 8.;
 /// The card's inner spacing, cover and type, all fixed with the window.
 const PAD: f32 = 12.;
 const GAP: f32 = 8.;
@@ -45,6 +46,8 @@ const TRACK_LEFT: f32 = PAD + COVER + GAP;
 const ROW: f32 = 32.;
 const ROW_PAD: f32 = 6.;
 const HEAD: f32 = 24.;
+/// How long the queue takes to grow out of, or fold back into, the bar.
+const REVEAL: Duration = Duration::from_millis(190);
 
 #[derive(Clone, Copy)]
 struct MiniSession {
@@ -83,15 +86,19 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
     );
     let playback = Wisp::global(cx).playback.clone();
     let settings = Wisp::global(cx).settings.clone();
+    let background = {
+        let look = settings.read(cx).look();
+        ui::backdrop(look.blur_window, look.transparent)
+    };
     let Ok(opened) = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin,
                 size: size(px(WIDTH), px(BAR)),
             })),
-            // The window stays transparent: a system acrylic layer fills the window's own
-            // rectangle (including its frame), leaving a square grey sheet around the card.
-            window_background: WindowBackgroundAppearance::Transparent,
+            // Same material as the main window: DWM rounds this surface, so the blur and its
+            // shadow follow the corners instead of showing a square sheet behind the card.
+            window_background: background,
             kind: WindowKind::PopUp,
             titlebar: None,
             is_resizable: false,
@@ -209,44 +216,6 @@ fn surface(window: &mut Window) {
     window.refresh();
 }
 
-#[cfg(target_os = "windows")]
-fn round_window(window: &Window, width: Pixels, height: Pixels, scale: f32) {
-    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
-    let Some(handle) = hwnd(window) else {
-        return;
-    };
-    let width = (width.as_f32() * scale).round() as i32;
-    let height = (height.as_f32() * scale).round() as i32;
-    let radius = (CARD_RADIUS * scale).round() as i32;
-    unsafe {
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
-        if !region.is_null() {
-            SetWindowRgn(handle, region, 1);
-        }
-    }
-}
-
-/// Turns off the window's own drop shadow. DWM draws it around the window's rectangle, so a
-/// rounded, translucent card would sit inside a square grey underlay.
-#[cfg(target_os = "windows")]
-fn hide_shadow(window: &Window) {
-    use windows_sys::Win32::Graphics::Dwm::{
-        DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
-    };
-    let Some(handle) = hwnd(window) else {
-        return;
-    };
-    let policy = DWMNCRP_DISABLED;
-    unsafe {
-        DwmSetWindowAttribute(
-            handle,
-            DWMWA_NCRENDERING_POLICY as u32,
-            &policy as *const _ as *const std::ffi::c_void,
-            std::mem::size_of_val(&policy) as u32,
-        );
-    }
-}
-
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
 fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
     let displays = cx.displays();
@@ -273,13 +242,21 @@ fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
 struct MiniPlayer {
     playback: Entity<Playback>,
     expanded: bool,
+    /// Whether the queue is mounted. It stays mounted while folding so the shrinking window
+    /// clips it instead of exposing a bare bar over the backdrop.
+    panel: bool,
+    /// The running height animation; replacing it drops the previous one.
+    reveal: Option<Task<()>>,
     /// The queue's scroll, kept between renders so it does not jump to the top.
     scroll: UniformListScrollHandle,
     seek: ScrubberState,
     volume: ScrubberState,
     pending_seek: Option<f32>,
+    /// What the window material and its corners were last told, so they only change with the
+    /// settings.
+    background: Option<(bool, bool)>,
     #[cfg(target_os = "windows")]
-    shape: Option<(f32, f32, f32)>,
+    rounding: Option<ui::Rounding>,
 }
 
 impl MiniPlayer {
@@ -293,32 +270,37 @@ impl MiniPlayer {
         cx.observe(&ticks, |_, _, cx| cx.notify()).detach();
         cx.observe(&playback, |_, _, cx| cx.notify()).detach();
         cx.observe(&queue, |_, _, cx| cx.notify()).detach();
-        // Theme changes arrive as a settings notification; the window itself has nothing to
-        // reconfigure, since it stays transparent.
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             playback,
             expanded: false,
+            panel: false,
+            reveal: None,
             scroll: UniformListScrollHandle::new(),
             seek: ScrubberState::new("mini-seek"),
             volume: ScrubberState::new("mini-volume"),
             pending_seek: None,
+            background: None,
             #[cfg(target_os = "windows")]
-            shape: None,
+            rounding: None,
         }
     }
 
-    /// Keeps the window's rounded shape in step with its size.
-    fn sync_window(&mut self, window: &mut Window) {
+    /// Keeps the window material and its corners in step with the appearance settings, the way
+    /// the main window does.
+    fn sync_window(&mut self, window: &mut Window, cx: &App) {
+        let theme = *cx.theme();
+        let key = (theme.blur_window, theme.transparent);
+        if self.background != Some(key) {
+            self.background = Some(key);
+            window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
+        }
         #[cfg(target_os = "windows")]
         {
-            let size = window.viewport_size();
-            let scale = window.scale_factor();
-            let key = (scale, size.width.as_f32(), size.height.as_f32());
-            if self.shape != Some(key) {
-                self.shape = Some(key);
-                round_window(window, size.width, size.height, scale);
-                hide_shadow(window);
+            let rounding = Wisp::global(cx).settings.read(cx).window_rounding();
+            if self.rounding != Some(rounding) {
+                self.rounding = Some(rounding);
+                state::apply_window_rounding(window, rounding, cx);
             }
         }
     }
@@ -328,29 +310,61 @@ impl MiniPlayer {
             return;
         }
         self.expanded = expanded;
-        #[cfg(target_os = "windows")]
-        {
-            self.shape = None;
-        }
         if expanded {
+            self.panel = true;
             let sections = self.playback.read(cx).shown_queue(cx).sections;
             if sections.current {
                 self.scroll
                     .scroll_to_item(sections.past, ScrollStrategy::Center);
             }
-        } else {
-            self.pending_seek = None;
         }
         // Height only: the window's top-left is chosen once on entry and never moves, so
-        // folding in and out cannot accumulate an offset.
-        window.resize(size(
-            px(WIDTH),
-            px(match expanded {
-                true => EXPANDED,
-                false => BAR,
-            }),
-        ));
-        window.refresh();
+        // folding in and out cannot accumulate an offset. The panel stays mounted while the
+        // window shrinks, so the clip reveals the queue instead of a bare acrylic strip.
+        let target = match expanded {
+            true => EXPANDED,
+            false => BAR,
+        };
+        self.animate_height(target, window, cx);
+    }
+
+    fn animate_height(&mut self, target: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        let start = window.viewport_size().height.as_f32();
+        let folding = target <= BAR + 0.5;
+        self.reveal = Some(cx.spawn(async move |this, cx| {
+            let began = Instant::now();
+            loop {
+                let t = (began.elapsed().as_secs_f32() / REVEAL.as_secs_f32()).clamp(0., 1.);
+                let height = start + (target - start) * ui::ease_out_cubic(t);
+                handle
+                    .update(cx, |_, window, _| {
+                        window.resize(size(px(WIDTH), px(height)));
+                    })
+                    .ok();
+                if t >= 1. {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+            }
+            if folding {
+                // The last resize is platform-async; let it land before the panel unmounts so
+                // the folded frame never paints the bar over the bare backdrop.
+                cx.background_executor()
+                    .timer(Duration::from_millis(24))
+                    .await;
+            }
+            this.update(cx, |this, cx| {
+                if !this.expanded && this.panel {
+                    this.panel = false;
+                    this.pending_seek = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -860,7 +874,7 @@ impl MiniPlayer {
 
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_window(window);
+        self.sync_window(window, cx);
         let theme = *cx.theme();
 
         div().size_full().child(
@@ -877,7 +891,7 @@ impl Render for MiniPlayer {
                 .text_color(theme.foreground)
                 .overflow_hidden()
                 .child(self.bar(cx))
-                .when(self.expanded, |this| this.child(self.panel(cx))),
+                .when(self.panel, |this| this.child(self.panel(cx))),
         )
     }
 }
