@@ -16,9 +16,9 @@ use i18n::t;
 use music::{Contributor, Shape, Track, Voice};
 use router::{Destination, LibraryTab, Link as _};
 use state::{
-    AppSettings, Lyrics, LyricsState, Network, Playback, PlaybackState, Queue, QueuePosition,
-    QueueSections as Sections, QueueSlot as Slot, QueueView, RomanizationScripts, Shelf, SideTab,
-    Wisp, Whence,
+    AppSettings, Lyrics, LyricsState, LyricStyle, Network, Playback, PlaybackState, Queue,
+    QueuePosition, QueueSections as Sections, QueueSlot as Slot, QueueView, RomanizationScripts,
+    Shelf, SideTab, Wisp, Whence,
 };
 use ui::{
     ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Glowing as _, Initials, Motion,
@@ -52,6 +52,7 @@ const AHEAD: f32 = 0.6;
 const REVEAL: f32 = 0.6;
 const ACTIVE_VERSE_GROWTH: Pixels = px(2.);
 const FULLSCREEN_VERSE_GROWTH: Pixels = px(3.);
+const FOCUS_VERSE_GROWTH: f32 = 1.32;
 /// Space between phrases, relative to the resting verse size.
 const VERSE_GAP: f32 = 0.6;
 /// Vertical room around each phrase, relative to its resting text size.
@@ -151,6 +152,7 @@ struct Sung {
 #[derive(Clone, Copy)]
 pub(crate) struct VerseLook {
     pub(crate) active: bool,
+    pub(crate) style: LyricStyle,
     /// The verse's text size and its romanized lane's.
     pub(crate) size: Pixels,
     pub(crate) lane: Pixels,
@@ -196,6 +198,7 @@ struct SheetLayout {
     rem: Pixels,
     scale: f32,
     font: u64,
+    style: LyricStyle,
 }
 
 #[derive(Clone)]
@@ -911,7 +914,8 @@ impl Aside {
             })
             // [wisp] 歌词偏移微调：按歌曲记住，正值让歌词提前。
             .when(self.tab == SideTab::Lyrics, |this| {
-                this.child(self.versions_button(cx))
+                this.child(self.style_button(cx))
+                    .child(self.versions_button(cx))
                     .child(self.offset_controls(cx))
             })
             .when(self.tab == SideTab::Queue, |this| {
@@ -972,6 +976,26 @@ impl Aside {
                         ),
                 )
             })
+    }
+
+    fn style_button(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = *cx.theme();
+        let style = self.settings.read(cx).lyric_style();
+        Button::new("lyrics-style")
+            .ghost()
+            .small()
+            .icon("icons/palette.svg")
+            .tooltip("lyrics-style-pick")
+            .tint(match style {
+                LyricStyle::Classic => theme.muted_foreground,
+                LyricStyle::Focus => theme.primary,
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                let next = this.settings.read(cx).lyric_style().next();
+                this.settings
+                    .update(cx, |settings, cx| settings.set_lyric_style(next, cx));
+            }))
+            .into_any_element()
     }
 
     /// [wisp] 歌词版本按钮：多个源都命中时出现，点开列出自动与各源（逐字会标注）。
@@ -1214,13 +1238,14 @@ impl Aside {
         let following = (self.verse_of.as_deref() != lyrics.following())
             .then(|| lyrics.following().map(str::to_owned));
         let take = lyrics.revision();
-        let (karaoke_lyrics, romanization_scripts) = {
+        let (karaoke_lyrics, romanization_scripts, lyric_style) = {
             let settings = self.settings.read(cx);
             (
                 settings.karaoke_lyrics(),
                 settings
                     .romanized_lyrics()
                     .then(|| settings.romanization_scripts()),
+                settings.lyric_style(),
             )
         };
         let karaoke_effects = karaoke_lyrics && effects();
@@ -1233,7 +1258,7 @@ impl Aside {
             false => self.settings.read(cx).fullscreen_lyrics_scale(),
         } * frame_scale;
         let (verse, lane_size) = verse_sizes(self.titled, scale, &theme);
-        let line_height = active_verse_size(verse) * ui::LEADING;
+        let line_height = active_verse_size(verse, lyric_style) * ui::LEADING;
         let phrase_gap = verse_gap(verse);
         let sung = Sung {
             karaoke: karaoke_effects,
@@ -1290,7 +1315,7 @@ impl Aside {
 
         let verse_pad = verse * VERSE_SIDE_PADDING;
         let sheet_padding = theme.metrics.pad * 0.75;
-        let wrap_size = active_verse_size(verse);
+        let wrap_size = active_verse_size(verse, lyric_style);
         let scroll = self.verse_bar.read(cx).scroll().clone();
         let (nudges, presentation) = {
             let bar = self.verse_bar.read(cx);
@@ -1331,6 +1356,7 @@ impl Aside {
             rem: window.rem_size(),
             scale: window.scale_factor(),
             font: font_key(self.settings.read(cx).font()),
+            style: lyric_style,
         };
         let measured = self.laid.replace(false) && self.sheet_layout == Some(layout);
         self.sheet_layout = Some(layout);
@@ -1525,7 +1551,7 @@ impl Aside {
                     let growing =
                         animations && active && self.arrived.elapsed() < Motion::Base.span();
                     let shrinking = dimming.is_some();
-                    let active_size = active_verse_size(verse);
+                    let active_size = active_verse_size(verse, lyric_style);
                     let small = verse / active_size;
                     let big = active_size / verse;
                     // both ways land on 1
@@ -1712,7 +1738,7 @@ impl Aside {
                         .text_size(verse)
                         .line_height(line_height)
                         .text_color(tint)
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(verse_weight(lyric_style, active || departing))
                         .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                             this.set_hovered(Warm::Verse(index), *over, cx)
                         }))
@@ -1777,7 +1803,7 @@ impl Aside {
                                 .flex_col()
                                 .gap_1()
                                 .text_size(plain_size)
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(verse_weight(lyric_style, true))
                                 .text_color(theme.foreground)
                                 .when(sung.mirrored, |this| this.text_right())
                                 .map(|this| match (&rows, romanized.is_some()) {
@@ -2448,7 +2474,7 @@ pub(crate) fn verse(
             &sung,
         ),
     };
-    let active_size = active_verse_size(look.size);
+    let active_size = active_verse_size(look.size, look.style);
     let haze = match effects() {
         true => look.haze,
         false => 0.,
@@ -2464,7 +2490,7 @@ pub(crate) fn verse(
         })
         .line_height(active_size * ui::LEADING)
         .text_color(tint)
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(verse_weight(look.style, look.active))
         .child(
             div()
                 .flex()
@@ -2948,8 +2974,18 @@ fn lyrics_frame_scale(viewport: Size<Pixels>) -> f32 {
         .clamp(1., LYRICS_FRAME_MOST)
 }
 
-fn active_verse_size(verse: Pixels) -> Pixels {
-    verse + ACTIVE_VERSE_GROWTH
+fn active_verse_size(verse: Pixels, style: LyricStyle) -> Pixels {
+    match style {
+        LyricStyle::Classic => verse + ACTIVE_VERSE_GROWTH,
+        LyricStyle::Focus => (verse * FOCUS_VERSE_GROWTH).round(),
+    }
+}
+
+fn verse_weight(style: LyricStyle, active: bool) -> FontWeight {
+    match (style, active) {
+        (LyricStyle::Focus, false) => FontWeight::NORMAL,
+        _ => FontWeight::SEMIBOLD,
+    }
 }
 
 fn lyrics_parts(line: &str, words: Option<&[music::LyricsWord]>) -> Vec<(String, usize)> {
@@ -3551,10 +3587,10 @@ mod tests {
     use ui::Springs;
 
     use super::{
-        QueuePosition, Sections, Slot, active_lyrics_row, anchored_lyrics_offset,
+        QueuePosition, Sections, Slot, active_lyrics_row, active_verse_size, anchored_lyrics_offset,
         background_line_singing, karaoke_fragments, karaoke_window, lag_spring, line_has_passed,
         line_row, lyric_row_count, plain_lyrics_fragments, primary_karaoke_fade,
-        primary_karaoke_visible, secondary_karaoke_visible, wrap_fragment_widths,
+        primary_karaoke_visible, secondary_karaoke_visible, verse_weight, wrap_fragment_widths,
     };
     use gpui::px;
     use ui::Motion;
@@ -3716,6 +3752,27 @@ mod tests {
         assert_eq!(lyric_row_count(&lines), 3);
         assert_eq!(active_lyrics_row(&lines, Duration::from_secs(8)), Some(1));
         assert!(line_has_passed(&lines[0], Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn focus_style_grows_the_active_line_and_softens_the_others() {
+        let verse = px(20.);
+        assert!(
+            active_verse_size(verse, state::LyricStyle::Focus)
+                > active_verse_size(verse, state::LyricStyle::Classic)
+        );
+        assert_eq!(
+            verse_weight(state::LyricStyle::Focus, false),
+            gpui::FontWeight::NORMAL
+        );
+        assert_eq!(
+            verse_weight(state::LyricStyle::Focus, true),
+            gpui::FontWeight::SEMIBOLD
+        );
+        assert_eq!(
+            verse_weight(state::LyricStyle::Classic, false),
+            gpui::FontWeight::SEMIBOLD
+        );
     }
 
     #[test]

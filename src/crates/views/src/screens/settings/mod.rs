@@ -90,6 +90,7 @@ enum Slot {
     FullscreenControlsAutohide,
     OsFullscreen,
     Lyrics,
+    LyricStyle,
     LyricOffsetDefault,
     Karaoke,
     BlurLyrics,
@@ -792,6 +793,10 @@ impl SettingsView {
                 t!("settings-fullscreen-lyrics-size"),
                 t!("settings-fullscreen-lyrics-size-detail"),
             ),
+            Slot::LyricStyle => (
+                t!("settings-lyrics-style"),
+                t!("settings-lyrics-style-detail"),
+            ),
             Slot::BlurLyrics => (
                 t!("settings-blur-lyrics"),
                 t!("settings-blur-lyrics-detail"),
@@ -974,6 +979,7 @@ impl SettingsView {
             Slot::OsFullscreen => self.os_fullscreen_row(cx),
             Slot::PanelLyricsSize => self.panel_lyrics_size_row(cx),
             Slot::FullscreenLyricsSize => self.fullscreen_lyrics_size_row(cx),
+            Slot::LyricStyle => self.lyric_style_row(cx),
             Slot::BlurLyrics => self.blur_lyrics_row(cx),
             Slot::Font => self.font_row(cx),
             Slot::Typeface => self.typeface_row(cx),

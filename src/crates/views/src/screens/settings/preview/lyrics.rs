@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Pixels, Window, div};
 use music::{LyricsLine, LyricsWord, RomanizedText, WritingSystem};
-use state::RomanizationScripts;
+use state::{LyricStyle, RomanizationScripts};
 use ui::{ActiveTheme as _, Theme};
 
 use crate::chrome::{VerseLook, verse, verse_gap, verse_sizes};
@@ -47,6 +47,7 @@ pub(in crate::screens::settings) struct LyricsPreview;
 struct Look {
     karaoke: bool,
     blur: bool,
+    style: LyricStyle,
     scripts: Option<RomanizationScripts>,
 }
 
@@ -79,6 +80,7 @@ pub(in crate::screens::settings) fn preview(
     let look = Look {
         karaoke: settings.karaoke_lyrics(),
         blur: settings.blur_lyrics(),
+        style: settings.lyric_style(),
         scripts: settings
             .romanized_lyrics()
             .then(|| settings.romanization_scripts()),
@@ -116,6 +118,7 @@ fn lines(look: Look, sizes: (Pixels, Pixels), height: Pixels, theme: &Theme) -> 
             &lines[index],
             VerseLook {
                 active: sung,
+                style: look.style,
                 size,
                 lane,
                 karaoke: look.karaoke,

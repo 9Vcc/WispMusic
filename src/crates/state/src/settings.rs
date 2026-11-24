@@ -81,6 +81,44 @@ impl FullscreenControlsAutohide {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LyricStyle {
+    #[default]
+    Classic,
+    Focus,
+}
+
+impl LyricStyle {
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Focus];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Focus => "focus",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "focus" => Self::Focus,
+            _ => Self::Classic,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Classic => "lyrics-style-classic",
+            Self::Focus => "lyrics-style-focus",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|style| *style == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
 /// Which panel the right sidebar shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -386,6 +424,7 @@ struct Values {
     lyrics_prefer_word_synced: bool,
     karaoke_lyrics: bool,
     blur_lyrics: bool,
+    lyric_style: LyricStyle,
     romanized_lyrics: bool,
     panel_lyrics_scale: f32,
     fullscreen_lyrics_scale: f32,
@@ -646,6 +685,7 @@ impl Default for Values {
             lyrics_prefer_word_synced: true,
             karaoke_lyrics: true,
             blur_lyrics: true,
+            lyric_style: LyricStyle::Classic,
             romanized_lyrics: true,
             panel_lyrics_scale: DEFAULT_LYRICS_SCALE,
             fullscreen_lyrics_scale: DEFAULT_LYRICS_SCALE,
@@ -1256,6 +1296,10 @@ impl AppSettings {
         self.values.blur_lyrics
     }
 
+    pub fn lyric_style(&self) -> LyricStyle {
+        self.values.lyric_style
+    }
+
     pub fn romanized_lyrics(&self) -> bool {
         self.values.romanized_lyrics
     }
@@ -1857,6 +1901,11 @@ impl AppSettings {
 
     pub fn set_blur_lyrics(&mut self, blur: bool, cx: &mut Context<Self>) {
         self.values.blur_lyrics = blur;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_lyric_style(&mut self, style: LyricStyle, cx: &mut Context<Self>) {
+        self.values.lyric_style = style;
         self.schedule_save(cx);
     }
 
@@ -3347,6 +3396,18 @@ mod tests {
     fn a_saved_members_tab_reads_as_the_queue() {
         let tab: SideTab = serde_json::from_str("\"members\"").unwrap();
         assert_eq!(tab, SideTab::Queue);
+    }
+
+    #[test]
+    fn lyric_style_defaults_to_classic_and_round_trips_as_an_id() {
+        assert_eq!(Values::default().lyric_style, LyricStyle::Classic);
+        let style: LyricStyle = serde_json::from_str("\"focus\"").unwrap();
+        assert_eq!(style, LyricStyle::Focus);
+        assert_eq!(serde_json::to_string(&style).unwrap(), "\"focus\"");
+        assert_eq!(LyricStyle::from_id("focus"), LyricStyle::Focus);
+        assert_eq!(LyricStyle::from_id("unknown"), LyricStyle::Classic);
+        assert_eq!(LyricStyle::Classic.next(), LyricStyle::Focus);
+        assert_eq!(LyricStyle::Focus.next(), LyricStyle::Classic);
     }
 
     #[test]
