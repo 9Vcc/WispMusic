@@ -173,6 +173,28 @@ fn slot_top(slot: i32) -> f32 {
     }
 }
 
+pub(crate) struct RadioHeader {
+    view: Entity<RadioView>,
+}
+
+impl RadioHeader {
+    pub(crate) fn new(view: Entity<RadioView>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        Self { view }
+    }
+}
+
+impl Render for RadioHeader {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = Chrome::page(window, cx);
+        self.view.update(cx, |view, cx| {
+            let scrolled = view.scrollbar.read(cx).offset().max(px(0.));
+            let progress = (scrolled.as_f32() / HEADER_SCROLL).clamp(0., 1.);
+            view.sliver_header(progress, page, cx)
+        })
+    }
+}
+
 /// 私人漫游：页面跟着播放走——中央是正在播的（没在播时是预览的第一首），
 /// 右侧是候选或队列里的下一批。
 pub(crate) struct RadioView {
@@ -935,10 +957,8 @@ impl RadioView {
             HEADER_H + HEADER_TOP - (HEADER_H + HEADER_TOP - HEADER_COLLAPSED) * progress;
         let header = self.header(progress, cx);
         div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .top_0()
+            .relative()
+            .w_full()
             .h(px(height))
             .overflow_hidden()
             .bg(theme.card(frosted))
@@ -1473,9 +1493,6 @@ impl Render for RadioView {
         let hero = self.hero(window, cx);
         let current = self.current(cx);
         let panel = self.now_panel(current, cx);
-        let scrolled = self.scrollbar.read(cx).offset().max(px(0.));
-        let progress = (scrolled.as_f32() / HEADER_SCROLL).clamp(0., 1.);
-        let header = self.sliver_header(progress, page, cx);
         div()
             .relative()
             .size_full()
@@ -1493,7 +1510,6 @@ impl Render for RadioView {
                         ),
                     ),
             )
-            .child(header)
             .into_any_element()
     }
 }

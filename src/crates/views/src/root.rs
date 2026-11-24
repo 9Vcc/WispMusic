@@ -23,8 +23,8 @@ use crate::chrome::{
     Busy, PlayerBar, ThemeInvite, TitleBar,
     TitleBarEvent, TitleBarOptions, ToastStack, Toolbar, Tooled,
 };
+use crate::screens::picks::{DailyEmpty, RadioHeader, RadioView};
 use crate::screens::search::SearchView;
-use crate::screens::picks::{DailyEmpty, RadioView};
 use crate::screens::settings::SettingsHeader;
 use crate::shared::ambient::{self, Ambient};
 use crate::shared::confirm::Confirm;
@@ -35,7 +35,7 @@ use crate::shared::tag_editor::TagEditor;
 use crate::shared::tracks::{LIBRARY_COLUMNS, album_columns};
 use crate::shared::transport::{CoverAway, CoverFade, ShellSwap};
 use crate::shells::Shell;
-use crate::shells::workspace::Workspace;
+use crate::shells::workspace::{Workspace, WorkspaceHeader};
 use crate::{
     Adaptive, ArtistView, DetailView, EqualizerView, FullscreenView, GenreView, HistoryView,
     HomeView, LibraryView, LoginView, SettingsView, SongView, UserView,
@@ -53,6 +53,7 @@ const TOAST_LAYER: usize = 1;
 struct Screens {
     home: Entity<HomeView>,
     radio: Option<Entity<RadioView>>,
+    radio_header: Option<Entity<RadioHeader>>,
     /// [wisp] 每日推荐还没有曲子时的空态页。
     daily_empty: Option<Entity<DailyEmpty>>,
     history: Entity<HistoryView>,
@@ -404,8 +405,8 @@ impl Root {
             parted: None,
             screens: Screens {
                 home,
-                
                 radio: None,
+                radio_header: None,
                 daily_empty: None,
                 history,
                 library: library_view,
@@ -1101,9 +1102,15 @@ impl Root {
                     let playback = self.playback.clone();
                     let queue = Wisp::global(cx).queue.clone();
                     let view = cx.new(|cx| RadioView::new(session, playback, queue, io, cx));
-                    self.screens.radio = Some(view.clone());
+                    let header = cx.new(|cx| RadioHeader::new(view.clone(), cx));
+                    self.screens.radio = Some(view);
+                    self.screens.radio_header = Some(header);
                 }
-                self.screens.radio.clone().unwrap().into()
+                let view = self.screens.radio.clone().unwrap();
+                header = Some(WorkspaceHeader::Page(
+                    self.screens.radio_header.clone().unwrap().into(),
+                ));
+                view.into()
             }
             Destination::Home => self.screens.home.clone().into(),
             Destination::HomeSection(title) => {
@@ -1179,11 +1186,15 @@ impl Root {
                 self.screens.search.clone().into()
             }
             Destination::Equalizer => {
-                header = Some(self.screens.settings_header.clone().into());
+                header = Some(WorkspaceHeader::Settings(
+                    self.screens.settings_header.clone().into(),
+                ));
                 self.screens.equalizer.clone().into()
             }
             Destination::Settings(_) => {
-                header = Some(self.screens.settings_header.clone().into());
+                header = Some(WorkspaceHeader::Settings(
+                    self.screens.settings_header.clone().into(),
+                ));
                 self.screens.settings.clone().into()
             }
         };

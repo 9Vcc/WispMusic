@@ -17,6 +17,11 @@ use crate::chrome::{
 use crate::shared::menus::CardMenu;
 use crate::shells::Shell;
 
+pub(crate) enum WorkspaceHeader {
+    Page(AnyView),
+    Settings(AnyView),
+}
+
 pub(crate) struct Workspace {
     sidebar: Entity<SidebarLeft>,
     player_bar: Entity<PlayerBar>,
@@ -28,7 +33,7 @@ pub(crate) struct Workspace {
     content: AnyView,
     /// A screen's own header, floated over the top of the page and outside its transition.
     /// The page pads itself to start beneath it.
-    header: Option<AnyView>,
+    header: Option<WorkspaceHeader>,
     /// Whether the page is laid out cached. A page that redraws part of itself every frame is
     /// not, since a cached view that redraws builds every view in it again, and it caches its
     /// own parts instead.
@@ -88,7 +93,7 @@ impl Workspace {
     pub fn set_content(
         &mut self,
         content: AnyView,
-        header: Option<AnyView>,
+        header: Option<WorkspaceHeader>,
         cached: bool,
         cx: &mut Context<Self>,
     ) {
@@ -177,14 +182,19 @@ impl Render for Workspace {
                 .cached(StyleRefinement::default().w(sidebar_width).h_full())
                 .into_any_element(),
         };
-        // The header is cached at the height it last measured, so a page that redraws every
-        // frame leaves it be. Until it has measured itself it is laid out as it is.
-        let top = crate::screens::settings::Layout::of(window, cx);
-        let header = self.header.clone().map(|header| match top.measured {
-            true => header
-                .cached(StyleRefinement::default().w_full().h(top.top))
-                .into_any_element(),
-            false => header.into_any_element(),
+        // Settings headers cache at their measured height; page headers keep their own size.
+        let header = self.header.as_ref().map(|header| match header {
+            WorkspaceHeader::Settings(header) => {
+                let top = crate::screens::settings::Layout::of(window, cx);
+                match top.measured {
+                    true => header
+                        .clone()
+                        .cached(StyleRefinement::default().w_full().h(top.top))
+                        .into_any_element(),
+                    false => header.clone().into_any_element(),
+                }
+            }
+            WorkspaceHeader::Page(header) => header.clone().into_any_element(),
         });
         let hidden = self.hidden(window, cx);
         // The scrim is what fades the outgoing page: it is the page's own colour at
