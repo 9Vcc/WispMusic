@@ -231,6 +231,27 @@ fn round_window(window: &Window, width: Pixels, height: Pixels, scale: f32) {
     }
 }
 
+/// Turns off the window's own drop shadow. DWM draws it around the window's rectangle, so a
+/// rounded, translucent card would sit inside a square grey underlay.
+#[cfg(target_os = "windows")]
+fn hide_shadow(window: &Window) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
+    };
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let policy = DWMNCRP_DISABLED;
+    unsafe {
+        DwmSetWindowAttribute(
+            handle,
+            DWMWA_NCRENDERING_POLICY as u32,
+            &policy as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&policy) as u32,
+        );
+    }
+}
+
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
 fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
     let displays = cx.displays();
@@ -316,6 +337,7 @@ impl MiniPlayer {
             if self.shape != Some(key) {
                 self.shape = Some(key);
                 round_window(window, size.width, size.height, scale);
+                hide_shadow(window);
             }
         }
     }
