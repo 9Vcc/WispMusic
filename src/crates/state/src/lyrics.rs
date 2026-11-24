@@ -852,6 +852,7 @@ mod tests {
                         start: Duration::ZERO,
                         end: Duration::from_secs(1),
                         text: "line".to_owned(),
+                        real_timed: true,
                     }]),
                     ..Default::default()
                 }]

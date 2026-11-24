@@ -418,15 +418,13 @@ struct Values {
     /// deliberately new, so an old `false` does not hide the new default.
     lyrics_prefer_word_synced: bool,
     karaoke_lyrics: bool,
-    word_glow_lyrics: bool,
-    word_float_lyrics: bool,
-    word_scale_lyrics: bool,
     blur_lyrics: bool,
     fade_lyrics: bool,
     edge_feather_lyrics: bool,
     distance_scale_lyrics: bool,
     breathing_lyrics: bool,
     gap_dots_lyrics: bool,
+    parallax_lyrics: bool,
     lyrics_motion_preset: LyricMotionPreset,
     romanized_lyrics: bool,
     panel_lyrics_scale: f32,
@@ -687,15 +685,13 @@ impl Default for Values {
                 .collect(),
             lyrics_prefer_word_synced: true,
             karaoke_lyrics: true,
-            word_glow_lyrics: false,
-            word_float_lyrics: false,
-            word_scale_lyrics: false,
             blur_lyrics: true,
             fade_lyrics: true,
             edge_feather_lyrics: true,
             distance_scale_lyrics: false,
             breathing_lyrics: false,
             gap_dots_lyrics: false,
+            parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
             romanized_lyrics: true,
             panel_lyrics_scale: DEFAULT_LYRICS_SCALE,
@@ -1303,18 +1299,6 @@ impl AppSettings {
         self.values.karaoke_lyrics
     }
 
-    pub fn word_glow_lyrics(&self) -> bool {
-        self.values.word_glow_lyrics
-    }
-
-    pub fn word_float_lyrics(&self) -> bool {
-        self.values.word_float_lyrics
-    }
-
-    pub fn word_scale_lyrics(&self) -> bool {
-        self.values.word_scale_lyrics
-    }
-
     pub fn blur_lyrics(&self) -> bool {
         self.values.blur_lyrics
     }
@@ -1337,6 +1321,10 @@ impl AppSettings {
 
     pub fn gap_dots_lyrics(&self) -> bool {
         self.values.gap_dots_lyrics
+    }
+
+    pub fn parallax_lyrics(&self) -> bool {
+        self.values.parallax_lyrics
     }
 
     pub fn lyrics_motion_preset(&self) -> LyricMotionPreset {
@@ -1942,21 +1930,6 @@ impl AppSettings {
         self.schedule_save(cx);
     }
 
-    pub fn set_word_glow_lyrics(&mut self, glow: bool, cx: &mut Context<Self>) {
-        self.values.word_glow_lyrics = glow;
-        self.schedule_save(cx);
-    }
-
-    pub fn set_word_float_lyrics(&mut self, float: bool, cx: &mut Context<Self>) {
-        self.values.word_float_lyrics = float;
-        self.schedule_save(cx);
-    }
-
-    pub fn set_word_scale_lyrics(&mut self, scale: bool, cx: &mut Context<Self>) {
-        self.values.word_scale_lyrics = scale;
-        self.schedule_save(cx);
-    }
-
     pub fn set_blur_lyrics(&mut self, blur: bool, cx: &mut Context<Self>) {
         self.values.blur_lyrics = blur;
         self.schedule_save(cx);
@@ -1984,6 +1957,11 @@ impl AppSettings {
 
     pub fn set_gap_dots_lyrics(&mut self, dots: bool, cx: &mut Context<Self>) {
         self.values.gap_dots_lyrics = dots;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_parallax_lyrics(&mut self, parallax: bool, cx: &mut Context<Self>) {
+        self.values.parallax_lyrics = parallax;
         self.schedule_save(cx);
     }
 
@@ -3493,9 +3471,7 @@ mod tests {
         assert!(!values.distance_scale_lyrics);
         assert!(!values.breathing_lyrics);
         assert!(!values.gap_dots_lyrics);
-        assert!(!values.word_glow_lyrics);
-        assert!(!values.word_float_lyrics);
-        assert!(!values.word_scale_lyrics);
+        assert!(!values.parallax_lyrics);
         assert_eq!(values.lyrics_motion_preset, LyricMotionPreset::Wisp);
 
         let preset: LyricMotionPreset = serde_json::from_str("\"apple-music\"").unwrap();

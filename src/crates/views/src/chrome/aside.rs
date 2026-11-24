@@ -7,9 +7,9 @@ use gpui::prelude::*;
 
 use gpui::accesskit::{Role, Toggled};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Bounds, Context, Div, DragMoveEvent, Entity,
-    ExternalPaths, FontWeight, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
-    ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task, TextShadow,
+    Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity,
+    ExternalPaths, FontWeight, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, Render, ScrollHandle, ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task,
     UniformListScrollHandle, Window, canvas, div, ease_in_out, px, relative, size, svg,
     uniform_list,
 };
@@ -34,7 +34,7 @@ use crate::chrome::{Chrome, section_label};
 use crate::shared::menus::ItemMenu;
 use crate::shared::pins::Pinned as _;
 use crate::shared::{effects, quiet};
-use super::lyrics_effects::{WordFx, WordMotion, word_motion};
+use super::lyrics_effects::parallax_offset;
 
 const QUEUE: &str = "queue";
 /// How many text heights across the picture of whoever queued a song is.
@@ -44,7 +44,7 @@ const FADE: f32 = 96.;
 const REST: f32 = FADE * 0.75;
 /// Blank rows after the last queued song, on top of the ones that clear the player bar.
 const TAIL_ROWS: usize = 1;
-const BLUR: f32 = 0.13;
+const BLUR: f32 = 0.09;
 const BACKGROUND_SINGING_BLUR: Pixels = px(0.75);
 const VEIL: f32 = 0.3;
 const DISTANCE_SCALE_AMOUNT: f32 = 0.2;
@@ -55,8 +55,8 @@ const BREATH_IN_SECS: f32 = 0.35;
 const BREATH_OUT_SECS: f32 = 0.5;
 const HAZE: f32 = 0.45;
 const VERSE_FADE: f32 = 1.25;
-const PAST: f32 = 0.4;
-const AHEAD: f32 = 0.6;
+const PAST: f32 = 0.55;
+const AHEAD: f32 = 0.8;
 const REVEAL: f32 = 0.6;
 const ACTIVE_VERSE_GROWTH: Pixels = px(2.);
 const FULLSCREEN_VERSE_GROWTH: Pixels = px(3.);
@@ -76,7 +76,7 @@ const LYRICS_FRAME: Size<Pixels> = size(px(1152.), px(648.));
 // the most a large window grows fullscreen lyrics by
 const LYRICS_FRAME_MOST: f32 = 2.;
 const PINNED_SHARE: f32 = 0.25;
-const PIN: f32 = 0.3;
+const PIN: f32 = 0.5;
 // how far a row falls behind, in verse sizes
 const LAG: f32 = 24.;
 // never past this share
@@ -150,7 +150,6 @@ struct Sung {
     karaoke_tint: gpui::Hsla,
     lift: f32,
     from: gpui::Point<f32>,
-    word_fx: WordFx,
     /// Whether the lyrics mostly read right to left, which puts the lead voice on the right.
     mirrored: bool,
 }
@@ -227,6 +226,11 @@ pub(crate) struct Aside {
     spectrum_listener: Option<Listening>,
     breath_energy: f32,
     breath_since: std::time::Instant,
+    pointer: Point<Pixels>,
+    parallax_inside: bool,
+    parallax_x: SpringState,
+    parallax_y: SpringState,
+    parallax_since: std::time::Instant,
     verse_bar: Entity<Scrollbar>,
     followed: Option<usize>,
     nudges: u64,
@@ -366,6 +370,11 @@ impl Aside {
             spectrum_listener: None,
             breath_energy: 0.,
             breath_since: std::time::Instant::now(),
+            pointer: Point::default(),
+            parallax_inside: false,
+            parallax_x: SpringState::default(),
+            parallax_y: SpringState::default(),
+            parallax_since: std::time::Instant::now(),
             verse_bar,
             followed: None,
             nudges: 0,
@@ -1224,7 +1233,10 @@ impl Aside {
             .map(|spectrum| bass_energy(&spectrum))
             .unwrap_or(0.);
         let now = std::time::Instant::now();
-        let elapsed = now.duration_since(self.breath_since).as_secs_f32();
+        let elapsed = now
+            .duration_since(self.breath_since)
+            .as_secs_f32()
+            .min(0.064);
         self.breath_since = now;
         let target = match singing {
             true => bass,
@@ -1272,9 +1284,6 @@ impl Aside {
         let take = lyrics.revision();
         let (
             karaoke_lyrics,
-            word_glow_lyrics,
-            word_float_lyrics,
-            word_scale_lyrics,
             romanization_scripts,
             blur_lyrics,
             fade_lyrics,
@@ -1282,13 +1291,11 @@ impl Aside {
             distance_scale_lyrics,
             breathing_lyrics,
             gap_dots_lyrics,
+            parallax_lyrics,
         ) = {
             let settings = self.settings.read(cx);
             (
                 settings.karaoke_lyrics(),
-                settings.word_glow_lyrics(),
-                settings.word_float_lyrics(),
-                settings.word_scale_lyrics(),
                 settings
                     .romanized_lyrics()
                     .then(|| settings.romanization_scripts()),
@@ -1298,14 +1305,10 @@ impl Aside {
                 settings.distance_scale_lyrics(),
                 settings.breathing_lyrics(),
                 settings.gap_dots_lyrics(),
+                settings.parallax_lyrics(),
             )
         };
         let karaoke_effects = karaoke_lyrics && effects();
-        let word_fx = WordFx {
-            glow: karaoke_effects && word_glow_lyrics,
-            float: karaoke_effects && word_float_lyrics,
-            scale: karaoke_effects && word_scale_lyrics,
-        };
         let frame_scale = match self.titled {
             true => 1.,
             false => lyrics_frame_scale(window.viewport_size()),
@@ -1325,7 +1328,6 @@ impl Aside {
             karaoke_tint: theme.foreground,
             lift: 1.,
             from: gpui::point(0., 0.5),
-            word_fx,
             mirrored,
         };
 
@@ -1383,6 +1385,32 @@ impl Aside {
         if !animations {
             self.drifts.clear();
         }
+        let parallax = match (parallax_lyrics, animations) {
+            (true, true) => {
+                let target = parallax_offset(self.pointer, scroll.bounds(), self.parallax_inside);
+                let now = std::time::Instant::now();
+                let elapsed = now
+                    .duration_since(self.parallax_since)
+                    .as_secs_f32()
+                    .min(0.064);
+                self.parallax_since = now;
+                let spring = Springs::RESPONSIVE;
+                self.parallax_x = spring.step(self.parallax_x, target.x.as_f32(), elapsed);
+                self.parallax_y = spring.step(self.parallax_y, target.y.as_f32(), elapsed);
+                if !spring.is_settled(self.parallax_x, target.x.as_f32(), 0.05)
+                    || !spring.is_settled(self.parallax_y, target.y.as_f32(), 0.05)
+                {
+                    window.request_animation_frame();
+                }
+                gpui::point(px(self.parallax_x.position), px(self.parallax_y.position))
+            }
+            _ => {
+                self.parallax_x = SpringState::default();
+                self.parallax_y = SpringState::default();
+                self.parallax_since = std::time::Instant::now();
+                Point::default()
+            }
+        };
         let drag = match (lines.is_some(), animations) {
             (true, true) => self.lagged(&scroll, presentation, verse, nudges),
             _ => Drag::default(),
@@ -1467,6 +1495,8 @@ impl Aside {
                 if hazing && scroll.bounds_for_item(0).is_none() {
                     window.request_animation_frame();
                 }
+                // the line being sung never turns; every other line turns away from it by how
+                // many rows it sits away over the room above or below the pinned line
                 let mut rendered = Vec::with_capacity(lyric_row_count(lines) + 1);
 
                 for (index, line) in lines.iter().enumerate() {
@@ -1736,7 +1766,8 @@ impl Aside {
                     });
                     // The hover tint sits on the content rather than the row, so a one-row verse
                     // ends it where the words do. A wrapped verse spans the row instead of
-                    // ending at its longest row.
+                    // ending at its longest row. A turned line carries no bar at all: the
+                    // highlight would sit square behind text that swings out of it.
                     let spans_row = wrapped.is_some_and(|plan| plan.text.len() > 1);
                     let content = div()
                         .flex()
@@ -1830,13 +1861,18 @@ impl Aside {
                         }))
                         .child(content);
 
+                    let distance_scale = match (distance_scale_lyrics, softness > 0.) {
+                        (true, true) => 1. - DISTANCE_SCALE_AMOUNT * softness,
+                        _ => 1.,
+                    };
+                    let opacity = match (fade_lyrics, softness > 0.) {
+                        (true, true) => 1. - VEIL * softness,
+                        _ => 1.,
+                    };
+                    let scale = distance_scale * breath;
                     let verse_line = verse_line
-                        .when(distance_scale_lyrics && softness > 0., |this| {
-                            this.layer_scale(1. - DISTANCE_SCALE_AMOUNT * softness)
-                        })
-                        .when(fade_lyrics && softness > 0., |this| {
-                            this.opacity(1. - VEIL * softness)
-                        })
+                        .when(opacity < 1., |this| this.opacity(opacity))
+                        .when(scale != 1., |this| this.layer_scale(scale))
                         .map(|this| match stepped(row_blur * softness) {
                             soft if soft > HAZE_LEAST => this.blur(soft),
                             _ => this,
@@ -1848,7 +1884,6 @@ impl Aside {
                         }
                         _ => verse_line,
                     };
-                    let verse_line = verse_line.when(breath != 1., |this| this.layer_scale(breath));
                     rendered.push(adrift(verse_line, translation, traded, window));
                 }
 
@@ -2013,10 +2048,13 @@ impl Aside {
                 this.fade_edges(fade, fade)
             })
             .children(body);
+        let sheet = sheet.when(parallax_lyrics && animations, |this| {
+            this.layer_translate(parallax).layer_scale(1.01)
+        });
 
         // A sheet only ever replaces another once, when every source has
         // answered, and that is the one change worth showing.
-        match self.resolving && ui::motion::animates(cx) {
+        let sheet = match self.resolving && ui::motion::animates(cx) {
             true => sheet
                 .with_animation(
                     ("verse-sheet", self.verse_take as usize),
@@ -2028,7 +2066,8 @@ impl Aside {
                 )
                 .into_any_element(),
             false => sheet.into_any_element(),
-        }
+        };
+        sheet
     }
 
     /// An empty element that marks the sheet as laid out once the frame it renders in has been.
@@ -2346,6 +2385,7 @@ impl Render for Aside {
         if self.anchor && self.tab == SideTab::Queue {
             self.pin(&sections, window, cx);
         }
+        let parallax_lyrics = self.settings.read(cx).parallax_lyrics();
 
         div()
             .id("aside")
@@ -2371,6 +2411,17 @@ impl Render for Aside {
                     }
                 }),
             )
+            .when(parallax_lyrics && self.tab == SideTab::Lyrics, |this| {
+                this.on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    this.pointer = event.position;
+                    this.parallax_inside = true;
+                    cx.notify();
+                }))
+                .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, _, cx| {
+                    this.parallax_inside = false;
+                    cx.notify();
+                }))
+            })
             .when(self.titled || self.tab == SideTab::Queue, |this| {
                 this.child(self.header(&sections, window, cx))
             })
@@ -2540,7 +2591,6 @@ pub(crate) fn verse(
             true => gpui::point(1., 0.5),
             false => gpui::point(0., 0.5),
         },
-        word_fx: WordFx::default(),
         mirrored,
     };
     let primary = match (
@@ -2699,24 +2749,15 @@ fn karaoke_lane(
                     .child(text),
             )
     };
-    let lit = |text: SharedString, reveal: Reveal, word: Option<&music::LyricsWord>| {
-        let mut row = div()
+    let lit = |text: SharedString, reveal: Reveal| {
+        div()
             .relative()
             .flex_none()
             .whitespace_nowrap()
             .child(text.clone())
             .when(reveal.shown, |this| {
-                this.child(overlay(text, reveal, sung.karaoke_tint))
-            });
-        if let Some(word) = word {
-            row = with_word_motion(
-                row,
-                word_motion(word, position, verse, sung.word_fx),
-                verse,
-                sung.karaoke_tint,
-            );
-        }
-        row
+                this.child(overlay(text.clone(), reveal, sung.karaoke_tint))
+            })
     };
 
     match plan.rows.is_empty() {
@@ -2731,15 +2772,7 @@ fn karaoke_lane(
                         .relative()
                         .flex()
                         .when(hugs_end(voice, sung.mirrored), |this| this.justify_end())
-                        .child(lit(plan.text[row].clone(), reveal, None))
-                        .children(word_decorations(
-                            plan,
-                            row,
-                            words,
-                            position,
-                            verse,
-                            sung,
-                        )),
+                        .child(lit(plan.text[row].clone(), reveal)),
                     sung,
                 )
             })),
@@ -2764,85 +2797,9 @@ fn karaoke_lane(
                         false => 0.,
                     },
                 };
-                let word = spoken.get(index).and_then(|word| words.get(*word));
-                lit(fragments[index].clone(), reveal, word)
+                lit(fragments[index].clone(), reveal)
             })),
     }
-}
-
-fn with_word_motion(
-    row: Div,
-    motion: WordMotion,
-    verse: Pixels,
-    tint: gpui::Hsla,
-) -> Div {
-    row.when(motion.lift != Pixels::ZERO, |this| {
-        this.layer_translate(gpui::point(Pixels::ZERO, motion.lift))
-    })
-    .when(motion.scale != 1., |this| {
-        this.layer_scale(motion.scale)
-            .layer_scale_origin(gpui::point(0.5, 1.))
-    })
-    .when(motion.glow > 0., |this| {
-        this.text_shadow([TextShadow::new(tint.opacity(motion.glow)).blur(verse * 0.08)])
-    })
-}
-
-fn word_decorations(
-    plan: &Wrapped,
-    row: usize,
-    words: &[music::LyricsWord],
-    position: std::time::Duration,
-    verse: Pixels,
-    sung: &Sung,
-) -> Vec<AnyElement> {
-    if !sung.word_fx.any() {
-        return Vec::new();
-    }
-    let Some((active, word)) = words.iter().enumerate().find(|(_, word)| {
-        word.real_timed
-            && !word.text.trim().is_empty()
-            && position >= word.start
-            && position < word.end
-    }) else {
-        return Vec::new();
-    };
-    let motion = word_motion(word, position, verse, sung.word_fx);
-    if motion.scale == 1. && motion.lift == Pixels::ZERO && motion.glow == 0. {
-        return Vec::new();
-    }
-    let indices = match plan.rows.get(row) {
-        Some(indices) => indices.clone(),
-        None => return Vec::new(),
-    };
-    let width = indices
-        .clone()
-        .map(|index| plan.widths.get(index).copied().unwrap_or(Pixels::ZERO))
-        .sum::<Pixels>();
-    let mut x = Pixels::ZERO;
-    let mut decorations = Vec::new();
-    for index in indices {
-        let fragment = plan.widths.get(index).copied().unwrap_or(Pixels::ZERO);
-        if plan.spoken.get(index) == Some(&active) && fragment > Pixels::ZERO {
-            let mut decoration = div()
-                .absolute()
-                .top_0()
-                .w(fragment)
-                .whitespace_nowrap()
-                .text_color(sung.karaoke_tint)
-                .child(plan.fragments.get(index).cloned().unwrap_or_default());
-            decoration = match plan.rtl {
-                true => decoration.right(px((width - x - fragment).as_f32())),
-                false => decoration.left(px(x.as_f32())),
-            };
-            decorations.push(
-                with_word_motion(decoration, motion, verse, sung.karaoke_tint)
-                    .into_any_element(),
-            );
-        }
-        x += fragment;
-    }
-    decorations
 }
 
 #[derive(Clone, Copy)]
@@ -3592,6 +3549,7 @@ fn adrift(
         .into_any_element()
 }
 
+#[derive(Clone, Copy)]
 struct Place {
     top: Pixels,
     height: Pixels,
@@ -3993,14 +3951,14 @@ mod tests {
     fn lyrics_follow_uses_unscrolled_item_bounds() {
         let offset = anchored_lyrics_offset(px(0.), px(200.), px(100.), px(500.));
 
-        assert_eq!(offset, px(-170.));
+        assert_eq!(offset, px(-150.));
     }
 
     #[test]
     fn lyrics_follow_preserves_a_subpixel_target() {
         let offset = anchored_lyrics_offset(px(0.25), px(200.125), px(100.5), px(500.));
 
-        assert!((offset.as_f32() - -169.725).abs() < 0.001);
+        assert!((offset.as_f32() - -149.625).abs() < 0.001);
     }
 
     #[test]

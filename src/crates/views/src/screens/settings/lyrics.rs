@@ -35,15 +35,13 @@ impl SettingsView {
             Group::new("settings-group-display", "icons/mic-vocal.svg").rows([
                 Slot::LyricOffsetDefault,
                 Slot::Karaoke,
-                Slot::WordGlow,
-                Slot::WordFloat,
-                Slot::WordScale,
                 Slot::BlurLyrics,
                 Slot::FadeLyrics,
                 Slot::EdgeFeatherLyrics,
                 Slot::DistanceScaleLyrics,
                 Slot::BreathingLyrics,
                 Slot::GapDotsLyrics,
+                Slot::ParallaxLyrics,
                 Slot::LyricsMotion,
                 Slot::Romanized,
                 Slot::PanelLyricsSize,
@@ -465,36 +463,6 @@ impl SettingsView {
         )
     }
 
-    pub(super) fn word_glow_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.lyrics_effect_row(
-            "word-glow-lyrics",
-            "settings-word-glow-lyrics",
-            self.settings.read(cx).word_glow_lyrics(),
-            AppSettings::set_word_glow_lyrics,
-            cx,
-        )
-    }
-
-    pub(super) fn word_float_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.lyrics_effect_row(
-            "word-float-lyrics",
-            "settings-word-float-lyrics",
-            self.settings.read(cx).word_float_lyrics(),
-            AppSettings::set_word_float_lyrics,
-            cx,
-        )
-    }
-
-    pub(super) fn word_scale_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.lyrics_effect_row(
-            "word-scale-lyrics",
-            "settings-word-scale-lyrics",
-            self.settings.read(cx).word_scale_lyrics(),
-            AppSettings::set_word_scale_lyrics,
-            cx,
-        )
-    }
-
     fn lyrics_effect_row(
         &self,
         id: &'static str,
@@ -560,6 +528,16 @@ impl SettingsView {
             "settings-gap-dots-lyrics",
             self.settings.read(cx).gap_dots_lyrics(),
             AppSettings::set_gap_dots_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn parallax_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "parallax-lyrics",
+            "settings-parallax-lyrics",
+            self.settings.read(cx).parallax_lyrics(),
+            AppSettings::set_parallax_lyrics,
             cx,
         )
     }
