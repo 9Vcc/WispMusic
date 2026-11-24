@@ -425,23 +425,27 @@ impl MiniPlayer {
                 }
             }
             let finished = this
-                .update(cx, |this, cx| {
-                    if this.epoch == epoch && !this.expanded {
-                        this.panel = false;
-                        this.pending_seek = None;
-                        this.folding = false;
-                        cx.notify();
-                        true
-                    } else {
-                        false
-                    }
+                .update(cx, |this, _| {
+                    this.epoch == epoch && !this.expanded && this.panel
                 })
                 .unwrap_or(false);
-            if finished {
-                handle
-                    .update(cx, |_, window, cx| restore_material(window, cx))
-                    .ok();
+            if !finished {
+                return;
             }
+            // Bring the material back before the card turns translucent again, so the folded
+            // bar never paints one frame over the bare desktop.
+            handle
+                .update(cx, |_, window, cx| restore_material(window, cx))
+                .ok();
+            this.update(cx, |this, cx| {
+                if this.epoch == epoch && !this.expanded {
+                    this.panel = false;
+                    this.pending_seek = None;
+                    this.folding = false;
+                    cx.notify();
+                }
+            })
+            .ok();
         }));
         cx.notify();
     }
@@ -953,6 +957,12 @@ impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window(window, cx);
         let theme = *cx.theme();
+        // Folding hides the window material to keep the uncovered strip empty; the card goes
+        // solid for that pass so no desktop shows through it.
+        let fill = match self.folding {
+            true => theme.background.opacity(1.),
+            false => theme.background,
+        };
         let card = div()
             .id("mini-card")
             .relative()
@@ -960,7 +970,7 @@ impl Render for MiniPlayer {
             .flex_col()
             .w_full()
             .rounded(px(CARD_RADIUS))
-            .bg(theme.background)
+            .bg(fill)
             .border_1()
             .border_color(theme.foreground.opacity(0.22))
             .text_color(theme.foreground)
