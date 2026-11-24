@@ -216,10 +216,38 @@ fn surface(window: &mut Window) {
     window.refresh();
 }
 
+/// Turns DWM's non-client frame on or off. It is hidden while the card folds so the tall
+/// transparent window does not leave a border or shadow around the shrinking card.
+#[cfg(target_os = "windows")]
+fn set_window_frame(window: &Window, shown: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
+    };
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let policy = match shown {
+        true => DWMNCRP_ENABLED,
+        false => DWMNCRP_DISABLED,
+    };
+    unsafe {
+        DwmSetWindowAttribute(
+            handle,
+            DWMWA_NCRENDERING_POLICY as u32,
+            &policy as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&policy) as u32,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_window_frame(_window: &Window, _shown: bool) {}
+
 /// Restores the window material after an animation that had to hide it.
 fn restore_material(window: &mut Window, cx: &App) {
     let theme = *cx.theme();
     window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
+    set_window_frame(window, true);
 }
 
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
@@ -348,11 +376,15 @@ impl MiniPlayer {
         // window is shrunk once the card has finished, then the material comes back.
         self.folding = true;
         window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+        set_window_frame(window, false);
         let handle = window.window_handle();
         let epoch = self.epoch;
         self.finish = Some(cx.spawn(async move |this, cx| {
+            // Shrink the window just before the card bottoms out, so the frame never sits
+            // around an empty strip after the card has folded. The last sliver of the card
+            // animation is clipped by the window and is invisible.
             cx.background_executor()
-                .timer(REVEAL + Duration::from_millis(24))
+                .timer(REVEAL.saturating_sub(Duration::from_millis(70)))
                 .await;
             let folding = this
                 .update(cx, |this, _| {
