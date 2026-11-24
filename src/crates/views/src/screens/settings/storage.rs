@@ -48,6 +48,7 @@ impl SettingsView {
                     .min_w_0()
                     .max_w(gpui::px(260.))
                     .truncate()
+                    .text_size(theme.text(ui::Text::Label))
                     .child(ui::spoken("cache-dir-path", shown).text_color(theme.muted_foreground)),
             )
             .child(
