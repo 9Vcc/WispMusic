@@ -6,7 +6,7 @@ use gpui::{
 use i18n::t;
 use music::WritingSystem;
 use router::{Destination, SettingsPage, navigate};
-use state::{AppSettings, LYRICS_SOURCES};
+use state::{AppSettings, LYRICS_SOURCES, LyricMotionPreset};
 use ui::{
     ActiveTheme as _, Button, Ghost, MAX_LYRICS_SCALE, MIN_LYRICS_SCALE, MenuItem, Picker, Switch,
     drop_gap, drop_marker, grip, tabular,
@@ -36,6 +36,12 @@ impl SettingsView {
                 Slot::LyricOffsetDefault,
                 Slot::Karaoke,
                 Slot::BlurLyrics,
+                Slot::FadeLyrics,
+                Slot::EdgeFeatherLyrics,
+                Slot::DistanceScaleLyrics,
+                Slot::BreathingLyrics,
+                Slot::GapDotsLyrics,
+                Slot::LyricsMotion,
                 Slot::Romanized,
                 Slot::PanelLyricsSize,
                 Slot::FullscreenLyricsSize,
@@ -453,6 +459,98 @@ impl SettingsView {
                         .update(cx, |settings, cx| settings.set_blur_lyrics(!on, cx));
                 }))
                 .into_any_element(),
+        )
+    }
+
+    fn lyrics_effect_row(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        on: bool,
+        apply: fn(&mut AppSettings, bool, &mut Context<AppSettings>),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.row(
+            i18n::lookup(title, None),
+            Switch::new(id, on)
+                .name(i18n::lookup(title, None))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| apply(settings, !on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn fade_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "fade-lyrics",
+            "settings-fade-lyrics",
+            self.settings.read(cx).fade_lyrics(),
+            AppSettings::set_fade_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn edge_feather_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "edge-feather-lyrics",
+            "settings-edge-feather-lyrics",
+            self.settings.read(cx).edge_feather_lyrics(),
+            AppSettings::set_edge_feather_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn distance_scale_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "distance-scale-lyrics",
+            "settings-distance-scale-lyrics",
+            self.settings.read(cx).distance_scale_lyrics(),
+            AppSettings::set_distance_scale_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn breathing_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "breathing-lyrics",
+            "settings-breathing-lyrics",
+            self.settings.read(cx).breathing_lyrics(),
+            AppSettings::set_breathing_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn gap_dots_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "gap-dots-lyrics",
+            "settings-gap-dots-lyrics",
+            self.settings.read(cx).gap_dots_lyrics(),
+            AppSettings::set_gap_dots_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn lyrics_motion_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = self.settings.read(cx).lyrics_motion_preset();
+        let current = i18n::lookup(chosen.key(), None);
+        let picker = Picker::new("lyrics-motion", &self.popovers, current)
+            .width(Picker::REGULAR)
+            .sticky()
+            .items(LyricMotionPreset::ALL.map(|preset| {
+                MenuItem::new(preset.id(), i18n::lookup(preset.key(), None))
+                    .selected(preset == chosen)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_lyrics_motion_preset(preset, cx)
+                        });
+                        cx.notify();
+                    }))
+            }));
+
+        self.row(
+            t!("settings-lyrics-motion"),
+            picker.name(t!("settings-lyrics-motion")).into_any_element(),
         )
     }
 

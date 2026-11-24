@@ -47,6 +47,9 @@ pub(in crate::screens::settings) struct LyricsPreview;
 struct Look {
     karaoke: bool,
     blur: bool,
+    fade: bool,
+    edge_feather: bool,
+    distance_scale: bool,
     scripts: Option<RomanizationScripts>,
 }
 
@@ -79,6 +82,9 @@ pub(in crate::screens::settings) fn preview(
     let look = Look {
         karaoke: settings.karaoke_lyrics(),
         blur: settings.blur_lyrics(),
+        fade: settings.fade_lyrics(),
+        edge_feather: settings.edge_feather_lyrics(),
+        distance_scale: settings.distance_scale_lyrics(),
         scripts: settings
             .romanized_lyrics()
             .then(|| settings.romanization_scripts()),
@@ -108,7 +114,7 @@ fn lines(look: Look, sizes: (Pixels, Pixels), height: Pixels, theme: &Theme) -> 
     let verse_at = |index: usize| {
         let sung = index == SUNG_LINE;
         let distance = index.abs_diff(SUNG_LINE) as f32;
-        let haze = match look.blur && !sung {
+        let haze = match (look.blur || look.fade || look.distance_scale) && !sung {
             true => (distance / AROUND as f32).min(1.).powf(HAZE),
             false => 0.,
         };
@@ -116,6 +122,9 @@ fn lines(look: Look, sizes: (Pixels, Pixels), height: Pixels, theme: &Theme) -> 
             &lines[index],
             VerseLook {
                 active: sung,
+                blur: look.blur,
+                fade: look.fade,
+                distance_scale: look.distance_scale,
                 size,
                 lane,
                 karaoke: look.karaoke,
@@ -132,7 +141,9 @@ fn lines(look: Look, sizes: (Pixels, Pixels), height: Pixels, theme: &Theme) -> 
     div()
         .absolute()
         .inset_0()
-        .when(ui::effects(), |this| this.fade_edges(fade, fade))
+        .when(ui::effects() && look.edge_feather, |this| {
+            this.fade_edges(fade, fade)
+        })
         .child(
             div()
                 .absolute()

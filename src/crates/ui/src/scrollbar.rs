@@ -212,6 +212,10 @@ impl Scrollbar {
         self
     }
 
+    pub fn set_spring(&mut self, spring: SpringConfig) {
+        self.glide.set_spring(spring);
+    }
+
     pub fn watching(mut self, view: EntityId) -> Self {
         self.glide.watch(view);
         self

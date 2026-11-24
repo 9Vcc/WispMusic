@@ -81,6 +81,39 @@ impl FullscreenControlsAutohide {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LyricMotionPreset {
+    #[default]
+    Wisp,
+    AppleMusic,
+}
+
+impl LyricMotionPreset {
+    pub const ALL: [Self; 2] = [Self::Wisp, Self::AppleMusic];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Wisp => "wisp",
+            Self::AppleMusic => "apple-music",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "apple-music" => Self::AppleMusic,
+            _ => Self::Wisp,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Wisp => "settings-lyrics-motion-wisp",
+            Self::AppleMusic => "settings-lyrics-motion-apple-music",
+        }
+    }
+}
+
 /// Which panel the right sidebar shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -386,6 +419,12 @@ struct Values {
     lyrics_prefer_word_synced: bool,
     karaoke_lyrics: bool,
     blur_lyrics: bool,
+    fade_lyrics: bool,
+    edge_feather_lyrics: bool,
+    distance_scale_lyrics: bool,
+    breathing_lyrics: bool,
+    gap_dots_lyrics: bool,
+    lyrics_motion_preset: LyricMotionPreset,
     romanized_lyrics: bool,
     panel_lyrics_scale: f32,
     fullscreen_lyrics_scale: f32,
@@ -646,6 +685,12 @@ impl Default for Values {
             lyrics_prefer_word_synced: true,
             karaoke_lyrics: true,
             blur_lyrics: true,
+            fade_lyrics: true,
+            edge_feather_lyrics: true,
+            distance_scale_lyrics: false,
+            breathing_lyrics: false,
+            gap_dots_lyrics: false,
+            lyrics_motion_preset: LyricMotionPreset::Wisp,
             romanized_lyrics: true,
             panel_lyrics_scale: DEFAULT_LYRICS_SCALE,
             fullscreen_lyrics_scale: DEFAULT_LYRICS_SCALE,
@@ -1256,6 +1301,30 @@ impl AppSettings {
         self.values.blur_lyrics
     }
 
+    pub fn fade_lyrics(&self) -> bool {
+        self.values.fade_lyrics
+    }
+
+    pub fn edge_feather_lyrics(&self) -> bool {
+        self.values.edge_feather_lyrics
+    }
+
+    pub fn distance_scale_lyrics(&self) -> bool {
+        self.values.distance_scale_lyrics
+    }
+
+    pub fn breathing_lyrics(&self) -> bool {
+        self.values.breathing_lyrics
+    }
+
+    pub fn gap_dots_lyrics(&self) -> bool {
+        self.values.gap_dots_lyrics
+    }
+
+    pub fn lyrics_motion_preset(&self) -> LyricMotionPreset {
+        self.values.lyrics_motion_preset
+    }
+
     pub fn romanized_lyrics(&self) -> bool {
         self.values.romanized_lyrics
     }
@@ -1857,6 +1926,40 @@ impl AppSettings {
 
     pub fn set_blur_lyrics(&mut self, blur: bool, cx: &mut Context<Self>) {
         self.values.blur_lyrics = blur;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_fade_lyrics(&mut self, fade: bool, cx: &mut Context<Self>) {
+        self.values.fade_lyrics = fade;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_edge_feather_lyrics(&mut self, edge: bool, cx: &mut Context<Self>) {
+        self.values.edge_feather_lyrics = edge;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_distance_scale_lyrics(&mut self, scale: bool, cx: &mut Context<Self>) {
+        self.values.distance_scale_lyrics = scale;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_breathing_lyrics(&mut self, breathing: bool, cx: &mut Context<Self>) {
+        self.values.breathing_lyrics = breathing;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_gap_dots_lyrics(&mut self, dots: bool, cx: &mut Context<Self>) {
+        self.values.gap_dots_lyrics = dots;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_lyrics_motion_preset(
+        &mut self,
+        preset: LyricMotionPreset,
+        cx: &mut Context<Self>,
+    ) {
+        self.values.lyrics_motion_preset = preset;
         self.schedule_save(cx);
     }
 
@@ -3347,6 +3450,23 @@ mod tests {
     fn a_saved_members_tab_reads_as_the_queue() {
         let tab: SideTab = serde_json::from_str("\"members\"").unwrap();
         assert_eq!(tab, SideTab::Queue);
+    }
+
+    #[test]
+    fn lyric_effects_keep_the_current_look_and_round_trip_the_motion_preset() {
+        let values = Values::default();
+        assert!(values.fade_lyrics);
+        assert!(values.edge_feather_lyrics);
+        assert!(!values.distance_scale_lyrics);
+        assert!(!values.breathing_lyrics);
+        assert!(!values.gap_dots_lyrics);
+        assert_eq!(values.lyrics_motion_preset, LyricMotionPreset::Wisp);
+
+        let preset: LyricMotionPreset = serde_json::from_str("\"apple-music\"").unwrap();
+        assert_eq!(preset, LyricMotionPreset::AppleMusic);
+        assert_eq!(serde_json::to_string(&preset).unwrap(), "\"apple-music\"");
+        assert_eq!(LyricMotionPreset::from_id("apple-music"), preset);
+        assert_eq!(LyricMotionPreset::from_id("unknown"), LyricMotionPreset::Wisp);
     }
 
     #[test]

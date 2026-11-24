@@ -16,9 +16,9 @@ use i18n::t;
 use music::{Contributor, Shape, Track, Voice};
 use router::{Destination, LibraryTab, Link as _};
 use state::{
-    AppSettings, Lyrics, LyricsState, Network, Playback, PlaybackState, Queue, QueuePosition,
-    QueueSections as Sections, QueueSlot as Slot, QueueView, RomanizationScripts, Shelf, SideTab,
-    Wisp, Whence,
+    AppSettings, Lyrics, LyricsState, LyricMotionPreset, Network, Playback, PlaybackState, Queue,
+    QueuePosition, QueueSections as Sections, QueueSlot as Slot, QueueView, RomanizationScripts,
+    Shelf, SideTab, Wisp, Whence,
 };
 use ui::{
     ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Glowing as _, Initials, Motion,
@@ -45,6 +45,9 @@ const TAIL_ROWS: usize = 1;
 const BLUR: f32 = 0.13;
 const BACKGROUND_SINGING_BLUR: Pixels = px(0.75);
 const VEIL: f32 = 0.3;
+const DISTANCE_SCALE_AMOUNT: f32 = 0.2;
+const BREATH_AMOUNT: f32 = 0.025;
+const BREATH_PERIOD_SECS: f32 = 4.;
 const HAZE: f32 = 0.45;
 const VERSE_FADE: f32 = 1.25;
 const PAST: f32 = 0.4;
@@ -151,6 +154,9 @@ struct Sung {
 #[derive(Clone, Copy)]
 pub(crate) struct VerseLook {
     pub(crate) active: bool,
+    pub(crate) blur: bool,
+    pub(crate) fade: bool,
+    pub(crate) distance_scale: bool,
     /// The verse's text size and its romanized lane's.
     pub(crate) size: Pixels,
     pub(crate) lane: Pixels,
@@ -211,6 +217,7 @@ pub(crate) struct Aside {
     lyrics: Entity<Lyrics>,
     settings: Entity<AppSettings>,
     tab: SideTab,
+    motion_preset: LyricMotionPreset,
     verse_bar: Entity<Scrollbar>,
     followed: Option<usize>,
     nudges: u64,
@@ -316,11 +323,22 @@ impl Aside {
         let lyrics = Wisp::global(cx).lyrics.clone();
         cx.observe(&lyrics, |_, _, cx| cx.notify()).detach();
         let settings = Wisp::global(cx).settings.clone();
-        cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        let motion_preset = settings.read(cx).lyrics_motion_preset();
+        cx.observe(&settings, |this, settings, cx| {
+            let preset = settings.read(cx).lyrics_motion_preset();
+            if preset != this.motion_preset {
+                this.motion_preset = preset;
+                this.verse_bar
+                    .update(cx, |bar, _| bar.set_spring(lyric_scroll_spring(preset)));
+                this.drifts.clear();
+            }
+            cx.notify();
+        })
+        .detach();
         // 歌词页不显示滚动条：被动模式只在滚动时露一下，不占边缘、不可拖。
         let verse_bar = cx.new(|_| {
             Scrollbar::new(ScrollHandle::new())
-                .spring(Springs::LYRICS_SCROLL)
+                .spring(lyric_scroll_spring(motion_preset))
                 .passive()
                 .watching(me)
         });
@@ -331,6 +349,7 @@ impl Aside {
             lyrics,
             settings,
             tab,
+            motion_preset,
             verse_bar,
             followed: None,
             nudges: 0,
@@ -596,7 +615,7 @@ impl Aside {
         state.position = (px(state.position) - drag.step * (LAG_TRAIL * along))
             .clamp(-drag.most, drag.most)
             .as_f32();
-        let spring = lag_spring(along);
+        let spring = lag_spring(along, self.motion_preset);
         state = spring.step(state, 0., drag.beat);
         if spring.is_settled(state, 0., LAG_LEAST.as_f32()) {
             self.drifts.remove(&row);
@@ -1214,13 +1233,28 @@ impl Aside {
         let following = (self.verse_of.as_deref() != lyrics.following())
             .then(|| lyrics.following().map(str::to_owned));
         let take = lyrics.revision();
-        let (karaoke_lyrics, romanization_scripts) = {
+        let (
+            karaoke_lyrics,
+            romanization_scripts,
+            blur_lyrics,
+            fade_lyrics,
+            edge_feather_lyrics,
+            distance_scale_lyrics,
+            breathing_lyrics,
+            gap_dots_lyrics,
+        ) = {
             let settings = self.settings.read(cx);
             (
                 settings.karaoke_lyrics(),
                 settings
                     .romanized_lyrics()
                     .then(|| settings.romanization_scripts()),
+                settings.blur_lyrics(),
+                settings.fade_lyrics(),
+                settings.edge_feather_lyrics(),
+                settings.distance_scale_lyrics(),
+                settings.breathing_lyrics(),
+                settings.gap_dots_lyrics(),
             )
         };
         let karaoke_effects = karaoke_lyrics && effects();
@@ -1366,7 +1400,13 @@ impl Aside {
                     self.departing_line = None;
                 }
                 let instrumental_line = active_instrumental(lines, position);
-                let hazing = effects() && self.settings.read(cx).blur_lyrics() && self.pinned;
+                let hazing = effects()
+                    && self.pinned
+                    && (blur_lyrics || fade_lyrics || distance_scale_lyrics);
+                let breathing = breathing_lyrics && singing && animations;
+                if breathing && active_line.is_some() {
+                    window.request_animation_frame();
+                }
                 let blur = verse * BLUR;
                 let sharpen = self.sharpen_progress(window);
                 // with motion turned down a press is simply on or off
@@ -1426,6 +1466,7 @@ impl Aside {
                             instrumental_has_passed,
                             verse,
                             &theme,
+                            gap_dots_lyrics,
                         )
                         .px(verse_pad)
                         .rounded(theme.radius)
@@ -1458,9 +1499,14 @@ impl Aside {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.seek_verse(notes_row, instrumental_start, cx);
                             }))
-                            .when(softness > 0., |this| this.opacity(1. - VEIL * softness))
-                            .map(|this| match stepped(blur * softness) {
-                                soft if soft > HAZE_LEAST => this.blur(soft),
+                            .when(distance_scale_lyrics && softness > 0., |this| {
+                                this.layer_scale(1. - DISTANCE_SCALE_AMOUNT * softness)
+                            })
+                            .when(fade_lyrics && softness > 0., |this| {
+                                this.opacity(1. - VEIL * softness)
+                            })
+                            .map(|this| match (blur_lyrics, stepped(blur * softness)) {
+                                (true, soft) if soft > HAZE_LEAST => this.blur(soft),
                                 _ => this,
                             });
                         rendered.push(adrift(notes, notes_translation, false, window));
@@ -1672,9 +1718,19 @@ impl Aside {
                         true => haze(viewport_haze(&scroll, row, view, blur, translation)),
                         false => 0.,
                     };
-                    let row_blur = match background_line_singing(line, active, position) {
-                        true => BACKGROUND_SINGING_BLUR,
-                        false => blur,
+                    let row_blur = match (blur_lyrics, background_line_singing(line, active, position)) {
+                        (true, true) => BACKGROUND_SINGING_BLUR,
+                        (true, false) => blur,
+                        (false, _) => Pixels::ZERO,
+                    };
+                    let breath = match (breathing, active) {
+                        (true, true) => {
+                            let phase = position.as_secs_f32()
+                                * std::f32::consts::TAU
+                                / BREATH_PERIOD_SECS;
+                            1. + BREATH_AMOUNT * phase.sin()
+                        }
+                        _ => 1.,
                     };
                     let traded = index
                         .checked_sub(1)
@@ -1722,7 +1778,12 @@ impl Aside {
                         .child(content);
 
                     let verse_line = verse_line
-                        .when(softness > 0., |this| this.opacity(1. - VEIL * softness))
+                        .when(distance_scale_lyrics && softness > 0., |this| {
+                            this.layer_scale(1. - DISTANCE_SCALE_AMOUNT * softness)
+                        })
+                        .when(fade_lyrics && softness > 0., |this| {
+                            this.opacity(1. - VEIL * softness)
+                        })
                         .map(|this| match stepped(row_blur * softness) {
                             soft if soft > HAZE_LEAST => this.blur(soft),
                             _ => this,
@@ -1734,6 +1795,7 @@ impl Aside {
                         }
                         _ => verse_line,
                     };
+                    let verse_line = verse_line.when(breath != 1., |this| this.layer_scale(breath));
                     rendered.push(adrift(verse_line, translation, traded, window));
                 }
 
@@ -1893,7 +1955,7 @@ impl Aside {
             .px(sheet_padding)
             .pt(over)
             .pb(under)
-            .when(effects(), |this| {
+            .when(effects() && edge_feather_lyrics, |this| {
                 let fade = verse * VERSE_FADE;
                 this.fade_edges(fade, fade)
             })
@@ -2479,9 +2541,12 @@ pub(crate) fn verse(
                     |this, text| this.child(romanized_lyrics_lane(text, look.lane, theme)),
                 ),
         )
-        .when(haze > 0., |this| this.opacity(1. - VEIL * haze))
-        .map(|this| match look.size * BLUR * haze {
-            soft if soft > HAZE_LEAST => this.blur(soft),
+        .when(look.fade && haze > 0., |this| this.opacity(1. - VEIL * haze))
+        .when(look.distance_scale && haze > 0., |this| {
+            this.layer_scale(1. - DISTANCE_SCALE_AMOUNT * haze)
+        })
+        .map(|this| match (look.blur, look.size * BLUR * haze) {
+            (true, soft) if soft > HAZE_LEAST => this.blur(soft),
             _ => this,
         })
 }
@@ -3409,9 +3474,27 @@ struct Drag {
     most: Pixels,
 }
 
-fn lag_spring(along: f32) -> SpringConfig {
-    let frequency = 1. - LAG_STAGGER * along.clamp(0., 1.);
-    let spring = Springs::LYRICS_ROW;
+fn lyric_scroll_spring(preset: LyricMotionPreset) -> SpringConfig {
+    match preset {
+        LyricMotionPreset::Wisp => Springs::LYRICS_SCROLL,
+        LyricMotionPreset::AppleMusic => SpringConfig::new(170., 2. * 170f32.sqrt(), 1.),
+    }
+}
+
+fn lyric_row_spring(preset: LyricMotionPreset) -> SpringConfig {
+    match preset {
+        LyricMotionPreset::Wisp => Springs::LYRICS_ROW,
+        LyricMotionPreset::AppleMusic => SpringConfig::new(210., 2. * 210f32.sqrt(), 1.),
+    }
+}
+
+fn lag_spring(along: f32, preset: LyricMotionPreset) -> SpringConfig {
+    let stagger = match preset {
+        LyricMotionPreset::Wisp => LAG_STAGGER,
+        LyricMotionPreset::AppleMusic => 0.5,
+    };
+    let frequency = 1. - stagger * along.clamp(0., 1.);
+    let spring = lyric_row_spring(preset);
     SpringConfig::new(
         spring.stiffness * frequency * frequency,
         spring.damping * frequency,
@@ -3472,7 +3555,7 @@ fn background_line_singing(
     !line_active && position >= line.start && line.sung_end().is_some_and(|end| position < end)
 }
 
-fn instrumental_row(progress: f32, past: bool, verse: Pixels, theme: &ui::Theme) -> Div {
+fn instrumental_row(progress: f32, past: bool, verse: Pixels, theme: &ui::Theme, dots: bool) -> Div {
     let note_size = verse * 1.;
     div()
         .flex()
@@ -3485,17 +3568,27 @@ fn instrumental_row(progress: f32, past: bool, verse: Pixels, theme: &ui::Theme)
                 true => quiet(theme).opacity(PAST),
                 false => mix(quiet(theme).opacity(AHEAD), theme.primary, note_progress),
             };
-            div()
-                .size(note_size)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    svg()
-                        .path(icons::path("icons/music-2.svg"))
-                        .size(note_size)
-                        .text_color(tint),
-                )
+            match dots {
+                true => {
+                    let size = (verse * 0.26).clamp(px(6.), px(16.));
+                    div()
+                        .size(size)
+                        .rounded_full()
+                        .bg(tint.opacity(0.3 + 0.7 * note_progress))
+                        .layer_scale(0.7 + 0.3 * note_progress)
+                }
+                false => div()
+                    .size(note_size)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(icons::path("icons/music-2.svg"))
+                            .size(note_size)
+                            .text_color(tint),
+                    ),
+            }
         }))
 }
 
@@ -3553,8 +3646,9 @@ mod tests {
     use super::{
         QueuePosition, Sections, Slot, active_lyrics_row, anchored_lyrics_offset,
         background_line_singing, karaoke_fragments, karaoke_window, lag_spring, line_has_passed,
-        line_row, lyric_row_count, plain_lyrics_fragments, primary_karaoke_fade,
-        primary_karaoke_visible, secondary_karaoke_visible, wrap_fragment_widths,
+        line_row, lyric_row_count, lyric_row_spring, lyric_scroll_spring, plain_lyrics_fragments,
+        primary_karaoke_fade, primary_karaoke_visible, secondary_karaoke_visible,
+        wrap_fragment_widths,
     };
     use gpui::px;
     use ui::Motion;
@@ -3787,8 +3881,10 @@ mod tests {
 
     #[test]
     fn lyrics_row_springs_stagger_without_changing_their_damping_ratio() {
-        let (first_frequency, first_ratio) = lag_spring(0.).canonical();
-        let (last_frequency, last_ratio) = lag_spring(1.).canonical();
+        let (first_frequency, first_ratio) =
+            lag_spring(0., state::LyricMotionPreset::Wisp).canonical();
+        let (last_frequency, last_ratio) =
+            lag_spring(1., state::LyricMotionPreset::Wisp).canonical();
 
         assert!(first_frequency > last_frequency);
         assert!((first_ratio - last_ratio).abs() < f32::EPSILON);
@@ -3796,6 +3892,14 @@ mod tests {
             first_ratio < 1.,
             "the lyrics settle should have a subtle overshoot"
         );
+    }
+
+    #[test]
+    fn apple_motion_is_critically_damped() {
+        let (_, scroll_ratio) = lyric_scroll_spring(state::LyricMotionPreset::AppleMusic).canonical();
+        let (_, row_ratio) = lyric_row_spring(state::LyricMotionPreset::AppleMusic).canonical();
+        assert!((scroll_ratio - 1.).abs() < 0.001);
+        assert!((row_ratio - 1.).abs() < 0.001);
     }
 
     #[test]

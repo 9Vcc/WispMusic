@@ -78,7 +78,8 @@ pub use search::{AlbumHit, ArtistHit, Hit, Kind, PlaylistHit, Search};
 pub use session::{Failure, ProviderInfo, Session, SessionEvent, SessionState};
 pub use settings::{
     AppSettings, FilterValue, FullscreenControlsAutohide, LYRIC_OFFSET_MAX_MS,
-    LYRIC_OFFSET_NUDGE_MS, LYRICS_SOURCES, PREAMP_MAX, PREAMP_MIN, PageWidth, PlayerBarLayout,
+    LYRIC_OFFSET_NUDGE_MS, LYRICS_SOURCES, PREAMP_MAX, PREAMP_MIN, LyricMotionPreset, PageWidth,
+    PlayerBarLayout,
     Reloaded, RomanizationScripts, SYSTEM_FONT, SideTab, ThemeFamily, ThemeOffer, ThemeVariant,
     VisualizerScreens, equalizer_profile_label, remember_window, window_placement,
 };
