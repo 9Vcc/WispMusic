@@ -216,6 +216,7 @@ fn timed(text: &str, start: Duration) -> Vec<LyricsWord> {
                 start: at,
                 end: at + length,
                 text: word,
+                real_timed: false,
             };
             at += length;
             timed

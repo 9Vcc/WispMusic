@@ -643,12 +643,29 @@ impl Voice {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LyricsWord {
     pub start: Duration,
     pub end: Duration,
     pub text: String,
+    #[serde(default = "real_timed")]
+    pub real_timed: bool,
+}
+
+impl Default for LyricsWord {
+    fn default() -> Self {
+        Self {
+            start: Duration::ZERO,
+            end: Duration::ZERO,
+            text: String::new(),
+            real_timed: true,
+        }
+    }
+}
+
+fn real_timed() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -728,6 +745,15 @@ pub enum PinOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lyrics_words_default_to_real_timing_and_old_json_keeps_it() {
+        assert!(LyricsWord::default().real_timed);
+        let mut json = serde_json::to_value(LyricsWord::default()).unwrap();
+        json.as_object_mut().unwrap().remove("real_timed");
+        let word: LyricsWord = serde_json::from_value(json).unwrap();
+        assert!(word.real_timed);
+    }
 
     fn labelled(label: &str, copyrights: &[&str]) -> Album {
         Album {

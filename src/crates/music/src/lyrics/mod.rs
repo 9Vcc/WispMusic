@@ -437,6 +437,7 @@ mod tests {
             start: Duration::ZERO,
             end: Duration::from_secs(1),
             text: "wrong song".to_owned(),
+            ..Default::default()
         }]);
         wrong.lyrics = Lyrics::Synced {
             lines: lines.into(),
@@ -460,6 +461,7 @@ mod tests {
                 start: shouted.start,
                 end: shouted.end.expect("the test line has an end"),
                 text: text.to_owned(),
+                ..Default::default()
             }]);
             lines.push(shouted);
         }
@@ -550,6 +552,7 @@ mod tests {
             start: Duration::ZERO,
             end: Duration::from_secs(1),
             text: "another take".to_owned(),
+            ..Default::default()
         }]);
         worded.lyrics = Lyrics::Synced {
             lines: lines.into(),
@@ -649,6 +652,7 @@ mod tests {
             start: Duration::ZERO,
             end: Duration::from_secs(5),
             text: "one".to_owned(),
+            ..Default::default()
         }]);
 
         assert_eq!(
@@ -672,11 +676,13 @@ mod tests {
                 start: Duration::from_millis(0),
                 end: Duration::from_millis(400),
                 text: "one ".to_owned(),
+                ..Default::default()
             },
             LyricsWord {
                 start: Duration::from_millis(400),
                 end: Duration::from_millis(900),
                 text: "two".to_owned(),
+                ..Default::default()
             },
         ];
         assert_eq!(active_word(&words, Duration::from_millis(100)), Some(0));

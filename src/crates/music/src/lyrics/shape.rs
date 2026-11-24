@@ -359,6 +359,7 @@ fn worded_from(text: &str, slots: &[Slot], spans: &[(Duration, Duration)]) -> Ve
             start,
             end: end.max(start),
             text: text[from..until].to_owned(),
+            real_timed: false,
         });
     }
     words

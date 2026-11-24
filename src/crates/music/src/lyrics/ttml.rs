@@ -175,6 +175,7 @@ fn word(span: Node) -> Option<LyricsWord> {
         start,
         end: end.max(start),
         text,
+        real_timed: true,
     })
 }
 

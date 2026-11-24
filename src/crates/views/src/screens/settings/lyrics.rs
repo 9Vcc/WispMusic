@@ -35,6 +35,9 @@ impl SettingsView {
             Group::new("settings-group-display", "icons/mic-vocal.svg").rows([
                 Slot::LyricOffsetDefault,
                 Slot::Karaoke,
+                Slot::WordGlow,
+                Slot::WordFloat,
+                Slot::WordScale,
                 Slot::BlurLyrics,
                 Slot::FadeLyrics,
                 Slot::EdgeFeatherLyrics,
@@ -459,6 +462,36 @@ impl SettingsView {
                         .update(cx, |settings, cx| settings.set_blur_lyrics(!on, cx));
                 }))
                 .into_any_element(),
+        )
+    }
+
+    pub(super) fn word_glow_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "word-glow-lyrics",
+            "settings-word-glow-lyrics",
+            self.settings.read(cx).word_glow_lyrics(),
+            AppSettings::set_word_glow_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn word_float_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "word-float-lyrics",
+            "settings-word-float-lyrics",
+            self.settings.read(cx).word_float_lyrics(),
+            AppSettings::set_word_float_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn word_scale_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "word-scale-lyrics",
+            "settings-word-scale-lyrics",
+            self.settings.read(cx).word_scale_lyrics(),
+            AppSettings::set_word_scale_lyrics,
+            cx,
         )
     }
 

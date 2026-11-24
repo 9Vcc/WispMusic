@@ -1,4 +1,5 @@
 mod aside;
+mod lyrics_effects;
 mod notice;
 mod output_picker;
 mod player_bar;

@@ -571,6 +571,7 @@ fn separate_background(line: &mut LyricsLine) {
                         start: word.start,
                         end: word.end,
                         text,
+                        real_timed: word.real_timed,
                     })
                 })
                 .collect();
@@ -810,6 +811,7 @@ fn shifted(words: Vec<LyricsWord>, start: Duration) -> Vec<LyricsWord> {
                 start: word.start.saturating_add(drift),
                 end: word.end.saturating_add(drift),
                 text: word.text,
+                real_timed: word.real_timed,
             })
             .collect(),
     }
@@ -873,6 +875,7 @@ fn spoken(body: &str) -> (String, Option<Vec<LyricsWord>>) {
             start,
             end,
             text: segment.text.clone(),
+            real_timed: true,
         });
     }
 
@@ -971,16 +974,19 @@ mod tests {
                     start: Duration::from_secs(1),
                     end: Duration::from_secs(3),
                     text: "Lead ".to_owned(),
+                    ..Default::default()
                 },
                 LyricsWord {
                     start: Duration::from_millis(1500),
                     end: Duration::from_millis(2500),
                     text: "(echo)".to_owned(),
+                    ..Default::default()
                 },
                 LyricsWord {
                     start: Duration::from_secs(3),
                     end: Duration::from_secs(4),
                     text: " after".to_owned(),
+                    ..Default::default()
                 },
             ]),
             secondary: Vec::new(),
@@ -1012,16 +1018,19 @@ mod tests {
                     start: Duration::from_secs(1),
                     end: Duration::from_secs(2),
                     text: "Может, я murder ".to_owned(),
+                    ..Default::default()
                 },
                 LyricsWord {
                     start: Duration::from_secs(2),
                     end: Duration::from_millis(2500),
                     text: "(E)".to_owned(),
+                    ..Default::default()
                 },
                 LyricsWord {
                     start: Duration::from_millis(2500),
                     end: Duration::from_secs(4),
                     text: ", они все".to_owned(),
+                    ..Default::default()
                 },
             ]),
             secondary: Vec::new(),
@@ -1056,6 +1065,7 @@ mod tests {
                     start: Duration::from_secs(1),
                     end: Duration::from_secs(2),
                     text: "Lead".to_owned(),
+                    ..Default::default()
                 }]),
                 secondary: Vec::new(),
                 voice: Voice::Lead,
@@ -1069,6 +1079,7 @@ mod tests {
                     start: Duration::from_secs(2),
                     end: Duration::from_secs(3),
                     text: "(echo)".to_owned(),
+                    ..Default::default()
                 }]),
                 secondary: Vec::new(),
                 voice: Voice::Lead,

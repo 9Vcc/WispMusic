@@ -92,6 +92,9 @@ enum Slot {
     Lyrics,
     LyricOffsetDefault,
     Karaoke,
+    WordGlow,
+    WordFloat,
+    WordScale,
     BlurLyrics,
     FadeLyrics,
     EdgeFeatherLyrics,
@@ -943,6 +946,18 @@ impl SettingsView {
                 t!("settings-karaoke-lyrics"),
                 t!("settings-karaoke-lyrics-detail"),
             ),
+            Slot::WordGlow => (
+                t!("settings-word-glow-lyrics"),
+                t!("settings-word-glow-lyrics-detail"),
+            ),
+            Slot::WordFloat => (
+                t!("settings-word-float-lyrics"),
+                t!("settings-word-float-lyrics-detail"),
+            ),
+            Slot::WordScale => (
+                t!("settings-word-scale-lyrics"),
+                t!("settings-word-scale-lyrics-detail"),
+            ),
             Slot::Romanized => (
                 t!("settings-romanized-lyrics"),
                 t!("settings-romanized-lyrics-detail"),
@@ -1061,6 +1076,9 @@ impl SettingsView {
             Slot::Lyrics => self.lyrics_row(cx),
             Slot::LyricOffsetDefault => self.lyric_offset_default_row(cx),
             Slot::Karaoke => self.karaoke_lyrics_row(cx),
+            Slot::WordGlow => self.word_glow_lyrics_row(cx),
+            Slot::WordFloat => self.word_float_lyrics_row(cx),
+            Slot::WordScale => self.word_scale_lyrics_row(cx),
             Slot::Romanized => self.romanized_lyrics_row(cx),
             Slot::LyricsForLocal => self.lyrics_for_local_files_row(cx),
             Slot::ScrobbleProvider => self.scrobble_provider_row(cx),

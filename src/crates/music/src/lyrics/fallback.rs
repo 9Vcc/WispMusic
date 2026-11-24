@@ -61,6 +61,7 @@ pub fn apply(lines: &mut [LyricsLine]) {
                 start: cursor,
                 end: cursor + duration,
                 text: token.clone(),
+                real_timed: false,
             });
             cursor += duration;
         }
@@ -201,6 +202,8 @@ mod tests {
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].text, "你");
         assert_eq!(words[1].text, "好");
+        assert!(!words[0].real_timed);
+        assert!(!words[1].real_timed);
         assert_eq!(words[0].start, Duration::ZERO);
         assert!(words[1].end > words[0].end);
         assert!(lines[0].end.is_some());
@@ -213,6 +216,7 @@ mod tests {
             start: Duration::ZERO,
             end: Duration::from_millis(100),
             text: "你".to_owned(),
+            ..Default::default()
         }]);
         let mut lines = vec![line];
         apply(&mut lines);

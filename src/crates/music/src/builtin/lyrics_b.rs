@@ -328,6 +328,7 @@ fn read_yrc(line: &str) -> Option<LyricsLine> {
                     start: at,
                     end: at + length,
                     text: spoken.to_owned(),
+                    real_timed: true,
                 });
                 text.push_str(spoken);
                 rest = &rest[spoken.len()..];

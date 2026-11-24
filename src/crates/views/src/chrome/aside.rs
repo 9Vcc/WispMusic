@@ -7,10 +7,11 @@ use gpui::prelude::*;
 
 use gpui::accesskit::{Role, Toggled};
 use gpui::{
-    Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity, ExternalPaths,
-    FontWeight, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle, ScrollStrategy,
-    SharedString, Size, SpringConfig, SpringState, Task, UniformListScrollHandle, Window, canvas,
-    div, ease_in_out, px, relative, size, svg, uniform_list,
+    Animation, AnimationExt as _, AnyElement, App, Bounds, Context, Div, DragMoveEvent, Entity,
+    ExternalPaths, FontWeight, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
+    ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task, TextShadow,
+    UniformListScrollHandle, Window, canvas, div, ease_in_out, px, relative, size, svg,
+    uniform_list,
 };
 use i18n::t;
 use music::{Contributor, Listening, Shape, Spectrum, Track, Voice};
@@ -33,6 +34,7 @@ use crate::chrome::{Chrome, section_label};
 use crate::shared::menus::ItemMenu;
 use crate::shared::pins::Pinned as _;
 use crate::shared::{effects, quiet};
+use super::lyrics_effects::{WordFx, WordMotion, word_motion};
 
 const QUEUE: &str = "queue";
 /// How many text heights across the picture of whoever queued a song is.
@@ -148,6 +150,7 @@ struct Sung {
     karaoke_tint: gpui::Hsla,
     lift: f32,
     from: gpui::Point<f32>,
+    word_fx: WordFx,
     /// Whether the lyrics mostly read right to left, which puts the lead voice on the right.
     mirrored: bool,
 }
@@ -1269,6 +1272,9 @@ impl Aside {
         let take = lyrics.revision();
         let (
             karaoke_lyrics,
+            word_glow_lyrics,
+            word_float_lyrics,
+            word_scale_lyrics,
             romanization_scripts,
             blur_lyrics,
             fade_lyrics,
@@ -1280,6 +1286,9 @@ impl Aside {
             let settings = self.settings.read(cx);
             (
                 settings.karaoke_lyrics(),
+                settings.word_glow_lyrics(),
+                settings.word_float_lyrics(),
+                settings.word_scale_lyrics(),
                 settings
                     .romanized_lyrics()
                     .then(|| settings.romanization_scripts()),
@@ -1292,6 +1301,11 @@ impl Aside {
             )
         };
         let karaoke_effects = karaoke_lyrics && effects();
+        let word_fx = WordFx {
+            glow: karaoke_effects && word_glow_lyrics,
+            float: karaoke_effects && word_float_lyrics,
+            scale: karaoke_effects && word_scale_lyrics,
+        };
         let frame_scale = match self.titled {
             true => 1.,
             false => lyrics_frame_scale(window.viewport_size()),
@@ -1311,6 +1325,7 @@ impl Aside {
             karaoke_tint: theme.foreground,
             lift: 1.,
             from: gpui::point(0., 0.5),
+            word_fx,
             mirrored,
         };
 
@@ -2525,6 +2540,7 @@ pub(crate) fn verse(
             true => gpui::point(1., 0.5),
             false => gpui::point(0., 0.5),
         },
+        word_fx: WordFx::default(),
         mirrored,
     };
     let primary = match (
@@ -2683,15 +2699,24 @@ fn karaoke_lane(
                     .child(text),
             )
     };
-    let lit = |text: SharedString, reveal: Reveal| {
-        div()
+    let lit = |text: SharedString, reveal: Reveal, word: Option<&music::LyricsWord>| {
+        let mut row = div()
             .relative()
             .flex_none()
             .whitespace_nowrap()
             .child(text.clone())
             .when(reveal.shown, |this| {
                 this.child(overlay(text, reveal, sung.karaoke_tint))
-            })
+            });
+        if let Some(word) = word {
+            row = with_word_motion(
+                row,
+                word_motion(word, position, verse, sung.word_fx),
+                verse,
+                sung.karaoke_tint,
+            );
+        }
+        row
     };
 
     match plan.rows.is_empty() {
@@ -2703,9 +2728,18 @@ fn karaoke_lane(
                 let reveal = revealed(plan, row, &windows, position, edge_fade);
                 lifted(
                     div()
+                        .relative()
                         .flex()
                         .when(hugs_end(voice, sung.mirrored), |this| this.justify_end())
-                        .child(lit(plan.text[row].clone(), reveal)),
+                        .child(lit(plan.text[row].clone(), reveal, None))
+                        .children(word_decorations(
+                            plan,
+                            row,
+                            words,
+                            position,
+                            verse,
+                            sung,
+                        )),
                     sung,
                 )
             })),
@@ -2730,9 +2764,85 @@ fn karaoke_lane(
                         false => 0.,
                     },
                 };
-                lit(fragments[index].clone(), reveal)
+                let word = spoken.get(index).and_then(|word| words.get(*word));
+                lit(fragments[index].clone(), reveal, word)
             })),
     }
+}
+
+fn with_word_motion(
+    row: Div,
+    motion: WordMotion,
+    verse: Pixels,
+    tint: gpui::Hsla,
+) -> Div {
+    row.when(motion.lift != Pixels::ZERO, |this| {
+        this.layer_translate(gpui::point(Pixels::ZERO, motion.lift))
+    })
+    .when(motion.scale != 1., |this| {
+        this.layer_scale(motion.scale)
+            .layer_scale_origin(gpui::point(0.5, 1.))
+    })
+    .when(motion.glow > 0., |this| {
+        this.text_shadow([TextShadow::new(tint.opacity(motion.glow)).blur(verse * 0.08)])
+    })
+}
+
+fn word_decorations(
+    plan: &Wrapped,
+    row: usize,
+    words: &[music::LyricsWord],
+    position: std::time::Duration,
+    verse: Pixels,
+    sung: &Sung,
+) -> Vec<AnyElement> {
+    if !sung.word_fx.any() {
+        return Vec::new();
+    }
+    let Some((active, word)) = words.iter().enumerate().find(|(_, word)| {
+        word.real_timed
+            && !word.text.trim().is_empty()
+            && position >= word.start
+            && position < word.end
+    }) else {
+        return Vec::new();
+    };
+    let motion = word_motion(word, position, verse, sung.word_fx);
+    if motion.scale == 1. && motion.lift == Pixels::ZERO && motion.glow == 0. {
+        return Vec::new();
+    }
+    let indices = match plan.rows.get(row) {
+        Some(indices) => indices.clone(),
+        None => return Vec::new(),
+    };
+    let width = indices
+        .clone()
+        .map(|index| plan.widths.get(index).copied().unwrap_or(Pixels::ZERO))
+        .sum::<Pixels>();
+    let mut x = Pixels::ZERO;
+    let mut decorations = Vec::new();
+    for index in indices {
+        let fragment = plan.widths.get(index).copied().unwrap_or(Pixels::ZERO);
+        if plan.spoken.get(index) == Some(&active) && fragment > Pixels::ZERO {
+            let mut decoration = div()
+                .absolute()
+                .top_0()
+                .w(fragment)
+                .whitespace_nowrap()
+                .text_color(sung.karaoke_tint)
+                .child(plan.fragments.get(index).cloned().unwrap_or_default());
+            decoration = match plan.rtl {
+                true => decoration.right(px((width - x - fragment).as_f32())),
+                false => decoration.left(px(x.as_f32())),
+            };
+            decorations.push(
+                with_word_motion(decoration, motion, verse, sung.karaoke_tint)
+                    .into_any_element(),
+            );
+        }
+        x += fragment;
+    }
+    decorations
 }
 
 #[derive(Clone, Copy)]
@@ -3862,6 +3972,7 @@ mod tests {
                     start: Duration::from_secs(2),
                     end: Duration::from_secs(5),
                     text: "first".to_owned(),
+                    real_timed: true,
                 }]),
                 ..Default::default()
             },
@@ -3902,6 +4013,7 @@ mod tests {
                 start: Duration::from_millis(index as u64 * 100),
                 end: Duration::from_millis(index as u64 * 100 + 100),
                 text: text.to_owned(),
+                real_timed: true,
             })
             .collect::<Vec<_>>();
 
@@ -4001,11 +4113,13 @@ mod tests {
                 start: Duration::from_millis(1500),
                 end: Duration::from_millis(1900),
                 text: "first".to_owned(),
+                real_timed: true,
             },
             LyricsWord {
                 start: Duration::from_millis(2000),
                 end: Duration::from_millis(2400),
                 text: "second".to_owned(),
+                real_timed: true,
             },
         ];
 
@@ -4025,6 +4139,7 @@ mod tests {
                 start: Duration::from_secs(2),
                 end: Duration::from_secs(3),
                 text: "(E)".to_owned(),
+                real_timed: true,
             }]),
             ..Default::default()
         };
@@ -4061,6 +4176,7 @@ mod tests {
                 start: Duration::from_secs(2),
                 end: Duration::from_secs(8),
                 text: "Wake me up inside".to_owned(),
+                real_timed: true,
             }]),
             ..Default::default()
         };
@@ -4097,6 +4213,7 @@ mod tests {
                 start: Duration::from_secs(2),
                 end: Duration::from_secs(5),
                 text: "line".to_owned(),
+                real_timed: true,
             }]),
             ..Default::default()
         };
@@ -4114,6 +4231,7 @@ mod tests {
                 start: Duration::from_secs(2),
                 end: Duration::from_secs(8),
                 text: "Wake me up inside".to_owned(),
+                real_timed: true,
             }]),
             ..Default::default()
         };
@@ -4147,6 +4265,7 @@ mod tests {
                 start: Duration::from_secs(2),
                 end: Duration::from_secs(8),
                 text: "Wake me up inside".to_owned(),
+                real_timed: true,
             }]),
             ..Default::default()
         };

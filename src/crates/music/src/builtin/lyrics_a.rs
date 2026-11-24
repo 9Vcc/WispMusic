@@ -426,6 +426,7 @@ fn read(line: &str) -> Option<LyricsLine> {
                 start: start + at,
                 end: start + at + length,
                 text: spoken.to_owned(),
+                real_timed: true,
             });
         }
         text.push_str(spoken);

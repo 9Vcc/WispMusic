@@ -229,6 +229,7 @@ fn sylt_lines(content: Vec<(u32, String)>) -> Vec<LyricsLine> {
                 start,
                 end: start,
                 text: text.to_owned(),
+                real_timed: true,
             });
     }
     groups
