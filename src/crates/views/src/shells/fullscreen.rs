@@ -16,15 +16,12 @@ use input::{
     ToggleFullscreen, ToggleLyrics, ToggleQueue, ToggleWindowFullscreen, WORKSPACE_CONTEXT,
 };
 use router::{Destination, navigate};
-use state::{
-    AppSettings, Cover, FullscreenControlsAutohide, Lyrics, LyricStyle, Playback, Queue, SideTab,
-    Wisp,
-};
+use state::{ Lyrics, AppSettings, Cover, FullscreenControlsAutohide, Playback, Queue, SideTab, Wisp};
 use ui::{
-    ActiveTheme as _, Artwork, Badge, Button, CircularReveal, Flight, InlineLink, InlineLinks,
-    Modal, Motion, Motioned as _, Popup, Room, Scrollbar, Scroller, Scrubber, ScrubberState,
-    Springs, Sprung, Popovers, TabBar, Tails as _, Text, Tipped as _, Visualizer, Zoom, clock,
-    entering, growing, snapped,
+    ActiveTheme as _, Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Modal, Motion,
+    Motioned as _, Popup, Room, Scrollbar, Scroller, Scrubber, ScrubberState, Springs, Sprung,
+    Popovers, TabBar, Tails as _, Text, Tipped as _, Visualizer, Zoom, clock, entering, growing,
+    snapped,
 };
 use ui::{Perch, tabular};
 
@@ -129,7 +126,6 @@ pub struct FullscreenView {
     playback: Entity<Playback>,
     cover: Entity<Cover>,
     settings: Entity<AppSettings>,
-    lyric_style: LyricStyle,
     aside: Entity<Aside>,
     panel: Option<SideTab>,
     /// How much of the content the pill just switched to is still hidden, springing from 1 to 0
@@ -217,19 +213,10 @@ impl FullscreenView {
         // The meta drops its text shadows while the player opens or closes.
         cx.observe_global::<ShellSwap>(|_, cx| cx.notify()).detach();
         let settings = Wisp::global(cx).settings.clone();
-        let lyric_style = settings.read(cx).lyric_style();
         cx.observe(&settings, |this, settings, cx| {
-            let style = settings.read(cx).lyric_style();
             if this.panel == Some(SideTab::Lyrics) && !settings.read(cx).lyrics_enabled() {
                 this.panel = None;
             }
-            if this.panel == Some(SideTab::Lyrics)
-                && style == LyricStyle::Reveal
-                && style != this.lyric_style
-            {
-                this.switch = Some(Sprung::at(1.));
-            }
-            this.lyric_style = style;
             cx.notify();
         })
         .detach();
@@ -255,7 +242,6 @@ impl FullscreenView {
             playback,
             cover,
             settings,
-            lyric_style,
             aside,
             panel,
             switch: None,
@@ -307,9 +293,6 @@ impl FullscreenView {
         self.on_show = shown;
         match shown {
             true => {
-                if self.panel == Some(SideTab::Lyrics) && self.lyric_style == LyricStyle::Reveal {
-                    self.switch = Some(Sprung::at(1.));
-                }
                 self.flip(true);
                 self.hidden = SpringState {
                     position: 0.,
@@ -2354,30 +2337,10 @@ impl Render for FullscreenView {
                             .absolute()
                             .size_full()
                         })
-                        .child(match (self.panel, self.lyric_style, switching) {
-                            (Some(SideTab::Lyrics), LyricStyle::Reveal, hidden) if hidden > 0. => {
-                                CircularReveal::new(
-                                    "fullscreen-circular-reveal",
-                                    div()
-                                        .size_full()
-                                        .min_h_0()
-                                        .child(self.aside.clone())
-                                        .into_any_element(),
-                                    1. - hidden,
-                                    match split {
-                                        true => point(-0.5, 0.5),
-                                        false => point(0.5, 0.5),
-                                    },
-                                    theme.background.opacity(1.),
-                                )
-                                .into_any_element()
-                            }
-                            _ => entering(
-                                div().size_full().min_h_0().child(self.aside.clone()),
-                                switching,
-                            )
-                            .into_any_element(),
-                        })
+                        .child(entering(
+                            div().size_full().min_h_0().child(self.aside.clone()),
+                            switching,
+                        ))
                         .into_any_element()
                 });
                 let row = div()

@@ -3,7 +3,6 @@ mod artwork;
 mod button;
 mod card;
 mod checkbox;
-mod circular_reveal;
 mod controls;
 mod deck;
 mod drag;
@@ -77,7 +76,6 @@ pub use button::{Button, SMALL_INSET};
 pub use card::CARD_GROUP;
 pub use card::Card;
 pub use checkbox::Checkbox;
-pub use circular_reveal::CircularReveal;
 pub use controls::WindowControls;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub use controls::WindowFrame;

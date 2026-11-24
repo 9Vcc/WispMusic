@@ -86,22 +86,22 @@ impl FullscreenControlsAutohide {
 pub enum LyricStyle {
     #[default]
     Classic,
-    Reveal,
+    Focus,
 }
 
 impl LyricStyle {
-    pub const ALL: [Self; 2] = [Self::Classic, Self::Reveal];
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Focus];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Classic => "classic",
-            Self::Reveal => "reveal",
+            Self::Focus => "focus",
         }
     }
 
     pub fn from_id(id: &str) -> Self {
         match id {
-            "reveal" => Self::Reveal,
+            "focus" => Self::Focus,
             _ => Self::Classic,
         }
     }
@@ -109,7 +109,7 @@ impl LyricStyle {
     pub fn key(self) -> &'static str {
         match self {
             Self::Classic => "lyrics-style-classic",
-            Self::Reveal => "lyrics-style-reveal",
+            Self::Focus => "lyrics-style-focus",
         }
     }
 
@@ -3401,13 +3401,13 @@ mod tests {
     #[test]
     fn lyric_style_defaults_to_classic_and_round_trips_as_an_id() {
         assert_eq!(Values::default().lyric_style, LyricStyle::Classic);
-        let style: LyricStyle = serde_json::from_str("\"reveal\"").unwrap();
-        assert_eq!(style, LyricStyle::Reveal);
-        assert_eq!(serde_json::to_string(&style).unwrap(), "\"reveal\"");
-        assert_eq!(LyricStyle::from_id("reveal"), LyricStyle::Reveal);
+        let style: LyricStyle = serde_json::from_str("\"focus\"").unwrap();
+        assert_eq!(style, LyricStyle::Focus);
+        assert_eq!(serde_json::to_string(&style).unwrap(), "\"focus\"");
+        assert_eq!(LyricStyle::from_id("focus"), LyricStyle::Focus);
         assert_eq!(LyricStyle::from_id("unknown"), LyricStyle::Classic);
-        assert_eq!(LyricStyle::Classic.next(), LyricStyle::Reveal);
-        assert_eq!(LyricStyle::Reveal.next(), LyricStyle::Classic);
+        assert_eq!(LyricStyle::Classic.next(), LyricStyle::Focus);
+        assert_eq!(LyricStyle::Focus.next(), LyricStyle::Classic);
     }
 
     #[test]
