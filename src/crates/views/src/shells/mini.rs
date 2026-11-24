@@ -46,8 +46,8 @@ const TRACK_LEFT: f32 = PAD + COVER + GAP;
 const ROW: f32 = 32.;
 const ROW_PAD: f32 = 6.;
 const HEAD: f32 = 24.;
-/// How long the queue takes to grow out of, or fold back into, the bar.
-const REVEAL: Duration = Duration::from_millis(190);
+/// How long the queue takes to grow out of the bar.
+const REVEAL: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy)]
 struct MiniSession {
