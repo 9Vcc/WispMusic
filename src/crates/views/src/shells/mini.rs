@@ -13,8 +13,8 @@ use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
     Global, IntoElement, MouseButton, MouseUpEvent, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Task, UniformListScrollHandle, Window, WindowBounds, WindowKind, WindowOptions,
-    div, point, px, relative, size, svg, uniform_list,
+    SharedString, Task, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowKind, WindowOptions, div, point, px, relative, size, svg, uniform_list,
 };
 use i18n::t;
 use state::{AppSettings, Playback, QueuePosition, Wisp};
@@ -216,6 +216,12 @@ fn surface(window: &mut Window) {
     window.refresh();
 }
 
+/// Restores the window material after an animation that had to hide it.
+fn restore_material(window: &mut Window, cx: &App) {
+    let theme = *cx.theme();
+    window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
+}
+
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
 fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
     let displays = cx.displays();
@@ -245,6 +251,8 @@ struct MiniPlayer {
     /// Whether the queue is mounted. It stays mounted while folding so the shrinking card
     /// clips it instead of exposing a bare bar over the backdrop.
     panel: bool,
+    /// Whether the card is folding with the window material hidden.
+    folding: bool,
     /// Restarts the card's height animation on every fold.
     epoch: u64,
     /// Shrinks the window after a fold; the card itself animates inside the still-expanded
@@ -278,6 +286,7 @@ impl MiniPlayer {
             playback,
             expanded: false,
             panel: false,
+            folding: false,
             epoch: 0,
             finish: None,
             scroll: UniformListScrollHandle::new(),
@@ -295,7 +304,8 @@ impl MiniPlayer {
     fn sync_window(&mut self, window: &mut Window, cx: &App) {
         let theme = *cx.theme();
         let key = (theme.blur_window, theme.transparent);
-        if self.background != Some(key) {
+        // A fold hides the material on purpose; the finishing task restores it.
+        if !self.folding && self.background != Some(key) {
             self.background = Some(key);
             window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
         }
@@ -318,6 +328,10 @@ impl MiniPlayer {
         if expanded {
             self.panel = true;
             self.finish = None;
+            if self.folding {
+                self.folding = false;
+                restore_material(window, cx);
+            }
             let sections = self.playback.read(cx).shown_queue(cx).sections;
             if sections.current {
                 self.scroll
@@ -329,27 +343,37 @@ impl MiniPlayer {
             cx.notify();
             return;
         }
-        // Folding is window-first: the card stays at its full height while the window drops
-        // to the bar, so the clip eats the queue and no acrylic strip is ever left behind.
-        window.resize(size(px(WIDTH), px(BAR)));
+        // Fold with the window still tall: the card shrinks inside it while the material is
+        // hidden, so the uncovered part shows the desktop rather than an acrylic strip. The
+        // window is shrunk once the card has finished, then the material comes back.
+        self.folding = true;
+        window.set_background_appearance(WindowBackgroundAppearance::Transparent);
         let handle = window.window_handle();
         let epoch = self.epoch;
         self.finish = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(REVEAL + Duration::from_millis(24))
+                .await;
+            let folding = this
+                .update(cx, |this, _| {
+                    (this.epoch == epoch && !this.expanded && this.panel && this.folding)
+                        .then_some(())
+                })
+                .ok()
+                .flatten()
+                .is_some();
+            if !folding {
+                return;
+            }
+            handle
+                .update(cx, |_, window, _| {
+                    window.resize(size(px(WIDTH), px(BAR)));
+                })
+                .ok();
             for _ in 0..40 {
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
                     .await;
-                let folding = this
-                    .update(cx, |this, _| {
-                        (this.epoch == epoch && !this.expanded).then_some(this.panel)
-                    })
-                    .ok()
-                    .flatten();
-                match folding {
-                    None => return,
-                    Some(false) => return,
-                    Some(true) => {}
-                }
                 let height = handle
                     .update(cx, |_, window, _| window.viewport_size().height)
                     .ok();
@@ -357,14 +381,24 @@ impl MiniPlayer {
                     break;
                 }
             }
-            this.update(cx, |this, cx| {
-                if this.epoch == epoch && !this.expanded {
-                    this.panel = false;
-                    this.pending_seek = None;
-                    cx.notify();
-                }
-            })
-            .ok();
+            let finished = this
+                .update(cx, |this, cx| {
+                    if this.epoch == epoch && !this.expanded {
+                        this.panel = false;
+                        this.pending_seek = None;
+                        this.folding = false;
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if finished {
+                handle
+                    .update(cx, |_, window, cx| restore_material(window, cx))
+                    .ok();
+            }
         }));
         cx.notify();
     }
@@ -892,18 +926,18 @@ impl Render for MiniPlayer {
             .when(self.panel, |this| this.child(self.panel(cx)));
         let card = match self.panel {
             false => card.h(px(BAR)).into_any_element(),
-            true if !self.expanded => {
-                // Folding: the window is already shrinking under the full-height card, so
-                // the card only needs to be clipped, never to leave an acrylic strip behind.
-                card.h(px(EXPANDED)).into_any_element()
-            }
-            true => card
-                .with_animation(
+            true => {
+                let (from, to) = match self.expanded {
+                    true => (BAR, EXPANDED),
+                    false => (EXPANDED, BAR),
+                };
+                card.with_animation(
                     SharedString::from(format!("mini-reveal-{}-{}", self.epoch, self.expanded)),
                     Animation::new(REVEAL).with_easing(ui::ease_out_cubic),
-                    move |this, delta| this.h(px(BAR + (EXPANDED - BAR) * delta)),
+                    move |this, delta| this.h(px(from + (to - from) * delta)),
                 )
-                .into_any_element(),
+                .into_any_element()
+            }
         };
 
         div().size_full().child(card)
