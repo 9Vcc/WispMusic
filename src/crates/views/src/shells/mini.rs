@@ -24,7 +24,7 @@ use crate::shared::transport::{next, play_mode, previous, toggle};
 
 const WIDTH: f32 = 360.;
 const BAR: f32 = 72.;
-const EXPANDED: f32 = 400.;
+const EXPANDED: f32 = 450.;
 /// Matches the system corner radius DWM gives a rounded window.
 const CARD_RADIUS: f32 = 8.;
 /// The card's inner spacing, cover and type, all fixed with the window.
@@ -329,28 +329,34 @@ impl MiniPlayer {
             cx.notify();
             return;
         }
+        // Folding is window-first: the card stays at its full height while the window drops
+        // to the bar, so the clip eats the queue and no acrylic strip is ever left behind.
+        window.resize(size(px(WIDTH), px(BAR)));
         let handle = window.window_handle();
         let epoch = self.epoch;
         self.finish = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(REVEAL + Duration::from_millis(24))
-                .await;
-            let folded = this
-                .update(cx, |this, _| {
-                    this.epoch == epoch && !this.expanded && this.panel
-                })
-                .unwrap_or(false);
-            if !folded {
-                return;
+            for _ in 0..40 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let folding = this
+                    .update(cx, |this, _| {
+                        (this.epoch == epoch && !this.expanded).then_some(this.panel)
+                    })
+                    .ok()
+                    .flatten();
+                match folding {
+                    None => return,
+                    Some(false) => return,
+                    Some(true) => {}
+                }
+                let height = handle
+                    .update(cx, |_, window, _| window.viewport_size().height)
+                    .ok();
+                if height.is_some_and(|height| height.as_f32() <= BAR + 1.) {
+                    break;
+                }
             }
-            handle
-                .update(cx, |_, window, _| {
-                    window.resize(size(px(WIDTH), px(BAR)));
-                })
-                .ok();
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
             this.update(cx, |this, cx| {
                 if this.epoch == epoch && !this.expanded {
                     this.panel = false;
@@ -886,22 +892,18 @@ impl Render for MiniPlayer {
             .when(self.panel, |this| this.child(self.panel(cx)));
         let card = match self.panel {
             false => card.h(px(BAR)).into_any_element(),
-            true => {
-                let from = match self.expanded {
-                    true => BAR,
-                    false => EXPANDED,
-                };
-                let to = match self.expanded {
-                    true => EXPANDED,
-                    false => BAR,
-                };
-                card.with_animation(
+            true if !self.expanded => {
+                // Folding: the window is already shrinking under the full-height card, so
+                // the card only needs to be clipped, never to leave an acrylic strip behind.
+                card.h(px(EXPANDED)).into_any_element()
+            }
+            true => card
+                .with_animation(
                     SharedString::from(format!("mini-reveal-{}-{}", self.epoch, self.expanded)),
                     Animation::new(REVEAL).with_easing(ui::ease_out_cubic),
-                    move |this, delta| this.h(px(from + (to - from) * delta)),
+                    move |this, delta| this.h(px(BAR + (EXPANDED - BAR) * delta)),
                 )
-                .into_any_element()
-            }
+                .into_any_element(),
         };
 
         div().size_full().child(card)
