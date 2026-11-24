@@ -13,7 +13,7 @@ use gpui::{
     div, ease_in_out, px, relative, size, svg, uniform_list,
 };
 use i18n::t;
-use music::{Contributor, Shape, Track, Voice};
+use music::{Contributor, Listening, Shape, Spectrum, Track, Voice};
 use router::{Destination, LibraryTab, Link as _};
 use state::{
     AppSettings, Lyrics, LyricsState, LyricMotionPreset, Network, Playback, PlaybackState, Queue,
@@ -46,8 +46,11 @@ const BLUR: f32 = 0.13;
 const BACKGROUND_SINGING_BLUR: Pixels = px(0.75);
 const VEIL: f32 = 0.3;
 const DISTANCE_SCALE_AMOUNT: f32 = 0.2;
-const BREATH_AMOUNT: f32 = 0.025;
-const BREATH_PERIOD_SECS: f32 = 4.;
+const BREATH_MAX_OFFSET: f32 = 0.06;
+const BREATH_ATTACK_SECS: f32 = 0.08;
+const BREATH_RELEASE_SECS: f32 = 0.22;
+const BREATH_IN_SECS: f32 = 0.35;
+const BREATH_OUT_SECS: f32 = 0.5;
 const HAZE: f32 = 0.45;
 const VERSE_FADE: f32 = 1.25;
 const PAST: f32 = 0.4;
@@ -218,6 +221,9 @@ pub(crate) struct Aside {
     settings: Entity<AppSettings>,
     tab: SideTab,
     motion_preset: LyricMotionPreset,
+    spectrum_listener: Option<Listening>,
+    breath_energy: f32,
+    breath_since: std::time::Instant,
     verse_bar: Entity<Scrollbar>,
     followed: Option<usize>,
     nudges: u64,
@@ -325,6 +331,10 @@ impl Aside {
         let settings = Wisp::global(cx).settings.clone();
         let motion_preset = settings.read(cx).lyrics_motion_preset();
         cx.observe(&settings, |this, settings, cx| {
+            if !settings.read(cx).breathing_lyrics() {
+                this.spectrum_listener = None;
+                this.breath_energy = 0.;
+            }
             let preset = settings.read(cx).lyrics_motion_preset();
             if preset != this.motion_preset {
                 this.motion_preset = preset;
@@ -350,6 +360,9 @@ impl Aside {
             settings,
             tab,
             motion_preset,
+            spectrum_listener: None,
+            breath_energy: 0.,
+            breath_since: std::time::Instant::now(),
             verse_bar,
             followed: None,
             nudges: 0,
@@ -1194,10 +1207,31 @@ impl Aside {
     }
 
     fn verses(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.settings.read(cx).breathing_lyrics() && self.spectrum_listener.is_none() {
+            if let Some(spectrum) = self.playback.read(cx).spectrum(cx) {
+                self.spectrum_listener = Some(spectrum.listen());
+            }
+        }
         let theme = *cx.theme();
         let playback = self.playback.read(cx);
         let position = playback.live_position();
         let singing = matches!(playback.state(), PlaybackState::Playing);
+        let bass = playback
+            .spectrum(cx)
+            .map(|spectrum| bass_energy(&spectrum))
+            .unwrap_or(0.);
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.breath_since).as_secs_f32();
+        self.breath_since = now;
+        let target = match singing {
+            true => bass,
+            false => 0.,
+        };
+        let tau = match target > self.breath_energy {
+            true => BREATH_ATTACK_SECS,
+            false => BREATH_RELEASE_SECS,
+        };
+        self.breath_energy = approach(self.breath_energy, target, elapsed, tau);
         let lyrics = self.lyrics.read(cx);
         // [wisp] 歌词时基按歌曲偏移：正值（歌词提前）加到播放位置上，负值回退，不早于 0。
         let position = match lyrics.offset_ms() {
@@ -1723,12 +1757,16 @@ impl Aside {
                         (true, false) => blur,
                         (false, _) => Pixels::ZERO,
                     };
-                    let breath = match (breathing, active) {
-                        (true, true) => {
-                            let phase = position.as_secs_f32()
-                                * std::f32::consts::TAU
-                                / BREATH_PERIOD_SECS;
-                            1. + BREATH_AMOUNT * phase.sin()
+                    let breath = match (breathing, active, departing) {
+                        (true, true, _) => {
+                            1. + BREATH_MAX_OFFSET
+                                * self.breath_energy
+                                * breath_weight(self.arrived.elapsed(), true)
+                        }
+                        (true, false, true) => {
+                            1. + BREATH_MAX_OFFSET
+                                * self.breath_energy
+                                * breath_weight(self.departed.elapsed(), false)
                         }
                         _ => 1.,
                     };
@@ -2997,6 +3035,34 @@ fn ramp(at: std::time::Instant, window: &mut Window) -> f32 {
     ease_out_expo(progress)
 }
 
+fn bass_energy(spectrum: &Spectrum) -> f32 {
+    let bands = spectrum.bands();
+    let low = bands
+        .iter()
+        .take(6)
+        .copied()
+        .filter(|level| level.is_finite())
+        .collect::<Vec<_>>();
+    let average = low.iter().sum::<f32>() / low.len().max(1) as f32;
+    (average * 1.5).clamp(0., 1.)
+}
+
+fn approach(current: f32, target: f32, elapsed: f32, tau: f32) -> f32 {
+    let blend = 1. - (-elapsed.max(0.) / tau.max(0.001)).exp();
+    current + (target - current) * blend
+}
+
+fn breath_weight(elapsed: std::time::Duration, entering: bool) -> f32 {
+    let progress = match entering {
+        true => (elapsed.as_secs_f32() / BREATH_IN_SECS).clamp(0., 1.),
+        false => (elapsed.as_secs_f32() / BREATH_OUT_SECS).clamp(0., 1.),
+    };
+    match entering {
+        true => ease_out_expo(progress),
+        false => 1. - ease_in_out(progress),
+    }
+}
+
 /// Scales one line of text without touching the space between it and the next.
 fn lifted(row: Div, sung: &Sung) -> Div {
     match sung.lift == 1. {
@@ -3644,11 +3710,11 @@ mod tests {
     use ui::Springs;
 
     use super::{
-        QueuePosition, Sections, Slot, active_lyrics_row, anchored_lyrics_offset,
-        background_line_singing, karaoke_fragments, karaoke_window, lag_spring, line_has_passed,
-        line_row, lyric_row_count, lyric_row_spring, lyric_scroll_spring, plain_lyrics_fragments,
-        primary_karaoke_fade, primary_karaoke_visible, secondary_karaoke_visible,
-        wrap_fragment_widths,
+        QueuePosition, Sections, Slot, active_lyrics_row, anchored_lyrics_offset, approach,
+        background_line_singing, breath_weight, karaoke_fragments, karaoke_window, lag_spring,
+        line_has_passed, line_row, lyric_row_count, lyric_row_spring, lyric_scroll_spring,
+        plain_lyrics_fragments, primary_karaoke_fade, primary_karaoke_visible,
+        secondary_karaoke_visible, wrap_fragment_widths,
     };
     use gpui::px;
     use ui::Motion;
@@ -3892,6 +3958,22 @@ mod tests {
             first_ratio < 1.,
             "the lyrics settle should have a subtle overshoot"
         );
+    }
+
+    #[test]
+    fn breathing_energy_approaches_without_overshoot() {
+        assert_eq!(approach(0., 1., 0., 0.08), 0.);
+        assert!(approach(0., 1., 0.08, 0.08) > 0.6);
+        assert!(approach(0.2, 1., 10., 0.22) <= 1.);
+        assert!(approach(1., 0., 10., 0.22) >= 0.);
+    }
+
+    #[test]
+    fn breathing_weight_fades_in_and_out() {
+        assert_eq!(breath_weight(Duration::ZERO, true), 0.);
+        assert_eq!(breath_weight(Duration::from_secs(1), true), 1.);
+        assert_eq!(breath_weight(Duration::ZERO, false), 1.);
+        assert_eq!(breath_weight(Duration::from_secs(1), false), 0.);
     }
 
     #[test]
