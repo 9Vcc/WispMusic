@@ -637,15 +637,12 @@ impl StrokeLyrics {
             .unwrap_or(1);
         let cell = cell_size(self.stage_height, max_column);
         let safe = self.stage_height * STAGE_SAFE_RATIO;
-        let mut translations = line
+        let translations = line
             .secondary
             .first()
             .map(|lane| lane.text.clone())
             .into_iter()
             .collect::<Vec<_>>();
-        if let Some(romanized) = line.romanized.as_ref() {
-            translations.push(romanized.text.clone());
-        }
         let chars = timings
             .iter()
             .map(|timing| Char {

@@ -1230,6 +1230,7 @@ impl FullscreenView {
         let offset = lyrics.offset_ms();
         let picked = lyrics.picked();
         let has_lyrics = lyrics.current().is_some();
+        let stroke = self.settings.read(cx).stroke_lyrics();
         let me = cx.entity().downgrade();
 
         // 材质与底部 pill 的 frosted 按钮一致：popover 半透明底 + backdrop 模糊
@@ -1302,6 +1303,33 @@ impl FullscreenView {
                                 .font_features(tabular())
                                 .child(SharedString::from(format!("{offset}ms"))),
                         )
+                    })
+                    .child({
+                        let settings = self.settings.clone();
+                        let hint = match stroke {
+                            true => t!("lyric-stroke-disable"),
+                            false => t!("lyric-stroke-enable"),
+                        };
+                        let button = tool("lyric-tool-stroke", "icons/pencil.svg", hint)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                settings.update(cx, |settings, cx| {
+                                    settings.set_stroke_lyrics(!stroke, cx)
+                                });
+                            });
+                        div().relative().child(button).when(stroke, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .right(px(3.))
+                                    .bottom(px(3.))
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(gpui::white().opacity(0.92))
+                                    .border_1()
+                                    .border_color(gpui::black().opacity(0.5)),
+                            )
+                        })
                     })
                     .child({
                         let button = tool("lyric-tool-choose", "icons/list.svg", t!("lyric-choose"))

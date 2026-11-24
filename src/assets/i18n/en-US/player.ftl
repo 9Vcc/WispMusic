@@ -64,6 +64,8 @@ lyrics-instrumental-break = Instrumental break
 
 # [wisp] 歌词页工具条
 lyric-choose = Choose lyrics
+lyric-stroke-enable = Stroke lyric animation
+lyric-stroke-disable = Back to default lyrics
 lyric-offset-back = Lyrics back 0.5s
 lyric-offset-forward = Lyrics forward 0.5s
 lyric-offset-reset = Reset offset
