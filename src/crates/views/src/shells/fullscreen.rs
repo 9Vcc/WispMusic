@@ -1282,18 +1282,7 @@ impl FullscreenView {
             .gap(px(12.))
             .opacity(1. - hide)
             .when(has_lyrics, |column| {
-                let style_settings = self.settings.clone();
                 column
-                    .child(
-                        tool("lyric-tool-style", "icons/palette.svg", t!("lyrics-style-pick"))
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                let next = style_settings.read(cx).lyric_style().next();
-                                style_settings.update(cx, |settings, cx| {
-                                    settings.set_lyric_style(next, cx)
-                                });
-                            }),
-                    )
                     // 偏移非 0 时在顶部显示当前值（独立小胶囊）。
                     .when(offset != 0, |column| {
                         column.child(

@@ -6,7 +6,7 @@ use gpui::{
 use i18n::t;
 use music::WritingSystem;
 use router::{Destination, SettingsPage, navigate};
-use state::{AppSettings, LYRICS_SOURCES, LyricStyle};
+use state::{AppSettings, LYRICS_SOURCES};
 use ui::{
     ActiveTheme as _, Button, Ghost, MAX_LYRICS_SCALE, MIN_LYRICS_SCALE, MenuItem, Picker, Switch,
     drop_gap, drop_marker, grip, tabular,
@@ -39,7 +39,6 @@ impl SettingsView {
                 Slot::Romanized,
                 Slot::PanelLyricsSize,
                 Slot::FullscreenLyricsSize,
-                Slot::LyricStyle,
             ]),
         );
         groups.push(
@@ -207,28 +206,6 @@ impl SettingsView {
             .child(step("larger", "+", "settings-font-larger", 0.1));
 
         self.row(i18n::lookup(title, None), actions.into_any_element())
-    }
-
-    pub(super) fn lyric_style_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let chosen = self.settings.read(cx).lyric_style();
-        let current = i18n::lookup(chosen.key(), None);
-        let picker = Picker::new("lyric-style", &self.popovers, current)
-            .width(Picker::REGULAR)
-            .sticky()
-            .items(LyricStyle::ALL.map(|style| {
-                MenuItem::new(style.id(), i18n::lookup(style.key(), None))
-                    .selected(style == chosen)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings
-                            .update(cx, |settings, cx| settings.set_lyric_style(style, cx));
-                        cx.notify();
-                    }))
-            }));
-
-        self.row(
-            t!("settings-lyrics-style"),
-            picker.name(t!("settings-lyrics-style")).into_any_element(),
-        )
     }
 
     pub(super) fn lyrics_for_local_files_row(&self, cx: &mut Context<Self>) -> AnyElement {
