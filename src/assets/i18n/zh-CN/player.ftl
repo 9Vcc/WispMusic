@@ -34,8 +34,10 @@ player-fullscreen-leave = 退出全屏
 player-mini = 迷你模式
 mini-expand = 展开播放列表
 mini-collapse = 收起播放列表
+mini-queue = 播放列表
 mini-restore = 回到主窗口
 mini-close = 隐藏迷你播放器
+player-volume = 音量
 lyric-collapse = 收起
 fullscreen-artwork = 封面
 

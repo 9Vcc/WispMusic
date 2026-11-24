@@ -11,15 +11,15 @@ use std::ops::Range;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, IntoElement, MouseButton,
-    Pixels, Point, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, relative,
-    size, svg, uniform_list,
+    MouseUpEvent, Pixels, Point, Render, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px,
+    relative, size, svg, uniform_list,
 };
 use i18n::t;
 use state::{AppSettings, Playback, QueuePosition, Wisp};
-use ui::{ActiveTheme as _, Artwork, Button, clock};
+use ui::{ActiveTheme as _, Artwork, Button, Scrubber, ScrubberState, clock, tabular};
 
-use crate::shared::transport::{next, previous, toggle};
+use crate::shared::transport::{next, play_mode, previous, toggle};
 
 const WIDTH: f32 = 360.;
 const BAR: f32 = 72.;
@@ -74,6 +74,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
     );
     let playback = Wisp::global(cx).playback.clone();
     let settings = Wisp::global(cx).settings.clone();
+    let collapsed = origin;
     let acrylic = {
         let settings = settings.read(cx);
         settings.transparent() && settings.blur_window()
@@ -104,7 +105,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
                 cx.remove_global::<MiniSession>();
                 true
             });
-            cx.new(|cx| MiniPlayer::new(playback, settings, cx))
+            cx.new(|cx| MiniPlayer::new(playback, settings, collapsed, cx))
         },
     ) else {
         return;
@@ -281,10 +282,16 @@ struct MiniPlayer {
     playback: Entity<Playback>,
     settings: Entity<AppSettings>,
     expanded: bool,
-    /// The collapsed window's place, to return to when the queue folds.
-    resting: Option<Point<Pixels>>,
+    /// The collapsed window's place. It follows the window when the user drags it there, so
+    /// repeated folds return to the same spot instead of reading a stale in-flight position.
+    collapsed: Point<Pixels>,
+    /// Whether the window's move observer is installed.
+    watched: bool,
     /// The queue's scroll, kept between renders so it does not jump to the top.
     scroll: UniformListScrollHandle,
+    seek: ScrubberState,
+    volume: ScrubberState,
+    pending_seek: Option<f32>,
     /// What the window background was last told, so it changes only with the settings.
     acrylic: Option<bool>,
     #[cfg(target_os = "windows")]
@@ -295,6 +302,7 @@ impl MiniPlayer {
     fn new(
         playback: Entity<Playback>,
         settings: Entity<AppSettings>,
+        collapsed: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
         let ticks = playback.read(cx).ticks().clone();
@@ -307,8 +315,12 @@ impl MiniPlayer {
             playback,
             settings,
             expanded: false,
-            resting: None,
+            collapsed,
+            watched: false,
             scroll: UniformListScrollHandle::new(),
+            seek: ScrubberState::new("mini-seek"),
+            volume: ScrubberState::new("mini-volume"),
+            pending_seek: None,
             acrylic: None,
             #[cfg(target_os = "windows")]
             shape: None,
@@ -344,13 +356,13 @@ impl MiniPlayer {
         if self.expanded == expanded {
             return;
         }
-        let frame = window.bounds();
+        let frame = Bounds {
+            origin: self.collapsed,
+            size: size(px(WIDTH), px(BAR)),
+        };
         let (origin, height) = match expanded {
-            true => {
-                self.resting = Some(frame.origin);
-                (room(frame, cx), EXPANDED)
-            }
-            false => (self.resting.take().unwrap_or(frame.origin), BAR),
+            true => (room(frame, cx), EXPANDED),
+            false => (self.collapsed, BAR),
         };
         self.expanded = expanded;
         #[cfg(target_os = "windows")]
@@ -363,6 +375,8 @@ impl MiniPlayer {
                 self.scroll
                     .scroll_to_item(sections.past, ScrollStrategy::Center);
             }
+        } else {
+            self.pending_seek = None;
         }
         place(window, origin, height);
         window.refresh();
@@ -373,7 +387,6 @@ impl MiniPlayer {
         let theme = *cx.theme();
         let playback = self.playback.read(cx);
         let track = playback.shown_track(cx);
-        let (position, duration) = playback.shown_time(cx);
         let title = track
             .as_ref()
             .map(|track| SharedString::from(track.name.clone()))
@@ -384,11 +397,6 @@ impl MiniPlayer {
             .filter(|artists| !artists.is_empty())
             .unwrap_or_else(|| t!("player-nothing-playing"));
         let cover = track.and_then(|track| track.cover);
-        let shuffle = playback.shown_shuffle(cx);
-        let ratio = match duration.as_secs_f32() > 0. {
-            true => (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.),
-            false => 0.,
-        };
 
         div()
             .id("mini-bar")
@@ -465,26 +473,7 @@ impl MiniPlayer {
                             .flex()
                             .flex_none()
                             .items_center()
-                            .child(
-                                Button::new("mini-shuffle")
-                                    .ghost()
-                                    .small()
-                                    .icon("icons/shuffle.svg")
-                                    .tooltip_above("player-shuffle")
-                                    .selected(shuffle)
-                                    .tint(match shuffle {
-                                        true => theme.primary,
-                                        false => theme.muted_foreground,
-                                    })
-                                    .on_click({
-                                        let playback = self.playback.clone();
-                                        move |_, _, cx| {
-                                            playback.update(cx, |playback, cx| {
-                                                playback.toggle_shuffle(cx)
-                                            })
-                                        }
-                                    }),
-                            )
+                            .child(self.shuffle_button("mini-shuffle", cx))
                             .child(
                                 Button::new("mini-expand")
                                     .ghost()
@@ -519,58 +508,213 @@ impl MiniPlayer {
                             ),
                     ),
             )
-            .child({
-                let playback = self.playback.clone();
-                div()
-                    .id("mini-progress")
-                    .absolute()
-                    .left(px(TRACK_LEFT))
-                    .right(px(BAR_INSET))
-                    .bottom(px(BAR_EDGE))
-                    .h(px(BAR_HIT))
-                    .role(gpui::accesskit::Role::Slider)
-                    .aria_label(t!("song-position"))
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                        cx.stop_propagation();
-                        let width = window.viewport_size().width;
-                        let left = px(TRACK_LEFT);
-                        let right = width - px(BAR_INSET);
-                        let span = (right - left).max(px(1.));
-                        let ratio = ((event.position.x - left) / span).clamp(0., 1.);
-                        let duration = playback
-                            .read(cx)
-                            .track()
-                            .map(|track| track.duration)
-                            .unwrap_or_default();
-                        if duration.is_zero() {
-                            return;
-                        }
-                        playback.update(cx, |playback, cx| {
-                            playback.seek(duration.mul_f32(ratio), cx)
-                        });
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .right(px(0.))
-                            .top(px(BAR_LINE))
-                            .h(px(BAR_WEIGHT))
-                            .rounded_full()
-                            .bg(theme.foreground.opacity(0.12)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(BAR_LINE))
-                            .h(px(BAR_WEIGHT))
-                            .w(relative(ratio))
-                            .rounded_full()
-                            .bg(theme.primary),
-                    )
+            .when(!self.expanded, |this| this.child(self.bar_progress(cx)))
+    }
+
+    fn shuffle_button(&self, id: &'static str, cx: &mut Context<Self>) -> Button {
+        let theme = *cx.theme();
+        let shuffle = self.playback.read(cx).shown_shuffle(cx);
+        let playback = self.playback.clone();
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon("icons/shuffle.svg")
+            .tooltip_above("player-shuffle")
+            .selected(shuffle)
+            .tint(match shuffle {
+                true => theme.primary,
+                false => theme.muted_foreground,
             })
+            .on_click(move |_, _, cx| {
+                playback.update(cx, |playback, cx| playback.toggle_shuffle(cx))
+            })
+    }
+
+    fn bar_progress(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
+        let playback = self.playback.read(cx);
+        let (position, duration) = playback.shown_time(cx);
+        let ratio = match duration.as_secs_f32() > 0. {
+            true => (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.),
+            false => 0.,
+        };
+        let playback = self.playback.clone();
+
+        div()
+            .id("mini-progress")
+            .absolute()
+            .left(px(TRACK_LEFT))
+            .right(px(BAR_INSET))
+            .bottom(px(BAR_EDGE))
+            .h(px(BAR_HIT))
+            .role(gpui::accesskit::Role::Slider)
+            .aria_label(t!("song-position"))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                cx.stop_propagation();
+                let width = window.viewport_size().width;
+                let left = px(TRACK_LEFT);
+                let right = width - px(BAR_INSET);
+                let span = (right - left).max(px(1.));
+                let ratio = ((event.position.x - left) / span).clamp(0., 1.);
+                let duration = playback
+                    .read(cx)
+                    .track()
+                    .map(|track| track.duration)
+                    .unwrap_or_default();
+                if duration.is_zero() {
+                    return;
+                }
+                playback.update(cx, |playback, cx| {
+                    playback.seek(duration.mul_f32(ratio), cx)
+                });
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .right(px(0.))
+                    .top(px(BAR_LINE))
+                    .h(px(BAR_WEIGHT))
+                    .rounded_full()
+                    .bg(theme.foreground.opacity(0.12)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(BAR_LINE))
+                    .h(px(BAR_WEIGHT))
+                    .w(relative(ratio))
+                    .rounded_full()
+                    .bg(theme.primary),
+            )
+    }
+
+    fn seek_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let (elapsed, total) = self.playback.read(cx).shown_time(cx);
+        let base = match total.as_secs_f32() > 0. {
+            true => (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0., 1.),
+            false => 0.,
+        };
+        let fraction = self.pending_seek.unwrap_or(base);
+        let shown = total.mul_f32(fraction);
+        let caption = |text: SharedString, align_end: bool| {
+            div()
+                .w(px(32.))
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(px(CAPTION_SIZE))
+                .font_features(tabular())
+                .text_color(theme.muted_foreground)
+                .when_else(align_end, |this| this.text_right(), |this| this.text_left())
+                .child(text)
+        };
+
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(ROW_PAD))
+            .pt(px(2.))
+            .child(caption(clock(shown), true))
+            .child(
+                div().flex_1().min_w_0().child(
+                    Scrubber::new(&self.seek, fraction)
+                        .name(t!("song-position"))
+                        .value(clock(shown))
+                        .colors(
+                            theme.progress_bar,
+                            theme.foreground.opacity(0.12),
+                            theme.foreground,
+                        )
+                        .enabled(!total.is_zero())
+                        .on_move(cx.listener(|this, fraction: &f32, _, cx| {
+                            this.pending_seek = Some(*fraction);
+                            cx.notify();
+                        }))
+                        .on_release(cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                            let Some(fraction) = this.pending_seek.take() else {
+                                return;
+                            };
+                            this.playback
+                                .update(cx, |playback, cx| playback.seek_fraction(fraction, cx));
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(caption(clock(total), false))
+            .into_any_element()
+    }
+
+    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let (volume, muted) = {
+            let playback = self.playback.read(cx);
+            (playback.shown_volume(cx), playback.muted(cx))
+        };
+        let volume = match muted {
+            true => 0.,
+            false => volume,
+        };
+        let percent = SharedString::from(format!("{}%", (volume * 100.).round() as i32));
+        let playback = self.playback.clone();
+
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(ROW_PAD))
+            .pt(px(2.))
+            .child(self.shuffle_button("mini-shuffle-foot", cx))
+            .child(play_mode(&self.playback, false, cx))
+            .child(div().flex_1())
+            .child(
+                Button::new("mini-mute")
+                    .ghost()
+                    .small()
+                    .icon(match muted {
+                        true => "icons/volume-x.svg",
+                        false => "icons/volume-2.svg",
+                    })
+                    .tooltip_above(match muted {
+                        true => "player-unmute",
+                        false => "player-mute",
+                    })
+                    .on_click(move |_, _, cx| {
+                        playback.update(cx, |playback, cx| playback.toggle_muted(cx))
+                    }),
+            )
+            .child(
+                div().w(px(88.)).child(
+                    Scrubber::new(&self.volume, volume)
+                        .name(t!("player-volume"))
+                        .value(percent.clone())
+                        .colors(
+                            theme.progress_bar,
+                            theme.foreground.opacity(0.12),
+                            theme.foreground,
+                        )
+                        .on_move(cx.listener(|this, fraction: &f32, _, cx| {
+                            this.playback
+                                .update(cx, |playback, cx| playback.set_volume(*fraction, cx));
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .w(px(34.))
+                    .flex_none()
+                    .text_right()
+                    .text_size(px(CAPTION_SIZE))
+                    .font_features(tabular())
+                    .text_color(theme.muted_foreground)
+                    .child(percent),
+            )
+            .into_any_element()
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -590,7 +734,7 @@ impl MiniPlayer {
             .px(px(ROW_PAD))
             .text_size(px(CAPTION_SIZE))
             .text_color(theme.muted_foreground)
-            .child(t!("queue-title"))
+            .child(t!("mini-queue"))
             .child(SharedString::from(total.to_string()));
 
         let body = match total {
@@ -643,6 +787,8 @@ impl MiniPlayer {
             .pb(px(ROW_PAD))
             .child(header)
             .child(body)
+            .child(self.seek_row(cx))
+            .child(self.footer(cx))
             .into_any_element()
     }
 
@@ -690,8 +836,8 @@ impl MiniPlayer {
             .px(px(ROW_PAD))
             .rounded(px(6.))
             .text_color(theme.foreground)
-            .when(current, |this| this.bg(theme.secondary))
-            .hover(|this| this.bg(theme.secondary_hover))
+            .when(current, |this| this.bg(theme.table_active))
+            .hover(|this| this.bg(theme.table_hover))
             .cursor_pointer()
             .on_click(move |_, _, cx| {
                 let Some(uid) = uid.clone() else {
@@ -744,6 +890,17 @@ impl MiniPlayer {
 impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window(window, cx);
+        if !self.watched {
+            self.watched = true;
+            cx.observe_window_bounds(window, |this, window, _cx| {
+                // Track the user's own placement only while folded at the folded size, so a
+                // late resize from a fold cannot move the anchor.
+                if !this.expanded && window.viewport_size().height <= px(BAR + 1.) {
+                    this.collapsed = window.bounds().origin;
+                }
+            })
+            .detach();
+        }
         let theme = *cx.theme();
 
         div().size_full().child(
