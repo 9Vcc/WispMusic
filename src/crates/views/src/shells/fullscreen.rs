@@ -13,9 +13,9 @@ use gpui::{
 use gpui::{Div, ElementId, Window, anchored, canvas, deferred, div, phi, point, px, svg};
 use i18n::t;
 use input::{
-    ToggleFullscreen, ToggleLyrics, ToggleQueue, ToggleWindowFullscreen, WORKSPACE_CONTEXT,
+    ToggleLyrics, ToggleQueue, ToggleWindowFullscreen, WORKSPACE_CONTEXT,
 };
-use router::{Destination, navigate};
+use router::{Destination, back, navigate};
 use state::{ Lyrics, AppSettings, Cover, FullscreenControlsAutohide, Playback, Queue, SideTab, Wisp};
 use ui::{
     ActiveTheme as _, Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Modal, Motion,
@@ -1203,7 +1203,7 @@ impl FullscreenView {
         div()
             .absolute()
             .left(px(14.))
-            .top(theme.metrics.title_bar + px(8.))
+            .top(theme.metrics.title_bar)
             .opacity(1. - idle)
             .child(
                 Button::new("lyrics-collapse")
@@ -1212,9 +1212,9 @@ impl FullscreenView {
                     .small()
                     .icon("icons/chevron-down.svg")
                     .tooltip_trailing("lyric-collapse")
-                    .on_click(|_, window, cx| {
+                    .on_click(|_, _, cx| {
                         cx.stop_propagation();
-                        window.dispatch_action(Box::new(ToggleFullscreen), cx);
+                        back(cx);
                     }),
             )
             .into_any_element()
@@ -1941,8 +1941,8 @@ impl FullscreenView {
                     .small()
                     .icon("icons/minimize.svg")
                     .tooltip_above("player-fullscreen-leave")
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(ToggleFullscreen), cx)
+                    .on_click(|_, _, cx| {
+                        back(cx)
                     });
                 let leave = match swap {
                     ShellSwap::Opening => deferred(leave).into_any_element(),

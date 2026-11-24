@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui::{Window, deferred, div, px};
 use i18n::t;
-use input::{ToggleFullscreen, ToggleLyrics, ToggleQueue};
+use input::{ToggleLyrics, ToggleQueue};
 use state::{AppSettings, Playback, PlayerBarLayout, Queue, SideTab, Wisp};
 use ui::{
     Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Perch, Pinnable, Popup, Room,
@@ -211,8 +211,9 @@ impl PlayerBar {
             .tooltip_above("player-fullscreen")
             // 用按下而不是合成的点击：切歌瞬间的封面飞行动画会重建元素，
             // 松开时的 click 偶尔落到已被替换的元素上，全屏就偶现不响应。
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.dispatch_action(Box::new(ToggleFullscreen), cx)
+            // 直接走路由，不经过焦点上的 action 派发，搜索输入等焦点不会吞掉它。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                navigate(Destination::Fullscreen, cx)
             });
         match cx.try_global::<ShellSwap>().copied().unwrap_or_default() {
             ShellSwap::Closing => deferred(button).into_any_element(),
@@ -268,8 +269,8 @@ impl PlayerBar {
             .when_some(track.and_then(|track| track.pin()), Pinnable::pin)
             // [wisp] 点封面进全屏播放器；专辑页改由点歌名进（见 track_details）。
             .when(track.is_some(), |this| {
-                this.cursor_pointer().on_mouse_down(MouseButton::Left, |_, window, cx| {
-                    window.dispatch_action(Box::new(ToggleFullscreen), cx)
+                this.cursor_pointer().on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    navigate(Destination::Fullscreen, cx)
                 })
             })
             .when_some(album, |this, album| this.aria_label(album))
