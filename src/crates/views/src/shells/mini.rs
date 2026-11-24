@@ -48,6 +48,8 @@ const ROW_PAD: f32 = 6.;
 const HEAD: f32 = 24.;
 /// How long the queue takes to grow out of the bar.
 const REVEAL: Duration = Duration::from_millis(300);
+/// How long the folded card takes to go from solid back to its normal translucent fill.
+const SETTLE: Duration = Duration::from_millis(240);
 
 #[derive(Clone, Copy)]
 struct MiniSession {
@@ -294,6 +296,8 @@ struct MiniPlayer {
     folding: bool,
     /// Whether the fold's height animation has started, after the solid card has painted.
     fold_started: bool,
+    /// Whether the folded card is fading from solid back to its normal fill.
+    settling: bool,
     /// Restarts the card's height animation on every fold.
     epoch: u64,
     /// Shrinks the window after a fold; the card itself animates inside the still-expanded
@@ -329,6 +333,7 @@ impl MiniPlayer {
             panel: false,
             folding: false,
             fold_started: false,
+            settling: false,
             epoch: 0,
             finish: None,
             scroll: UniformListScrollHandle::new(),
@@ -371,6 +376,7 @@ impl MiniPlayer {
             self.panel = true;
             self.finish = None;
             self.fold_started = false;
+            self.settling = false;
             if self.folding {
                 self.folding = false;
                 restore_material(window, cx);
@@ -470,14 +476,27 @@ impl MiniPlayer {
             if !finished {
                 return;
             }
-            // Bring the material back before the card turns translucent again, so the folded
-            // bar never paints one frame over the bare desktop. The card stays solid while
-            // the material settles, then takes its normal translucent fill.
+            // Bring the material back while the card is still solid, then ease the card from its
+            // solid fill back to the translucent one; the change never happens in one frame.
             handle
                 .update(cx, |_, window, cx| restore_material(window, cx))
                 .ok();
+            let settling = this
+                .update(cx, |this, cx| {
+                    if this.epoch == epoch && !this.expanded && this.panel {
+                        this.settling = true;
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if !settling {
+                return;
+            }
             cx.background_executor()
-                .timer(Duration::from_millis(40))
+                .timer(SETTLE + Duration::from_millis(20))
                 .await;
             this.update(cx, |this, cx| {
                 if this.epoch == epoch && !this.expanded {
@@ -485,6 +504,7 @@ impl MiniPlayer {
                     this.pending_seek = None;
                     this.folding = false;
                     this.fold_started = false;
+                    this.settling = false;
                     cx.notify();
                 }
             })
@@ -1026,6 +1046,20 @@ impl Render for MiniPlayer {
             .when(self.panel, |this| this.child(self.panel(cx)));
         let card = match self.panel {
             false => card.h(px(BAR)).into_any_element(),
+            true if self.settling => {
+                let solid = gpui::Hsla {
+                    a: 1.,
+                    ..theme.background
+                };
+                let normal = theme.background;
+                card.h(px(BAR))
+                    .with_animation(
+                        SharedString::from(format!("mini-settle-{}-{}", self.epoch, self.expanded)),
+                        Animation::new(SETTLE).with_easing(ui::ease_out_cubic),
+                        move |this, delta| this.bg(ui::mix(solid, normal, delta)),
+                    )
+                    .into_any_element()
+            }
             true if self.folding && !self.fold_started => {
                 // Solid at full height for one frame, so turning the material off cannot
                 // expose a translucent strip before the fold starts.
