@@ -24,7 +24,7 @@ use crate::shared::transport::{next, play_mode, previous, toggle};
 
 const WIDTH: f32 = 360.;
 const BAR: f32 = 72.;
-const EXPANDED: f32 = 360.;
+const EXPANDED: f32 = 400.;
 /// Matches the system corner radius DWM gives a rounded window.
 const CARD_RADIUS: f32 = 8.;
 /// The card's inner spacing, cover and type, all fixed with the window.
@@ -216,6 +216,37 @@ fn surface(window: &mut Window) {
     window.refresh();
 }
 
+/// Resizes from the top-left only. The platform's own `resize` goes through an async task,
+/// which queues behind itself when an animation asks for a new height every frame; this
+/// applies the size at once and keeps the drag anchor fixed.
+#[cfg(target_os = "windows")]
+fn resize_window(window: &mut Window, height: f32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    };
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let scale = window.scale_factor();
+    unsafe {
+        SetWindowPos(
+            handle,
+            std::ptr::null_mut(),
+            0,
+            0,
+            (WIDTH * scale).round() as i32,
+            (height * scale).round() as i32,
+            SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+    window.refresh();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resize_window(window: &mut Window, height: f32) {
+    window.resize(size(px(WIDTH), px(height)));
+}
+
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
 fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
     let displays = cx.displays();
@@ -338,9 +369,7 @@ impl MiniPlayer {
                 let t = (began.elapsed().as_secs_f32() / REVEAL.as_secs_f32()).clamp(0., 1.);
                 let height = start + (target - start) * ui::ease_out_cubic(t);
                 handle
-                    .update(cx, |_, window, _| {
-                        window.resize(size(px(WIDTH), px(height)));
-                    })
+                    .update(cx, |_, window, _| resize_window(window, height))
                     .ok();
                 if t >= 1. {
                     break;
@@ -401,7 +430,6 @@ impl MiniPlayer {
                     .gap(px(GAP))
                     .pl(px(PAD))
                     .pr(px(GAP))
-                    .pb(px(BAR_HIT + 2.))
                     .child(
                         Artwork::new(cover)
                             .size(px(COVER))
