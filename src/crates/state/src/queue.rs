@@ -131,7 +131,18 @@ impl Queue {
         if self.order.provider() != next.as_deref() {
             self.removed = None;
         }
-        self.edit(cx, |order| order.switch_provider(next));
+        let before = self.order.revision();
+        let was_empty = self.order.is_empty();
+        self.order.switch_provider(next);
+        if self.order.revision() != before {
+            // Switching an empty order is startup (or a sign-out already without a queue):
+            // saving here would write `resume: None` and erase the queue the last run left for
+            // the provider before playback has a chance to adopt it.
+            if !was_empty {
+                self.remember(cx);
+            }
+            cx.notify();
+        }
     }
 
     pub(crate) fn revive(&mut self, resume: Resume, cx: &mut Context<Self>) -> Option<Track> {
