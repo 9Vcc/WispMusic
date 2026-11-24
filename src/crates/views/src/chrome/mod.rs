@@ -1,5 +1,6 @@
 mod aside;
 mod lyrics_effects;
+mod stroke_lyrics;
 mod notice;
 mod output_picker;
 mod player_bar;

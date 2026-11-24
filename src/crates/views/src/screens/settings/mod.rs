@@ -99,6 +99,7 @@ enum Slot {
     DistanceScaleLyrics,
     BreathingLyrics,
     GapDotsLyrics,
+    StrokeLyrics,
     ParallaxLyrics,
     LyricsMotion,
     Romanized,
@@ -844,6 +845,10 @@ impl SettingsView {
                 t!("settings-gap-dots-lyrics"),
                 t!("settings-gap-dots-lyrics-detail"),
             ),
+            Slot::StrokeLyrics => (
+                t!("settings-stroke-lyrics"),
+                t!("settings-stroke-lyrics-detail"),
+            ),
             Slot::ParallaxLyrics => (
                 t!("settings-parallax-lyrics"),
                 t!("settings-parallax-lyrics-detail"),
@@ -1037,6 +1042,7 @@ impl SettingsView {
             Slot::DistanceScaleLyrics => self.distance_scale_lyrics_row(cx),
             Slot::BreathingLyrics => self.breathing_lyrics_row(cx),
             Slot::GapDotsLyrics => self.gap_dots_lyrics_row(cx),
+            Slot::StrokeLyrics => self.stroke_lyrics_row(cx),
             Slot::ParallaxLyrics => self.parallax_lyrics_row(cx),
             Slot::LyricsMotion => self.lyrics_motion_row(cx),
             Slot::Font => self.font_row(cx),

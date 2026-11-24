@@ -26,6 +26,9 @@ The binary embeds:
 - Solar Icon Set, Linear style — CC BY 4.0 by 480 Design, `assets/icons/solar/LICENSE`
 - Simple Icons brand marks — CC0 1.0, `assets/icons/common/LICENSE`
 - Tabler Icons login marks — MIT License, `assets/icons/common/TABLER-LICENSE`
+- 汉字笔画数据（运行时按字从 `hanzi-writer-data@2.0.1` 拉取，源自 Make Me a Hanzi）—
+  Arphic Public License；来源 <https://github.com/skishore/makemeahanzi> 与
+  <https://github.com/chanind/hanzi-writer-data>。仅用于笔画歌词动效，未打包进二进制。
 
 Several dependencies are covered by the Mozilla Public License 2.0 — notably the
 Symphonia decoders, `option-ext` and `priority-queue`. They are used unmodified;

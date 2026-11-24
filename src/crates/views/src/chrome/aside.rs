@@ -35,6 +35,7 @@ use crate::shared::menus::ItemMenu;
 use crate::shared::pins::Pinned as _;
 use crate::shared::{effects, quiet};
 use super::lyrics_effects::parallax_offset;
+use super::stroke_lyrics::StrokeLyrics;
 
 const QUEUE: &str = "queue";
 /// How many text heights across the picture of whoever queued a song is.
@@ -223,6 +224,7 @@ pub(crate) struct Aside {
     playback: Entity<Playback>,
     lyrics: Entity<Lyrics>,
     settings: Entity<AppSettings>,
+    stroke: Entity<StrokeLyrics>,
     tab: SideTab,
     motion_preset: LyricMotionPreset,
     spectrum_listener: Option<Listening>,
@@ -338,6 +340,9 @@ impl Aside {
         let lyrics = Wisp::global(cx).lyrics.clone();
         cx.observe(&lyrics, |_, _, cx| cx.notify()).detach();
         let settings = Wisp::global(cx).settings.clone();
+        let stroke = cx.new(|cx| {
+            StrokeLyrics::new(lyrics.clone(), playback.clone(), settings.clone(), cx)
+        });
         let motion_preset = settings.read(cx).lyrics_motion_preset();
         cx.observe(&settings, |this, settings, cx| {
             if !settings.read(cx).breathing_lyrics() {
@@ -367,6 +372,7 @@ impl Aside {
             playback,
             lyrics,
             settings,
+            stroke,
             tab,
             motion_preset,
             spectrum_listener: None,
@@ -1221,6 +1227,21 @@ impl Aside {
     }
 
     fn verses(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.tab == SideTab::Lyrics
+            && self.settings.read(cx).stroke_lyrics()
+            && self
+                .lyrics
+                .read(cx)
+                .current()
+                .is_some_and(|hit| matches!(&hit.lyrics, music::Lyrics::Synced { .. }))
+        {
+            return div()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .child(self.stroke.clone())
+                .into_any_element();
+        }
         if self.settings.read(cx).breathing_lyrics() && self.spectrum_listener.is_none() {
             if let Some(spectrum) = self.playback.read(cx).spectrum(cx) {
                 self.spectrum_listener = Some(spectrum.listen());

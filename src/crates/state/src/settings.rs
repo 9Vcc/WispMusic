@@ -426,6 +426,8 @@ struct Values {
     distance_scale_lyrics: bool,
     breathing_lyrics: bool,
     gap_dots_lyrics: bool,
+    /// 笔画歌词动效：当前句逐字按笔画飞入，句尾散开。
+    stroke_lyrics: bool,
     parallax_lyrics: bool,
     lyrics_motion_preset: LyricMotionPreset,
     romanized_lyrics: bool,
@@ -694,6 +696,7 @@ impl Default for Values {
             distance_scale_lyrics: false,
             breathing_lyrics: false,
             gap_dots_lyrics: false,
+            stroke_lyrics: false,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
             romanized_lyrics: true,
@@ -1328,6 +1331,10 @@ impl AppSettings {
 
     pub fn gap_dots_lyrics(&self) -> bool {
         self.values.gap_dots_lyrics
+    }
+
+    pub fn stroke_lyrics(&self) -> bool {
+        self.values.stroke_lyrics
     }
 
     pub fn parallax_lyrics(&self) -> bool {
@@ -1969,6 +1976,11 @@ impl AppSettings {
 
     pub fn set_gap_dots_lyrics(&mut self, dots: bool, cx: &mut Context<Self>) {
         self.values.gap_dots_lyrics = dots;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_stroke_lyrics(&mut self, stroke: bool, cx: &mut Context<Self>) {
+        self.values.stroke_lyrics = stroke;
         self.schedule_save(cx);
     }
 
@@ -3484,6 +3496,7 @@ mod tests {
         assert!(!values.distance_scale_lyrics);
         assert!(!values.breathing_lyrics);
         assert!(!values.gap_dots_lyrics);
+        assert!(!values.stroke_lyrics);
         assert!(!values.parallax_lyrics);
         assert_eq!(values.lyrics_motion_preset, LyricMotionPreset::Wisp);
 

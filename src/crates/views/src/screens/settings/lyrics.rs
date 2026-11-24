@@ -48,6 +48,7 @@ impl SettingsView {
                     Slot::DistanceScaleLyrics,
                     Slot::BreathingLyrics,
                     Slot::GapDotsLyrics,
+                    Slot::StrokeLyrics,
                     Slot::ParallaxLyrics,
                     Slot::LyricsMotion,
                 ]),
@@ -568,6 +569,16 @@ impl SettingsView {
             "settings-gap-dots-lyrics",
             self.settings.read(cx).gap_dots_lyrics(),
             AppSettings::set_gap_dots_lyrics,
+            cx,
+        )
+    }
+
+    pub(super) fn stroke_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.lyrics_effect_row(
+            "stroke-lyrics",
+            "settings-stroke-lyrics",
+            self.settings.read(cx).stroke_lyrics(),
+            AppSettings::set_stroke_lyrics,
             cx,
         )
     }
