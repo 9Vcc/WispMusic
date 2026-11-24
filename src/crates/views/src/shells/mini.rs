@@ -1001,9 +1001,13 @@ impl Render for MiniPlayer {
         self.sync_window(window, cx);
         let theme = *cx.theme();
         // Folding hides the window material to keep the uncovered strip empty; the card goes
-        // solid for that pass so no desktop shows through it.
+        // solid for that pass so no desktop shows through it. `opacity(1.)` multiplies the
+        // current alpha, so the page colour's alpha has to be replaced outright.
         let fill = match self.folding {
-            true => theme.background.opacity(1.),
+            true => gpui::Hsla {
+                a: 1.,
+                ..theme.background
+            },
             false => theme.background,
         };
         let card = div()
