@@ -42,6 +42,10 @@ impl QueueView {
         self.queue.read(cx).kind(position)
     }
 
+    pub fn uid(&self, position: QueuePosition, cx: &App) -> Option<String> {
+        self.queue.read(cx).uid(position).map(str::to_owned)
+    }
+
     pub fn track(&self, position: QueuePosition, cx: &App) -> Option<Track> {
         let queue = self.queue.read(cx);
         match position {

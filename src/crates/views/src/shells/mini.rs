@@ -3,37 +3,46 @@
 //! It lives in its own borderless window: a tool window on Windows, so it stays out of the
 //! taskbar. Entering it hides the main window. The restore button brings the main window back
 //! and closes this one; the close button only hides this one, and the tray brings it back,
-//! which matches the old mini player.
+//! which matches the old mini player. Its fill follows the window's opacity, and the window
+//! asks for a blurred desktop when blurring is on. The list expands to the live queue.
+
+use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Bounds, Context, Entity, Global, IntoElement, MouseButton, Render,
-    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div,
-    point, px, relative, size,
+    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, IntoElement, MouseButton,
+    Pixels, Point, Render, ScrollStrategy, SharedString, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, relative,
+    size, svg, uniform_list,
 };
 use i18n::t;
-use state::{AppSettings, Playback, Wisp};
-use ui::{ActiveTheme as _, Artwork, Button};
+use state::{AppSettings, Playback, QueuePosition, Wisp};
+use ui::{ActiveTheme as _, Artwork, Button, clock};
 
 use crate::shared::transport::{next, previous, toggle};
 
 const WIDTH: f32 = 360.;
-const HEIGHT: f32 = 72.;
+const BAR: f32 = 72.;
+const EXPANDED: f32 = 360.;
 /// The transparent margin between the window and its rounded card.
-const FRAME: f32 = 4.;
+const CARD_RADIUS: f32 = 14.;
 /// The card's inner spacing, cover and type, all fixed with the window.
 const PAD: f32 = 12.;
 const GAP: f32 = 8.;
 const COVER: f32 = 44.;
 const COVER_RADIUS: f32 = 8.;
-const CARD_RADIUS: f32 = 14.;
 const TITLE_SIZE: f32 = 13.;
 const CAPTION_SIZE: f32 = 11.;
-/// The seek bar's inset inside the card, its hit height, and the line inside that.
+/// The seek bar's inset inside the bar, its hit height, and the line inside that.
 const BAR_INSET: f32 = 12.;
+const BAR_EDGE: f32 = 4.;
 const BAR_HIT: f32 = 10.;
 const BAR_LINE: f32 = 4.;
 const BAR_WEIGHT: f32 = 3.;
+/// The expanded queue's row height, side padding and heading.
+const ROW: f32 = 32.;
+const ROW_PAD: f32 = 6.;
+const HEAD: f32 = 24.;
 
 #[derive(Clone, Copy)]
 struct MiniSession {
@@ -63,13 +72,20 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
     );
     let playback = Wisp::global(cx).playback.clone();
     let settings = Wisp::global(cx).settings.clone();
+    let acrylic = {
+        let settings = settings.read(cx);
+        settings.transparent() && settings.blur_window()
+    };
     let Ok(opened) = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin,
-                size: size(px(WIDTH), px(HEIGHT)),
+                size: size(px(WIDTH), px(BAR)),
             })),
-            window_background: WindowBackgroundAppearance::Transparent,
+            window_background: match acrylic {
+                true => WindowBackgroundAppearance::Blurred,
+                false => WindowBackgroundAppearance::Transparent,
+            },
             kind: WindowKind::PopUp,
             titlebar: None,
             is_resizable: false,
@@ -187,8 +203,83 @@ fn surface(window: &mut Window) {
     window.refresh();
 }
 
+#[cfg(target_os = "windows")]
+fn round_window(window: &Window, width: Pixels, height: Pixels, scale: f32) {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let width = (width.as_f32() * scale).round() as i32;
+    let height = (height.as_f32() * scale).round() as i32;
+    let radius = (CARD_RADIUS * scale).round() as i32;
+    unsafe {
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+        if !region.is_null() {
+            SetWindowRgn(handle, region, 1);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn place(window: &Window, origin: Point<Pixels>, height: f32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let scale = window.scale_factor();
+    unsafe {
+        SetWindowPos(
+            handle,
+            std::ptr::null_mut(),
+            (origin.x.as_f32() * scale).round() as i32,
+            (origin.y.as_f32() * scale).round() as i32,
+            (WIDTH * scale).round() as i32,
+            (height * scale).round() as i32,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn place(window: &mut Window, _origin: Point<Pixels>, height: f32) {
+    window.resize(size(px(WIDTH), px(height)));
+}
+
+/// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
+fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
+    let displays = cx.displays();
+    let area = displays
+        .iter()
+        .find(|display| display.visible_bounds().contains(&frame.center()))
+        .or_else(|| displays.first())
+        .map(|display| display.visible_bounds());
+    let Some(area) = area else {
+        return frame.origin;
+    };
+    let mut origin = frame.origin;
+    origin.x = origin.x.clamp(
+        area.origin.x,
+        (area.origin.x + area.size.width - px(WIDTH)).max(area.origin.x),
+    );
+    origin.y = origin.y.max(area.origin.y);
+    if origin.y + px(EXPANDED) > area.origin.y + area.size.height {
+        origin.y = (area.origin.y + area.size.height - px(EXPANDED)).max(area.origin.y);
+    }
+    origin
+}
+
 struct MiniPlayer {
     playback: Entity<Playback>,
+    settings: Entity<AppSettings>,
+    expanded: bool,
+    /// The collapsed window's place, to return to when the queue folds.
+    resting: Option<Point<Pixels>>,
+    /// The queue's scroll, kept between renders so it does not jump to the top.
+    scroll: UniformListScrollHandle,
+    /// What the window background was last told, so it changes only with the settings.
+    acrylic: Option<bool>,
+    #[cfg(target_os = "windows")]
+    shape: Option<(f32, f32, f32)>,
 }
 
 impl MiniPlayer {
@@ -198,15 +289,78 @@ impl MiniPlayer {
         cx: &mut Context<Self>,
     ) -> Self {
         let ticks = playback.read(cx).ticks().clone();
+        let queue = Wisp::global(cx).queue.clone();
         cx.observe(&ticks, |_, _, cx| cx.notify()).detach();
         cx.observe(&playback, |_, _, cx| cx.notify()).detach();
+        cx.observe(&queue, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
-        Self { playback }
+        Self {
+            playback,
+            settings,
+            expanded: false,
+            resting: None,
+            scroll: UniformListScrollHandle::new(),
+            acrylic: None,
+            #[cfg(target_os = "windows")]
+            shape: None,
+        }
     }
-}
 
-impl Render for MiniPlayer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Keeps the window's own background and rounded shape in step with the settings and size.
+    fn sync_window(&mut self, window: &mut Window, cx: &App) {
+        let acrylic = {
+            let settings = self.settings.read(cx);
+            settings.transparent() && settings.blur_window()
+        };
+        if self.acrylic != Some(acrylic) {
+            self.acrylic = Some(acrylic);
+            window.set_background_appearance(match acrylic {
+                true => WindowBackgroundAppearance::Blurred,
+                false => WindowBackgroundAppearance::Transparent,
+            });
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let size = window.viewport_size();
+            let scale = window.scale_factor();
+            let key = (scale, size.width.as_f32(), size.height.as_f32());
+            if self.shape != Some(key) {
+                self.shape = Some(key);
+                round_window(window, size.width, size.height, scale);
+            }
+        }
+    }
+
+    fn set_expanded(&mut self, expanded: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.expanded == expanded {
+            return;
+        }
+        let frame = window.bounds();
+        let (origin, height) = match expanded {
+            true => {
+                self.resting = Some(frame.origin);
+                (room(frame, cx), EXPANDED)
+            }
+            false => (self.resting.take().unwrap_or(frame.origin), BAR),
+        };
+        place(window, origin, height);
+        window.refresh();
+        self.expanded = expanded;
+        #[cfg(target_os = "windows")]
+        {
+            self.shape = None;
+        }
+        if expanded {
+            let sections = self.playback.read(cx).shown_queue(cx).sections;
+            if sections.current {
+                self.scroll
+                    .scroll_to_item(sections.past, ScrollStrategy::Center);
+            }
+        }
+        cx.notify();
+    }
+
+    fn bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         let playback = self.playback.read(cx);
         let track = playback.shown_track(cx);
@@ -226,144 +380,345 @@ impl Render for MiniPlayer {
             false => 0.,
         };
 
-        div().size_full().p(px(FRAME)).child(
+        div()
+            .id("mini-bar")
+            .relative()
+            .flex_none()
+            .h(px(BAR))
+            .w_full()
+            .window_control_area(gpui::WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.start_window_move();
+            })
+            .child(
+                div()
+                    .flex()
+                    .h_full()
+                    .items_center()
+                    .gap(px(GAP))
+                    .pl(px(PAD))
+                    .pr(px(GAP))
+                    .pb(px(BAR_HIT + 2.))
+                    .child(
+                        Artwork::new(cover)
+                            .size(px(COVER))
+                            .corner_radius(px(COVER_RADIUS)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(TITLE_SIZE))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.popover_foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(CAPTION_SIZE))
+                                    .text_color(theme.muted_foreground)
+                                    .child(artist),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .child(previous(&self.playback, false, cx))
+                            .child(toggle(&self.playback, false, false, cx))
+                            .child(next(&self.playback, false, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .child(
+                                Button::new("mini-expand")
+                                    .ghost()
+                                    .small()
+                                    .icon("icons/list-music.svg")
+                                    .tooltip_above(match self.expanded {
+                                        true => "mini-collapse",
+                                        false => "mini-expand",
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.set_expanded(!this.expanded, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("mini-restore")
+                                    .ghost()
+                                    .small()
+                                    .icon("icons/square-arrow-out-up-right.svg")
+                                    .tooltip_above("mini-restore")
+                                    .on_click(|_, window, cx| {
+                                        cx.stop_propagation();
+                                        leave(window, cx);
+                                    }),
+                            )
+                            .child(
+                                Button::new("mini-close")
+                                    .ghost()
+                                    .small()
+                                    .icon("icons/x.svg")
+                                    .tooltip_above("mini-close")
+                                    .on_click(|_, window, _| hide_native(window)),
+                            ),
+                    ),
+            )
+            .child({
+                let playback = self.playback.clone();
+                div()
+                    .id("mini-progress")
+                    .absolute()
+                    .left(px(BAR_INSET))
+                    .right(px(BAR_INSET))
+                    .bottom(px(BAR_EDGE))
+                    .h(px(BAR_HIT))
+                    .role(gpui::accesskit::Role::Slider)
+                    .aria_label(t!("song-position"))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        cx.stop_propagation();
+                        let width = window.viewport_size().width;
+                        let left = px(BAR_INSET);
+                        let right = width - px(BAR_INSET);
+                        let span = (right - left).max(px(1.));
+                        let ratio = ((event.position.x - left) / span).clamp(0., 1.);
+                        let duration = playback
+                            .read(cx)
+                            .track()
+                            .map(|track| track.duration)
+                            .unwrap_or_default();
+                        if duration.is_zero() {
+                            return;
+                        }
+                        playback.update(cx, |playback, cx| {
+                            playback.seek(duration.mul_f32(ratio), cx)
+                        });
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .right(px(0.))
+                            .top(px(BAR_LINE))
+                            .h(px(BAR_WEIGHT))
+                            .rounded_full()
+                            .bg(theme.border),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(BAR_LINE))
+                            .h(px(BAR_WEIGHT))
+                            .w(relative(ratio))
+                            .rounded_full()
+                            .bg(theme.popover_foreground),
+                    )
+            })
+    }
+
+    fn panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let listing = self.playback.read(cx).shown_queue(cx);
+        let sections = listing.sections.clone();
+        let past = sections.past;
+        let current = sections.current;
+        let total = past + usize::from(current) + sections.upcoming;
+
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .h(px(HEAD))
+            .px(px(ROW_PAD))
+            .text_size(px(CAPTION_SIZE))
+            .text_color(theme.muted_foreground)
+            .child(t!("queue-title"))
+            .child(SharedString::from(total.to_string()));
+
+        let body = match total {
+            0 => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(TITLE_SIZE))
+                .text_color(theme.muted_foreground)
+                .child(t!("queue-empty"))
+                .into_any_element(),
+            _ => div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(
+                    uniform_list(
+                        "mini-queue",
+                        total,
+                        cx.processor(move |this, range: Range<usize>, _window, cx| {
+                            range
+                                .map(|index| {
+                                    let position = match index {
+                                        at if at < past => QueuePosition::Past(at),
+                                        at if current && at == past => QueuePosition::Current,
+                                        at => QueuePosition::Upcoming(
+                                            at - past - usize::from(current),
+                                        ),
+                                    };
+                                    this.row(index, position, &listing, cx)
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.scroll)
+                    .size_full(),
+                )
+                .into_any_element(),
+        };
+
+        div()
+            .id("mini-panel")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .px(px(ROW_PAD))
+            .pb(px(ROW_PAD))
+            .child(header)
+            .child(body)
+            .into_any_element()
+    }
+
+    fn row(
+        &self,
+        index: usize,
+        position: QueuePosition,
+        listing: &state::QueueView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(track) = listing.track(position, cx) else {
+            return div().into_any_element();
+        };
+        let uid = listing.uid(position, cx);
+        let current = position == QueuePosition::Current;
+        let theme = *cx.theme();
+        let playback = self.playback.clone();
+        let name = SharedString::from(track.name.clone());
+        let artists = SharedString::from(track.artists.clone());
+        let label = SharedString::from(format!("{} — {}", track.name, track.artists));
+        let duration = clock(track.duration);
+        let indicator = match current {
+            true => svg()
+                .path(icons::path("icons/play.svg"))
+                .size(px(10.))
+                .text_color(theme.primary)
+                .into_any_element(),
+            false => div()
+                .text_size(px(CAPTION_SIZE))
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from((index + 1).to_string()))
+                .into_any_element(),
+        };
+
+        div()
+            .id(("mini-queue-row", index))
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(label)
+            .flex()
+            .flex_none()
+            .h(px(ROW))
+            .w_full()
+            .items_center()
+            .gap(px(6.))
+            .px(px(ROW_PAD))
+            .rounded(px(6.))
+            .text_color(theme.popover_foreground)
+            .when(current, |this| this.bg(theme.secondary))
+            .hover(|this| this.bg(theme.secondary_hover))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                let Some(uid) = uid.clone() else {
+                    return;
+                };
+                playback.update(cx, |playback, cx| playback.play_queue(&uid, cx));
+            })
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(indicator),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(TITLE_SIZE))
+                    .when(current, |this| {
+                        this.text_color(theme.primary)
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                    })
+                    .child(name),
+            )
+            .child(
+                div()
+                    .w(px(80.))
+                    .flex_none()
+                    .truncate()
+                    .text_size(px(CAPTION_SIZE))
+                    .text_color(theme.muted_foreground)
+                    .child(artists),
+            )
+            .child(
+                div()
+                    .w(px(34.))
+                    .flex_none()
+                    .text_right()
+                    .text_size(px(CAPTION_SIZE))
+                    .text_color(theme.muted_foreground)
+                    .child(duration),
+            )
+            .into_any_element()
+    }
+}
+
+impl Render for MiniPlayer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_window(window, cx);
+        let theme = *cx.theme();
+        let opacity = {
+            let look = self.settings.read(cx).look();
+            match look.transparent {
+                true => 1. - look.transparency,
+                false => 1.,
+            }
+        };
+
+        div().size_full().child(
             div()
                 .id("mini-card")
                 .relative()
                 .size_full()
                 .rounded(px(CARD_RADIUS))
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border)
+                .bg(theme.popover.opacity(opacity))
                 .overflow_hidden()
-                .window_control_area(gpui::WindowControlArea::Drag)
-                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                    window.start_window_move();
-                })
-                .child(
-                    div()
-                        .flex()
-                        .h_full()
-                        .items_center()
-                        .gap(px(GAP))
-                        .pl(px(PAD))
-                        .pr(px(GAP))
-                        .pb(px(BAR_HIT + 2.))
-                        .child(
-                            Artwork::new(cover)
-                                .size(px(COVER))
-                                .corner_radius(px(COVER_RADIUS)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_1()
-                                .min_w_0()
-                                .flex_col()
-                                .gap(px(1.))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(TITLE_SIZE))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(theme.popover_foreground)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(CAPTION_SIZE))
-                                        .text_color(theme.muted_foreground)
-                                        .child(artist),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .child(previous(&self.playback, false, cx))
-                                .child(toggle(&self.playback, false, false, cx))
-                                .child(next(&self.playback, false, cx)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .child(
-                                    Button::new("mini-restore")
-                                        .ghost()
-                                        .small()
-                                        .icon("icons/square-arrow-out-up-right.svg")
-                                        .tooltip_above("mini-restore")
-                                        .on_click(|_, window, cx| {
-                                            cx.stop_propagation();
-                                            leave(window, cx);
-                                        }),
-                                )
-                                .child(
-                                    Button::new("mini-close")
-                                        .ghost()
-                                        .small()
-                                        .icon("icons/x.svg")
-                                        .tooltip_above("mini-close")
-                                        .on_click(|_, window, _| hide_native(window)),
-                                ),
-                        ),
-                )
-                .child({
-                    let playback = self.playback.clone();
-                    div()
-                        .id("mini-progress")
-                        .absolute()
-                        .left(px(BAR_INSET))
-                        .right(px(BAR_INSET))
-                        .bottom(px(FRAME))
-                        .h(px(BAR_HIT))
-                        .role(gpui::accesskit::Role::Slider)
-                        .aria_label(t!("song-position"))
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                            cx.stop_propagation();
-                            let width = window.viewport_size().width;
-                            let left = px(FRAME + BAR_INSET);
-                            let right = width - px(FRAME + BAR_INSET);
-                            let span = (right - left).max(px(1.));
-                            let ratio = ((event.position.x - left) / span).clamp(0., 1.);
-                            let duration = playback
-                                .read(cx)
-                                .track()
-                                .map(|track| track.duration)
-                                .unwrap_or_default();
-                            if duration.is_zero() {
-                                return;
-                            }
-                            playback.update(cx, |playback, cx| {
-                                playback.seek(duration.mul_f32(ratio), cx)
-                            });
-                        })
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(0.))
-                                .right(px(0.))
-                                .top(px(BAR_LINE))
-                                .h(px(BAR_WEIGHT))
-                                .rounded_full()
-                                .bg(theme.border),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(0.))
-                                .top(px(BAR_LINE))
-                                .h(px(BAR_WEIGHT))
-                                .w(relative(ratio))
-                                .rounded_full()
-                                .bg(theme.popover_foreground),
-                        )
-                }),
+                .child(self.bar(cx))
+                .when(self.expanded, |this| this.child(self.panel(cx))),
         )
     }
 }
