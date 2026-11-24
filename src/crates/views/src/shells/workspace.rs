@@ -144,6 +144,7 @@ impl Shell for Workspace {
             sidebar_right: Some(self.sidebar_right.read(cx).is_open()),
             border: true,
             content,
+            left: None,
             transparent: false,
         }
     }

@@ -127,6 +127,7 @@ pub struct FullscreenView {
     cover: Entity<Cover>,
     settings: Entity<AppSettings>,
     aside: Entity<Aside>,
+    collapse: Entity<LyricsCollapse>,
     panel: Option<SideTab>,
     /// How much of the content the pill just switched to is still hidden, springing from 1 to 0
     /// at the pace the cover travels, so a panel fades in while the cover slides aside. A spring
@@ -181,6 +182,22 @@ pub struct FullscreenView {
     output: Entity<OutputPicker>,
 }
 
+struct LyricsCollapse;
+
+impl Render for LyricsCollapse {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("lyrics-collapse")
+            .ghost()
+            .small()
+            .icon("icons/chevron-down.svg")
+            .tooltip_trailing("lyric-collapse")
+            .on_click(|_, _, cx| {
+                cx.stop_propagation();
+                back(cx);
+            })
+    }
+}
+
 impl VolumeHost for FullscreenView {
     fn volume(&mut self) -> &mut RisingVolume {
         &mut self.volume
@@ -225,6 +242,7 @@ impl FullscreenView {
             true => SideTab::Lyrics,
             false => SideTab::Queue,
         });
+        let collapse = cx.new(|_| LyricsCollapse);
         let aside = cx.new(|cx| Aside::new(queue.clone(), playback.clone(), shown, cx));
         aside.update(cx, |aside, cx| aside.strip(cx));
         let me = cx.entity_id();
@@ -243,6 +261,7 @@ impl FullscreenView {
             cover,
             settings,
             aside,
+            collapse,
             panel,
             switch: None,
             seek: ScrubberState::new("fullscreen-seek"),
@@ -1197,29 +1216,6 @@ impl FullscreenView {
     /// [wisp] 歌词页右侧的悬浮工具条：每颗按钮独立的圆形控件（与原版同款），
     /// 不共用胶囊容器；选择歌词、偏移 ±0.5s、重置。
     /// [wisp] 歌词页左上角的收起键，形态对齐 EchoMusic 的歌词页返回键；随控制条一起淡出。
-    fn lyric_collapse(&self, idle: f32, cx: &mut Context<Self>) -> AnyElement {
-        let theme = *cx.theme();
-        let frosted = ambient::shown(cx);
-        div()
-            .absolute()
-            .left(px(14.))
-            .top(theme.metrics.title_bar)
-            .opacity(1. - idle)
-            .child(
-                Button::new("lyrics-collapse")
-                    .ghost()
-                    .when(frosted, Button::frosted)
-                    .small()
-                    .icon("icons/chevron-down.svg")
-                    .tooltip_trailing("lyric-collapse")
-                    .on_click(|_, _, cx| {
-                        cx.stop_propagation();
-                        back(cx);
-                    }),
-            )
-            .into_any_element()
-    }
-
     fn lyric_tools(
         &self,
         hide: f32,
@@ -2017,6 +2013,8 @@ impl Shell for FullscreenView {
             sidebar_right: None,
             border: false,
             content: None,
+            left: (self.panel == Some(SideTab::Lyrics))
+                .then(|| self.collapse.clone().into()),
             transparent: ambient::shown(cx),
         }
     }
@@ -2429,8 +2427,7 @@ impl Render for FullscreenView {
             })
             .child(self.output_corner(hide, window, cx))
             .when(self.panel == Some(SideTab::Lyrics), |this| {
-                this.child(self.lyric_collapse(idle, cx))
-                    .child(self.lyric_tools(hide, window, cx))
+                this.child(self.lyric_tools(hide, window, cx))
             })
             .when(self.version_dialog, |this| {
                 this.child(self.version_dialog_panel(window, cx))

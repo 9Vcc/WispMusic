@@ -49,6 +49,8 @@ pub(crate) struct TitleBarOptions {
     pub sidebar_right: Option<bool>,
     pub border: bool,
     pub content: Option<AnyView>,
+    /// A control placed at the start of the bar, before the page's own content.
+    pub left: Option<AnyView>,
     /// Lets the fullscreen ambient background show through behind the controls.
     pub transparent: bool,
 }
@@ -61,6 +63,7 @@ impl Default for TitleBarOptions {
             sidebar_right: None,
             border: true,
             content: None,
+            left: None,
             transparent: false,
         }
     }
@@ -532,7 +535,8 @@ impl Render for TitleBar {
                     .when(leading, |this| {
                         this.child(window_controls(true, traffic_light))
                     })
-                    .when(navigation, |this| this.child(self.toggle(cx))),
+                    .when(navigation, |this| this.child(self.toggle(cx)))
+                    .when_some(self.options.left.clone(), |this, left| this.child(left)),
             )
             .child(
                 div()
