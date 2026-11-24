@@ -7,14 +7,14 @@
 //! asks for a blurred desktop when blurring is on. The list expands to the live queue.
 
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, Global, IntoElement, MouseButton,
-    MouseUpEvent, Pixels, Point, Render, ScrollStrategy, SharedString, Task,
-    UniformListScrollHandle, Window, WindowBounds, WindowKind, WindowOptions, div, point, px,
-    relative, size, svg, uniform_list,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
+    Global, IntoElement, MouseButton, MouseUpEvent, Pixels, Point, Render, ScrollStrategy,
+    SharedString, Task, UniformListScrollHandle, Window, WindowBounds, WindowKind, WindowOptions,
+    div, point, px, relative, size, svg, uniform_list,
 };
 use i18n::t;
 use state::{AppSettings, Playback, QueuePosition, Wisp};
@@ -216,37 +216,6 @@ fn surface(window: &mut Window) {
     window.refresh();
 }
 
-/// Resizes from the top-left only. The platform's own `resize` goes through an async task,
-/// which queues behind itself when an animation asks for a new height every frame; this
-/// applies the size at once and keeps the drag anchor fixed.
-#[cfg(target_os = "windows")]
-fn resize_window(window: &mut Window, height: f32) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
-    };
-    let Some(handle) = hwnd(window) else {
-        return;
-    };
-    let scale = window.scale_factor();
-    unsafe {
-        SetWindowPos(
-            handle,
-            std::ptr::null_mut(),
-            0,
-            0,
-            (WIDTH * scale).round() as i32,
-            (height * scale).round() as i32,
-            SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-    }
-    window.refresh();
-}
-
-#[cfg(not(target_os = "windows"))]
-fn resize_window(window: &mut Window, height: f32) {
-    window.resize(size(px(WIDTH), px(height)));
-}
-
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
 fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
     let displays = cx.displays();
@@ -273,11 +242,14 @@ fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
 struct MiniPlayer {
     playback: Entity<Playback>,
     expanded: bool,
-    /// Whether the queue is mounted. It stays mounted while folding so the shrinking window
+    /// Whether the queue is mounted. It stays mounted while folding so the shrinking card
     /// clips it instead of exposing a bare bar over the backdrop.
     panel: bool,
-    /// The running height animation; replacing it drops the previous one.
-    reveal: Option<Task<()>>,
+    /// Restarts the card's height animation on every fold.
+    epoch: u64,
+    /// Shrinks the window after a fold; the card itself animates inside the still-expanded
+    /// window, so the OS is resized once per fold rather than every frame.
+    finish: Option<Task<()>>,
     /// The queue's scroll, kept between renders so it does not jump to the top.
     scroll: UniformListScrollHandle,
     seek: ScrubberState,
@@ -306,7 +278,8 @@ impl MiniPlayer {
             playback,
             expanded: false,
             panel: false,
-            reveal: None,
+            epoch: 0,
+            finish: None,
             scroll: UniformListScrollHandle::new(),
             seek: ScrubberState::new("mini-seek"),
             volume: ScrubberState::new("mini-volume"),
@@ -341,52 +314,45 @@ impl MiniPlayer {
             return;
         }
         self.expanded = expanded;
+        self.epoch = self.epoch.wrapping_add(1);
         if expanded {
             self.panel = true;
+            self.finish = None;
             let sections = self.playback.read(cx).shown_queue(cx).sections;
             if sections.current {
                 self.scroll
                     .scroll_to_item(sections.past, ScrollStrategy::Center);
             }
+            // The window is made tall once; the card height animates inside it. The OS is
+            // never resized every frame, which re-entered GPUI and stalled the motion.
+            window.resize(size(px(WIDTH), px(EXPANDED)));
+            cx.notify();
+            return;
         }
-        // Height only: the window's top-left is chosen once on entry and never moves, so
-        // folding in and out cannot accumulate an offset. The panel stays mounted while the
-        // window shrinks, so the clip reveals the queue instead of a bare acrylic strip.
-        let target = match expanded {
-            true => EXPANDED,
-            false => BAR,
-        };
-        self.animate_height(target, window, cx);
-    }
-
-    fn animate_height(&mut self, target: f32, window: &mut Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
-        let start = window.viewport_size().height.as_f32();
-        let folding = target <= BAR + 0.5;
-        self.reveal = Some(cx.spawn(async move |this, cx| {
-            let began = Instant::now();
-            loop {
-                let t = (began.elapsed().as_secs_f32() / REVEAL.as_secs_f32()).clamp(0., 1.);
-                let height = start + (target - start) * ui::ease_out_cubic(t);
-                handle
-                    .update(cx, |_, window, _| resize_window(window, height))
-                    .ok();
-                if t >= 1. {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
+        let epoch = self.epoch;
+        self.finish = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(REVEAL + Duration::from_millis(24))
+                .await;
+            let folded = this
+                .update(cx, |this, _| {
+                    this.epoch == epoch && !this.expanded && this.panel
+                })
+                .unwrap_or(false);
+            if !folded {
+                return;
             }
-            if folding {
-                // The last resize is platform-async; let it land before the panel unmounts so
-                // the folded frame never paints the bar over the bare backdrop.
-                cx.background_executor()
-                    .timer(Duration::from_millis(24))
-                    .await;
-            }
+            handle
+                .update(cx, |_, window, _| {
+                    window.resize(size(px(WIDTH), px(BAR)));
+                })
+                .ok();
+            cx.background_executor()
+                .timer(Duration::from_millis(16))
+                .await;
             this.update(cx, |this, cx| {
-                if !this.expanded && this.panel {
+                if this.epoch == epoch && !this.expanded {
                     this.panel = false;
                     this.pending_seek = None;
                     cx.notify();
@@ -904,22 +870,40 @@ impl Render for MiniPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window(window, cx);
         let theme = *cx.theme();
+        let card = div()
+            .id("mini-card")
+            .relative()
+            .flex()
+            .flex_col()
+            .w_full()
+            .rounded(px(CARD_RADIUS))
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.foreground.opacity(0.22))
+            .text_color(theme.foreground)
+            .overflow_hidden()
+            .child(self.bar(cx))
+            .when(self.panel, |this| this.child(self.panel(cx)));
+        let card = match self.panel {
+            false => card.h(px(BAR)).into_any_element(),
+            true => {
+                let from = match self.expanded {
+                    true => BAR,
+                    false => EXPANDED,
+                };
+                let to = match self.expanded {
+                    true => EXPANDED,
+                    false => BAR,
+                };
+                card.with_animation(
+                    SharedString::from(format!("mini-reveal-{}-{}", self.epoch, self.expanded)),
+                    Animation::new(REVEAL).with_easing(ui::ease_out_cubic),
+                    move |this, delta| this.h(px(from + (to - from) * delta)),
+                )
+                .into_any_element()
+            }
+        };
 
-        div().size_full().child(
-            div()
-                .id("mini-card")
-                .relative()
-                .flex()
-                .flex_col()
-                .size_full()
-                .rounded(px(CARD_RADIUS))
-                .bg(theme.background)
-                .border_1()
-                .border_color(theme.foreground.opacity(0.22))
-                .text_color(theme.foreground)
-                .overflow_hidden()
-                .child(self.bar(cx))
-                .when(self.panel, |this| this.child(self.panel(cx))),
-        )
+        div().size_full().child(card)
     }
 }
