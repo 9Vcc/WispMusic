@@ -292,6 +292,8 @@ struct MiniPlayer {
     panel: bool,
     /// Whether the card is folding with the window material hidden.
     folding: bool,
+    /// Whether the fold's height animation has started, after the solid card has painted.
+    fold_started: bool,
     /// Restarts the card's height animation on every fold.
     epoch: u64,
     /// Shrinks the window after a fold; the card itself animates inside the still-expanded
@@ -326,6 +328,7 @@ impl MiniPlayer {
             expanded: false,
             panel: false,
             folding: false,
+            fold_started: false,
             epoch: 0,
             finish: None,
             scroll: UniformListScrollHandle::new(),
@@ -367,6 +370,7 @@ impl MiniPlayer {
         if expanded {
             self.panel = true;
             self.finish = None;
+            self.fold_started = false;
             if self.folding {
                 self.folding = false;
                 restore_material(window, cx);
@@ -386,11 +390,45 @@ impl MiniPlayer {
         // hidden, so the uncovered part shows the desktop rather than an acrylic strip. The
         // window is shrunk once the card has finished, then the material comes back.
         self.folding = true;
-        window.set_background_appearance(WindowBackgroundAppearance::Transparent);
-        set_window_frame(window, false);
         let handle = window.window_handle();
         let epoch = self.epoch;
         self.finish = Some(cx.spawn(async move |this, cx| {
+            // Let the solid card paint once while the material is still on, so turning the
+            // material off cannot reveal a translucent frame.
+            cx.background_executor()
+                .timer(Duration::from_millis(20))
+                .await;
+            let folding = this
+                .update(cx, |this, _| {
+                    (this.epoch == epoch && !this.expanded && this.panel && this.folding)
+                        .then_some(())
+                })
+                .ok()
+                .flatten()
+                .is_some();
+            if !folding {
+                return;
+            }
+            handle
+                .update(cx, |_, window, _| {
+                    window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+                    set_window_frame(window, false);
+                })
+                .ok();
+            let started = this
+                .update(cx, |this, cx| {
+                    if this.epoch == epoch && !this.expanded && this.folding {
+                        this.fold_started = true;
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if !started {
+                return;
+            }
             // Shrink the window just before the card bottoms out, so the frame never sits
             // around an empty strip after the card has folded. The last sliver of the card
             // animation is clipped by the window and is invisible.
@@ -433,15 +471,20 @@ impl MiniPlayer {
                 return;
             }
             // Bring the material back before the card turns translucent again, so the folded
-            // bar never paints one frame over the bare desktop.
+            // bar never paints one frame over the bare desktop. The card stays solid while
+            // the material settles, then takes its normal translucent fill.
             handle
                 .update(cx, |_, window, cx| restore_material(window, cx))
                 .ok();
+            cx.background_executor()
+                .timer(Duration::from_millis(40))
+                .await;
             this.update(cx, |this, cx| {
                 if this.epoch == epoch && !this.expanded {
                     this.panel = false;
                     this.pending_seek = None;
                     this.folding = false;
+                    this.fold_started = false;
                     cx.notify();
                 }
             })
@@ -979,6 +1022,11 @@ impl Render for MiniPlayer {
             .when(self.panel, |this| this.child(self.panel(cx)));
         let card = match self.panel {
             false => card.h(px(BAR)).into_any_element(),
+            true if self.folding && !self.fold_started => {
+                // Solid at full height for one frame, so turning the material off cannot
+                // expose a translucent strip before the fold starts.
+                card.h(px(EXPANDED)).into_any_element()
+            }
             true => {
                 let (from, to) = match self.expanded {
                     true => (BAR, EXPANDED),
