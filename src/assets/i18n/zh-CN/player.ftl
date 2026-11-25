@@ -93,3 +93,5 @@ desktop-lyrics-vertical = 切换为竖向显示
 desktop-lyrics-horizontal = 切换为横向显示
 desktop-lyrics-stroke = 切换为笔画动效
 desktop-lyrics-default = 切换为默认动效
+
+player-desktop-lyrics = 桌面歌词

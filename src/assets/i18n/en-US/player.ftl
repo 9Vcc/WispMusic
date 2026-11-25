@@ -92,3 +92,5 @@ desktop-lyrics-vertical = Switch to vertical
 desktop-lyrics-horizontal = Switch to horizontal
 desktop-lyrics-stroke = Switch to stroke animation
 desktop-lyrics-default = Switch to default animation
+
+player-desktop-lyrics = Desktop lyrics

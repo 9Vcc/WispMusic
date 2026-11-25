@@ -227,6 +227,27 @@ impl PlayerBar {
         }
     }
 
+    fn desktop_lyrics_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let on = self.settings.read(cx).desktop_lyrics();
+        Button::new("player-desktop-lyrics")
+            .ghost()
+            .small()
+            .icon("icons/monitor.svg")
+            .tooltip_above("player-desktop-lyrics")
+            .selected(on)
+            .tint(match on {
+                true => theme.foreground,
+                false => theme.muted_foreground,
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                let on = this.settings.read(cx).desktop_lyrics();
+                this.settings
+                    .update(cx, |settings, cx| settings.set_desktop_lyrics(!on, cx));
+            }))
+            .into_any_element()
+    }
+
     fn mini_button(&self) -> AnyElement {
         Button::new("player-mini")
             .ghost()
@@ -592,10 +613,11 @@ impl Render for PlayerBar {
         let transparent = self.settings.read(cx).player_bar_translucent();
         let height = Self::height(window, cx);
         // Equal wings keep the title centered while reserving the original volume slider width.
-        let centered_wing = theme.metrics.control * 5. + theme.metrics.pad * 3.;
+        let lyrics = self.settings.read(cx).lyrics_enabled();
+        let wing_controls = 5. + if lyrics { 1. } else { 0. };
+        let centered_wing = theme.metrics.control * wing_controls + theme.metrics.pad * 3.;
         let show_track = span.fits(Room::Snug);
         let fm = self.playback.read(cx).fm_session();
-        let lyrics = self.settings.read(cx).lyrics_enabled();
         let sides = match SidebarRight::available(window) {
             true => Some(self.side_buttons(cx)),
             false => None,
@@ -606,6 +628,7 @@ impl Render for PlayerBar {
         let tools = 1
             + usize::from(picker)
             + 1
+            + usize::from(lyrics)
             + match sides.is_some() {
                 true => usize::from(lyrics) + usize::from(!fm),
                 false => 0,
@@ -679,6 +702,9 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
+                        .when(lyrics, |this| {
+                            this.child(self.desktop_lyrics_button(cx))
+                        })
                         .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
@@ -721,6 +747,9 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
+                        .when(lyrics, |this| {
+                            this.child(self.desktop_lyrics_button(cx))
+                        })
                         .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
@@ -736,6 +765,9 @@ impl Render for PlayerBar {
                 .child(buttons)
                 .child(play_mode(&self.playback, false, cx))
                 .child(self.sound(cx))
+                .when(lyrics, |this| {
+                    this.child(self.desktop_lyrics_button(cx))
+                })
                 .child(self.mini_button())
                 .child(self.fullscreen_button(cx)),
             // The two sides share what the middle leaves them evenly, so the transport and the
@@ -790,6 +822,9 @@ impl Render for PlayerBar {
                             .child(buttons)
                             .child(play_mode(&self.playback, false, cx))
                             .child(self.sound(cx))
+                            .when(lyrics, |this| {
+                                this.child(self.desktop_lyrics_button(cx))
+                            })
                             .child(self.mini_button())
                             .child(self.fullscreen_button(cx)),
                     )
