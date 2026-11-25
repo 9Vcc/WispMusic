@@ -1458,7 +1458,7 @@ impl Render for Root {
                     .flex()
                     .flex_col()
                     .size_full()
-                    .bg(theme.background)
+                    .bg(ui::page_wash(&theme))
                     .when_some(radius, |this, radius| this.rounded(radius).overflow_hidden())
                     .child(splash.clone());
             }

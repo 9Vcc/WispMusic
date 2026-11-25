@@ -55,9 +55,9 @@ fn faded(mut tint: Hsla, alpha: f32) -> Hsla {
     tint
 }
 
-pub(crate) const TOTAL: f32 = 3.0;
+pub(crate) const TOTAL: f32 = 3.15;
 pub(crate) const FADE_START: f32 = 2.65;
-pub(crate) const FADE_END: f32 = 3.00;
+pub(crate) const FADE_END: f32 = 3.15;
 
 /// The W in the icon's 1024 grid, before the 1.3x scale about its centre.
 const W_POINTS: [(f32, f32); 5] = [

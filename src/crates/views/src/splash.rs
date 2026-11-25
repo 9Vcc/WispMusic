@@ -5,12 +5,21 @@ use gpui::{
     Context, IntoElement, MouseButton, Render, Window, WindowControlArea, canvas, div, px,
 };
 
-use crate::brand::{FADE_END, FADE_START, TOTAL, MarkPalette, ease_out_cubic, paint_mark};
+use crate::brand::{FADE_END, FADE_START, TOTAL, MarkPalette, paint_mark};
 use ui::ActiveTheme as _;
 
 /// How early the hidden UI starts building before the cross-fade, so its first layout is not a
 /// hitch on the frame the fade begins.
 const PREBUILD_LEAD: f32 = 0.20;
+/// How much the mark closes into the page while the two layers cross-fade.
+const MARK_SCALE: f32 = 0.035;
+/// A small lift keeps the mark from feeling pinned to the centre as the page arrives.
+const MARK_RISE: f32 = 6.;
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
 
 pub struct Splash {
     start: Instant,
@@ -47,7 +56,7 @@ impl Splash {
         if elapsed <= FADE_START {
             return 0.;
         }
-        ease_out_cubic(((elapsed - FADE_START) / (FADE_END - FADE_START)).clamp(0., 1.))
+        smoothstep(((elapsed - FADE_START) / (FADE_END - FADE_START)).clamp(0., 1.))
     }
 }
 
@@ -67,7 +76,8 @@ impl Render for Splash {
 
         let viewport = window.viewport_size();
         let shortest = viewport.width.min(viewport.height) / px(1.);
-        let side = px(shortest * 0.66);
+        let reveal = self.reveal();
+        let side = px(shortest * 0.66 * (1. - MARK_SCALE * reveal));
         let palette = MarkPalette::launch(cx.theme());
         div()
             .absolute()
@@ -76,7 +86,7 @@ impl Render for Splash {
             .flex()
             .items_center()
             .justify_center()
-            .opacity(1. - self.reveal())
+            .opacity(1. - reveal)
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(
@@ -85,8 +95,23 @@ impl Render for Splash {
                     move |bounds, _, window, _| paint_mark(bounds, t, palette, window),
                 )
                 .size(side)
+                .mt(px(-MARK_RISE * reveal))
                 .flex_none(),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_crossfade_is_held_then_centred_then_settled() {
+        assert_eq!(smoothstep(-1.), 0.);
+        assert_eq!(smoothstep(0.), 0.);
+        assert_eq!(smoothstep(0.5), 0.5);
+        assert_eq!(smoothstep(1.), 1.);
+        assert_eq!(smoothstep(2.), 1.);
     }
 }
