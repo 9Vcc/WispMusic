@@ -110,8 +110,10 @@ fn legacy_windows() -> bool {
 
     static LEGACY: OnceLock<bool> = OnceLock::new();
     *LEGACY.get_or_init(|| unsafe {
-        let mut version = OSVERSIONINFOW::default();
-        version.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        let mut version = OSVERSIONINFOW {
+            dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+            ..Default::default()
+        };
         RtlGetVersion(&mut version);
         version.dwBuildNumber < 22000
     })
