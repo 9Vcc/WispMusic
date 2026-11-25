@@ -18,6 +18,7 @@ impl SettingsView {
         vec![
             Group::new("settings-group-startup", "icons/house.svg").rows([
                 Slot::Startup,
+                Slot::StartupAnimation,
                 Slot::Entries,
                 Slot::Language,
             ]),
@@ -79,6 +80,21 @@ impl SettingsView {
         self.row(
             t!("settings-startup"),
             picker.name(t!("settings-startup")).into_any_element(),
+        )
+    }
+
+    pub(super) fn startup_animation_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.settings.read(cx).startup_animation();
+
+        self.row(
+            t!("settings-startup-animation"),
+            Switch::new("startup-animation", on)
+                .name(t!("settings-startup-animation"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_startup_animation(!on, cx));
+                }))
+                .into_any_element(),
         )
     }
 

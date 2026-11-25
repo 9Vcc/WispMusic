@@ -462,6 +462,8 @@ struct Values {
     #[serde(default = "system_font")]
     font: String,
     startup: String,
+    /// [wisp] 首启是否播放应用标记动画。
+    startup_animation: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     local_folders: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -731,6 +733,7 @@ impl Default for Values {
             language: i18n::AUTO.to_owned(),
             font: system_font(),
             startup: DEFAULT_STARTUP.to_owned(),
+            startup_animation: true,
             local_folders: Vec::new(),
             hidden_nav: Vec::new(),
             added_nav: Vec::new(),
@@ -1543,6 +1546,10 @@ impl AppSettings {
         &self.values.startup
     }
 
+
+    pub fn startup_animation(&self) -> bool {
+        self.values.startup_animation
+    }
     pub fn theme(&self) -> &str {
         &self.values.appearance.theme
     }
@@ -2556,6 +2563,11 @@ impl AppSettings {
             return;
         }
         self.values.startup = screen;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_startup_animation(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.values.startup_animation = on;
         self.schedule_save(cx);
     }
 

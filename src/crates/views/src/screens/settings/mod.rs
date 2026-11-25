@@ -143,6 +143,7 @@ enum Slot {
     Keybind(usize),
     KeybindsReset,
     Startup,
+    StartupAnimation,
     Entries,
     Language,
     Tray,
@@ -742,6 +743,10 @@ impl SettingsView {
         let meta = match slot {
             Slot::Folders => return None,
             Slot::Startup => (t!("settings-startup"), t!("settings-startup-detail")),
+            Slot::StartupAnimation => (
+                t!("settings-startup-animation"),
+                t!("settings-startup-animation-detail"),
+            ),
             Slot::Entries => (t!("settings-entries"), t!("settings-entries-detail")),
             Slot::Language => (t!("settings-language"), t!("settings-language-detail")),
             Slot::Tray => (
@@ -1038,6 +1043,7 @@ impl SettingsView {
         match slot {
             // [wisp] 共享收听设置已移除，保留槽位消化旧搜索结果
             Slot::Startup => self.startup_row(cx),
+            Slot::StartupAnimation => self.startup_animation_row(cx),
             Slot::Entries => self.entries_row(cx),
             Slot::Language => self.language_row(cx),
             Slot::Tray => self.tray_row(cx),

@@ -382,7 +382,10 @@ impl Root {
             .detach();
 
         let adaptive = cx.new(|cx| Adaptive::new(playback.clone(), cx));
-        let splash = (splash && !cx.reduce_motion()).then(|| cx.new(Splash::new));
+        let splash = (splash
+            && !cx.reduce_motion()
+            && Wisp::global(cx).settings.read(cx).startup_animation())
+        .then(|| cx.new(Splash::new));
 
         let mut root = Self {
             session,
