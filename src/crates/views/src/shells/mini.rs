@@ -120,6 +120,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
             ..Default::default()
         },
         |window, cx| {
+            crate::install_legacy_client_area(window, false);
             window.on_window_should_close(cx, |_, cx| {
                 reveal_main(cx);
                 cx.remove_global::<MiniSession>();

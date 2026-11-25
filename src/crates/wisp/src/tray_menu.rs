@@ -157,6 +157,7 @@ fn create_menu_window(
                 ..Default::default()
             },
             |window: &mut gpui::Window, _| {
+                views::install_legacy_client_area(window, false);
                 #[cfg(target_os = "windows")]
                 hwnd_for_callback.set(hwnd_of(window).unwrap_or(std::ptr::null_mut()));
                 root.clone()

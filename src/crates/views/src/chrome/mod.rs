@@ -12,11 +12,13 @@ mod swipe_cue;
 mod theme_invite;
 mod timeline;
 pub mod tray_menu;
+pub(crate) mod legacy_frame;
 mod title_bar;
 mod toasts;
 mod toolbar;
 pub(crate) mod tools;
 
+pub use legacy_frame::install as install_legacy_client_area;
 pub(crate) use speed::SpeedButton;
 pub(crate) use aside::{Aside, VerseLook, verse, verse_gap, verse_sizes};
 pub(crate) use notice::AppNotice;
