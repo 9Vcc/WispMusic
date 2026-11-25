@@ -272,10 +272,47 @@ fn set_window_frame(_window: &Window, _shown: bool) {}
 /// Restores the window material after an animation that had to hide it.
 fn restore_material(window: &mut Window, cx: &App) {
     let theme = *cx.theme();
-    // The acrylic is applied last: on Windows 10 the non-client policy would otherwise be
-    // the last state DWM sees after a transparent pass.
+    // On Windows 10 a transparent pass that leaves the non-client policy as DWM's last seen
+    // state sticks the accent off, and no later accent call revives it — only a policy
+    // change does. Flip the policy through enabled for that change (a popup has nothing
+    // for the instant to draw, and nothing is presented between the two calls), then land
+    // on the frame this platform keeps, and let the acrylic be the last word.
+    #[cfg(target_os = "windows")]
+    set_window_frame(window, true);
     set_window_frame(window, window_frame_shown());
     window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
+    // The shrink that ran between the two passes resets Windows 10's accent layer, and
+    // asking for the same acrylic again does not repaint it. Laying the frame out once
+    // more gives DWM the nudge it needs; the subclass keeps the client area whole.
+    #[cfg(target_os = "windows")]
+    relay(window);
+}
+
+/// Asks DWM to lay the window's frame out again, which is what it takes for the accent to
+/// come back after a resize on Windows 10.
+#[cfg(target_os = "windows")]
+fn relay(window: &Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
+
+    if !crate::chrome::legacy_frame::legacy_windows() {
+        return;
+    }
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    unsafe {
+        SetWindowPos(
+            handle,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// Windows 10 cannot round a per-pixel-alpha window, so its DWM shadow and border show as a
@@ -466,8 +503,10 @@ impl MiniPlayer {
             }
             handle
                 .update(cx, |_, window, _| {
-                    window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+                    // The policy goes first: on Windows 10 the accent has to be the last
+                    // state DWM sees, or the pass drops the material outright.
                     set_window_frame(window, false);
+                    window.set_background_appearance(WindowBackgroundAppearance::Transparent);
                 })
                 .ok();
             let started = this
@@ -1095,13 +1134,20 @@ impl Render for MiniPlayer {
             },
             false => theme.background,
         };
+        // Windows 10 never rounds the window itself, so behind a rounded card the acrylic
+        // would show through the four bare corners its rounding leaves. A square card keeps
+        // the material covered there; Windows 11 rounds the surface, so the card follows.
+        let corners = match crate::chrome::legacy_frame::legacy_windows() {
+            false => CARD_RADIUS,
+            true => 0.,
+        };
         let card = div()
             .id("mini-card")
             .relative()
             .flex()
             .flex_col()
             .w_full()
-            .rounded(px(CARD_RADIUS))
+            .rounded(px(corners))
             .bg(fill)
             .border_1()
             .border_color(theme.foreground.opacity(0.22))

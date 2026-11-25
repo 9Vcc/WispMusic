@@ -8,21 +8,27 @@
 use gpui::{Pixels, Size, Window, px, size};
 
 /// Whether this is Windows 10 or older, by build number: 22000 is where Windows 11 starts.
-#[cfg(target_os = "windows")]
 pub(crate) fn legacy_windows() -> bool {
-    use std::sync::OnceLock;
-    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
-    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::OnceLock;
+        use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+        use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 
-    static LEGACY: OnceLock<bool> = OnceLock::new();
-    *LEGACY.get_or_init(|| unsafe {
-        let mut version = OSVERSIONINFOW {
-            dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
-            ..Default::default()
-        };
-        RtlGetVersion(&mut version);
-        version.dwBuildNumber < 22000
-    })
+        static LEGACY: OnceLock<bool> = OnceLock::new();
+        *LEGACY.get_or_init(|| unsafe {
+            let mut version = OSVERSIONINFOW {
+                dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+                ..Default::default()
+            };
+            RtlGetVersion(&mut version);
+            version.dwBuildNumber < 22000
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 /// Widens a window's client area over the frame on Windows 10. `resizable` serves the frame
