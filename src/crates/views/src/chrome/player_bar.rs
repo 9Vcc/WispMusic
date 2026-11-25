@@ -741,6 +741,10 @@ impl Render for PlayerBar {
             // volume draws.
             _ => {
                 let middle = Self::classic(window, tools, cx);
+                // The climax key sits right beside `next`, but it must not shift the
+                // transport: only prev/play/next take part in centring, and the key is placed
+                // one gap past the next button's right edge.
+                let flame = px(ICON_BUTTON) * 1.5 + window.rem_size();
                 base.items_center()
                     .gap_4()
                     .child(self.now_playing(show_track, window, cx))
@@ -762,7 +766,8 @@ impl Render for PlayerBar {
                                     .child(
                                         div()
                                             .absolute()
-                                            .right(px(0.))
+                                            .left(gpui::relative(0.5))
+                                            .ml(flame)
                                             .top_0()
                                             .bottom_0()
                                             .flex()
