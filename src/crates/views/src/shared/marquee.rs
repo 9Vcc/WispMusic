@@ -11,8 +11,7 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, IntoElement, SharedString, canvas, div,
-    point, px,
+    Animation, AnimationExt as _, AnyElement, Context, IntoElement, SharedString, canvas, div, px,
 };
 
 /// The space between the two copies of a rolling line.
@@ -122,7 +121,7 @@ pub(crate) fn marquee<T: 'static>(
                 available.round()
             )),
             Animation::new(Duration::from_secs_f32(total)).repeat(),
-            move |this, delta| this.layer_translate(point(px(-distance * delta), px(0.))),
+            move |this, delta| this.left(px(-distance * delta)),
         ))
         .into_any_element()
 }
