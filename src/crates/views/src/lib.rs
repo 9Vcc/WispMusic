@@ -11,6 +11,7 @@ pub use chrome::tray_menu::{MENU_HEIGHT, MENU_WIDTH, TrayMenuClosed, TrayMenuVie
 #[cfg(target_os = "macos")]
 pub use chrome::traffic_lights;
 pub use root::Root;
+pub use shells::desktop_lyrics::install as install_desktop_lyrics;
 /// Shows or closes the mini player from outside the interface, for the tray and the
 /// second-instance hand-off, which both work on the main window instead.
 pub use shells::mini::{dismiss as dismiss_mini, reveal as reveal_mini};

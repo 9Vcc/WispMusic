@@ -1,7 +1,7 @@
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, DragMoveEvent, Pixels, Point, Render, SharedString, Window, div,
+    AnyElement, App, Context, DragMoveEvent, Pixels, Point, Render, SharedString, Window, div, px,
 };
 use i18n::t;
 use music::WritingSystem;
@@ -57,6 +57,10 @@ impl SettingsView {
             Group::new("settings-group-sources", "icons/list-music.svg")
                 .rows([Slot::LyricsSources, Slot::LyricsForLocal]),
         );
+        groups.push(
+            Group::new("settings-group-desktop-lyrics", "icons/monitor.svg")
+                .rows([Slot::DesktopLyrics, Slot::DesktopLyricsFont]),
+        );
         groups
     }
 
@@ -72,6 +76,69 @@ impl SettingsView {
                         .update(cx, |settings, cx| settings.set_lyrics_enabled(!on, cx));
                 }))
                 .into_any_element(),
+        )
+    }
+
+    pub(super) fn desktop_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.settings.read(cx).desktop_lyrics();
+        self.row(
+            t!("settings-desktop-lyrics"),
+            Switch::new("desktop-lyrics", on)
+                .name(t!("settings-desktop-lyrics"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_desktop_lyrics(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn desktop_lyrics_font_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let size = self.settings.read(cx).desktop_lyrics_font_size();
+        let adjust = |suffix: &'static str, icon: &'static str, key: &'static str, delta: f32, disabled: bool| {
+            Button::new(SharedString::from(format!("desktop-lyrics-font-{suffix}")))
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(key)
+                .tint(theme.muted_foreground)
+                .disabled(disabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let size = this.settings.read(cx).desktop_lyrics_font_size();
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_desktop_lyrics_font_size(size + delta, cx)
+                    });
+                }))
+        };
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(adjust(
+                "down",
+                "icons/minus.svg",
+                "settings-desktop-lyrics-font-down",
+                -2.,
+                size <= 24.,
+            ))
+            .child(
+                div()
+                    .min_w(px(28.))
+                    .text_center()
+                    .font_features(tabular())
+                    .child(SharedString::from(format!("{}", size.round() as i32))),
+            )
+            .child(adjust(
+                "up",
+                "icons/plus.svg",
+                "settings-desktop-lyrics-font-up",
+                2.,
+                size >= 48.,
+            ));
+        self.row(
+            t!("settings-desktop-lyrics-font"),
+            controls.into_any_element(),
         )
     }
 

@@ -1,3 +1,4 @@
+pub(crate) mod desktop_lyrics;
 pub(crate) mod fullscreen;
 pub(crate) mod mini;
 pub(crate) mod workspace;

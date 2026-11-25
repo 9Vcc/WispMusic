@@ -461,7 +461,9 @@ fn open_window(cx: &mut App) {
         },
     )
     .expect("failed to open window");
-    cx.set_global(MainWindow(handle.into()));
+    let main = handle.into();
+    cx.set_global(MainWindow(main));
+    views::install_desktop_lyrics(main, cx);
 }
 
 // DWM only offers two rounded presets (no arbitrary radius), so the four `Rounding` choices

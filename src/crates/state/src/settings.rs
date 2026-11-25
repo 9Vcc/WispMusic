@@ -428,6 +428,10 @@ struct Values {
     gap_dots_lyrics: bool,
     /// 笔画歌词动效：当前句逐字按笔画飞入，句尾散开。
     stroke_lyrics: bool,
+    /// 桌面歌词悬浮窗口是否开启。
+    desktop_lyrics: bool,
+    /// 桌面歌词字号（逻辑像素）。
+    desktop_lyrics_font_size: f32,
     parallax_lyrics: bool,
     lyrics_motion_preset: LyricMotionPreset,
     romanized_lyrics: bool,
@@ -697,6 +701,8 @@ impl Default for Values {
             breathing_lyrics: false,
             gap_dots_lyrics: false,
             stroke_lyrics: false,
+            desktop_lyrics: false,
+            desktop_lyrics_font_size: 40.,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
             romanized_lyrics: true,
@@ -1337,6 +1343,14 @@ impl AppSettings {
         self.values.stroke_lyrics
     }
 
+    pub fn desktop_lyrics(&self) -> bool {
+        self.values.desktop_lyrics
+    }
+
+    pub fn desktop_lyrics_font_size(&self) -> f32 {
+        self.values.desktop_lyrics_font_size.clamp(24., 48.)
+    }
+
     pub fn parallax_lyrics(&self) -> bool {
         self.values.parallax_lyrics
     }
@@ -1941,6 +1955,23 @@ impl AppSettings {
 
     pub fn set_karaoke_lyrics(&mut self, karaoke: bool, cx: &mut Context<Self>) {
         self.values.karaoke_lyrics = karaoke;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.values.desktop_lyrics == on {
+            return;
+        }
+        self.values.desktop_lyrics = on;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let size = size.clamp(24., 48.);
+        if (self.values.desktop_lyrics_font_size - size).abs() < f32::EPSILON {
+            return;
+        }
+        self.values.desktop_lyrics_font_size = size;
         self.schedule_save(cx);
     }
 
