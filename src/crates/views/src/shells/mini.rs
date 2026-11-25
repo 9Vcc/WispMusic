@@ -124,7 +124,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
             set_window_frame(window, window_frame_shown());
             // Apply the material after the frame policy, so the acrylic is the last word on
             // Windows 10.
-            window.set_background_appearance(background);
+            apply_material(window, background);
             window.on_window_should_close(cx, |_, cx| {
                 reveal_main(cx);
                 cx.remove_global::<MiniSession>();
@@ -269,23 +269,32 @@ fn set_window_frame(window: &Window, shown: bool) {
 #[cfg(not(target_os = "windows"))]
 fn set_window_frame(_window: &Window, _shown: bool) {}
 
+/// Applies a window material after clearing any accent left by the previous pass. Windows 10
+/// can keep a transparent accent alive after a resize, so the same-value acrylic call is not
+/// enough; the off/on pair makes DWM create the composition layer again.
+fn apply_material(window: &mut Window, appearance: WindowBackgroundAppearance) {
+    #[cfg(target_os = "windows")]
+    if crate::chrome::legacy_frame::legacy_windows() {
+        window.set_background_appearance(WindowBackgroundAppearance::Opaque);
+    }
+    window.set_background_appearance(appearance);
+}
+
 /// Restores the window material after an animation that had to hide it.
 fn restore_material(window: &mut Window, cx: &App) {
     let theme = *cx.theme();
-    // On Windows 10 a transparent pass that leaves the non-client policy as DWM's last seen
-    // state sticks the accent off, and no later accent call revives it — only a policy
-    // change does. Flip the policy through enabled for that change (a popup has nothing
-    // for the instant to draw, and nothing is presented between the two calls), then land
-    // on the frame this platform keeps, and let the acrylic be the last word.
+    // Flip the non-client policy through enabled so Windows 10 sees a real change, then lay
+    // the frame out before the accent is applied. Doing either after the acrylic can clear
+    // the layer that has just been restored.
     #[cfg(target_os = "windows")]
-    set_window_frame(window, true);
+    {
+        set_window_frame(window, true);
+        set_window_frame(window, window_frame_shown());
+        relay(window);
+    }
+    #[cfg(not(target_os = "windows"))]
     set_window_frame(window, window_frame_shown());
-    window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
-    // The shrink that ran between the two passes resets Windows 10's accent layer, and
-    // asking for the same acrylic again does not repaint it. Laying the frame out once
-    // more gives DWM the nudge it needs; the subclass keeps the client area whole.
-    #[cfg(target_os = "windows")]
-    relay(window);
+    apply_material(window, ui::backdrop(theme.blur_window, theme.transparent));
 }
 
 /// Asks DWM to lay the window's frame out again, which is what it takes for the accent to
@@ -428,7 +437,7 @@ impl MiniPlayer {
         // A fold hides the material on purpose; the finishing task restores it.
         if !self.folding && self.background != Some(key) {
             self.background = Some(key);
-            window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
+            apply_material(window, ui::backdrop(theme.blur_window, theme.transparent));
         }
         #[cfg(target_os = "windows")]
         {
