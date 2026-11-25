@@ -942,7 +942,7 @@ impl StateStore {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            theme: "wisp/dark".to_owned(),
+            theme: ThemeKind::System.id().to_owned(),
             adaptive_theme: false,
             ambient: true,
             ambient_motion: true,
@@ -3563,6 +3563,19 @@ mod tests {
     #[test]
     fn unblock_starts_off_until_a_provider_turns_it_on() {
         assert!(!Values::default().unblock_enabled);
+    }
+
+    #[test]
+    fn the_default_theme_follows_the_system_without_overriding_a_saved_choice() {
+        let values: Values = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            ThemeKind::from_id(&values.appearance.theme),
+            ThemeKind::System
+        );
+
+        let saved: Values =
+            serde_json::from_str(r#"{"appearance":{"theme":"wisp/dark"}}"#).unwrap();
+        assert_eq!(ThemeKind::from_id(&saved.appearance.theme), ThemeKind::Dark);
     }
 
     #[test]
