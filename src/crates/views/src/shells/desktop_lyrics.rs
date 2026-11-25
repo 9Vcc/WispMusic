@@ -550,9 +550,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
         .line_height(relative(SLOT_RATIO))
         .text_shadow([shadow()])
         .text_color(role.color())
-        .when(role != LineRole::Preview, |this| {
-            this.font_weight(FontWeight::SEMIBOLD)
-        })
+        .font_weight(FontWeight::SEMIBOLD)
         .child(line.text.clone())
         .into_any_element()
 }
@@ -638,9 +636,7 @@ fn plain_line(text: &str, role: LineRole, size: f32) -> AnyElement {
         .line_height(relative(SLOT_RATIO))
         .text_shadow([shadow()])
         .text_color(role.color())
-        .when(role != LineRole::Preview, |this| {
-            this.font_weight(FontWeight::SEMIBOLD)
-        })
+        .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(text.to_owned()))
         .into_any_element()
 }
