@@ -1444,6 +1444,23 @@ impl Render for Root {
         // see-through fullscreen reading nearly solid.
         let ambient = matches!(self.view, RootView::Fullscreen) && ambient::shown(cx);
 
+        let ui_alpha = match &self.splash {
+            Some(splash) => splash.read(cx).reveal(),
+            None => 1.,
+        };
+        if let Some(splash) = &self.splash {
+            if splash.read(cx).animating() {
+                return div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .bg(theme.background)
+                    .when_some(radius, |this, radius| this.rounded(radius).overflow_hidden())
+                    .child(splash.clone());
+            }
+        }
+
         // The shell enters the way a page enters the workspace. An opaque window fades it
         // under a scrim of the page colour, which leaves the workspace's cached views alone,
         // and a see-through one fades the shell itself. The scrim reaches the bottom corners
@@ -1581,6 +1598,7 @@ impl Render for Root {
             .children(self.dialogs.views())
             .child(self.theme_invite.clone())
             .child(self.powerbar.clone());
+        let shell = shell.opacity(ui_alpha);
 
         let root = div()
             .relative()
@@ -1593,12 +1611,18 @@ impl Render for Root {
             })
             .when(!ambient && !opening, |this| this.bg(theme.background))
             .text_color(theme.foreground)
-            .capture_any_mouse_down(|_, window, cx| {
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                if let Some(splash) = this.splash.as_ref() {
+                    if !splash.read(cx).done() {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 if ui::cancel_middle_scroll(cx) {
                     window.refresh();
                     cx.stop_propagation();
                 }
-            })
+            }))
             .capture_any_mouse_up(|event, window, cx| {
                 if event.button == MouseButton::Middle
                     && ui::release_middle_scroll(event.position, cx)
@@ -1612,19 +1636,15 @@ impl Render for Root {
                 }
             })
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    if let Some(splash) = this.splash.as_ref() {
-                        if splash
-                            .update(cx, |splash, cx| splash.skip(cx))
-                        {
-                            cx.stop_propagation();
-                            return;
-                        }
-                    }
-                    if ui::cancel_middle_scroll(cx) {
-                        window.refresh();
+                if let Some(splash) = this.splash.as_ref() {
+                    if !splash.read(cx).done() {
                         cx.stop_propagation();
+                        return;
                     }
+                }
+                if event.keystroke.key == "escape" && ui::cancel_middle_scroll(cx) {
+                    window.refresh();
+                    cx.stop_propagation();
                 }
             }))
             .on_mouse_move(|event, window, cx| {
@@ -1668,16 +1688,24 @@ impl Render for Root {
             .children(arriving)
             // The sign-in screen fills the whole window, under the bar.
             .when(show_sign_in, |this| {
-                this.child(div().absolute().inset_0().child(self.login.clone()))
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .opacity(ui_alpha)
+                        .child(self.login.clone()),
+                )
             })
             // The bar only changes when it is told to, so a frame drawn for the lyrics or the
             // progress bar replays it rather than building it again.
             .child(
-                self.title_bar.clone().cached(
-                    StyleRefinement::default()
-                        .w_full()
-                        .h(ui::snapped(theme.metrics.title_bar, window))
-                        .flex_none(),
+                div().flex_none().opacity(ui_alpha).child(
+                    self.title_bar.clone().cached(
+                        StyleRefinement::default()
+                            .w_full()
+                            .h(ui::snapped(theme.metrics.title_bar, window))
+                            .flex_none(),
+                    ),
                 ),
             )
             .when(!show_sign_in, |this| this.child(shell));

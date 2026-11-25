@@ -22,8 +22,6 @@ use ui::{
 const CARD: Pixels = px(400.);
 /// The app icon over the welcome.
 const ICON: Pixels = px(64.);
-/// The app icon, registered by the binary's asset source as the vector master.
-const APP_ICON: &str = "brand/wisp.svg";
 /// A provider's mark in its row.
 const MARK: Pixels = px(22.);
 /// The space between two provider rows.
@@ -455,7 +453,7 @@ impl LoginView {
             .flex_col()
             .items_center()
             .gap_2()
-            .child(svg().path(APP_ICON).size(ICON).mb_2())
+            .child(crate::brand::icon(ICON).mb_2())
             .child(
                 div()
                     .id("login-title")

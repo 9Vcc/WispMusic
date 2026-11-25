@@ -1,5 +1,6 @@
 // [wisp] vendored Sonora 界面代码，设置页裁剪后留下未用的槽位与行构造器，暂不逐个删除。
 #![allow(dead_code)]
+mod brand;
 mod chrome;
 mod root;
 mod screens;

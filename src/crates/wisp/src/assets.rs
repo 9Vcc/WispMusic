@@ -6,11 +6,6 @@ use gpui::{App, AssetSource, SharedString};
 
 include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
 
-/// Where About and the sign-in card ask for the app icon.
-const APP_ICON: &str = "brand/wisp.svg";
-/// The vector master, so the in-app mark stays crisp at any size and DPI.
-const APP_ICON_SVG: &[u8] = include_bytes!("../../../assets/icon.svg");
-
 /// RGBA icon sizes shared by X11 windows and status notifier pixmaps.
 #[cfg(target_os = "linux")]
 pub const LINUX_ICONS: &[(u32, &[u8])] = &[
@@ -74,9 +69,6 @@ impl Assets {
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == APP_ICON {
-            return Ok(Some(Cow::Borrowed(APP_ICON_SVG)));
-        }
         if let Some(bytes) = icons::Assets.load(path)? {
             return Ok(Some(bytes));
         }
