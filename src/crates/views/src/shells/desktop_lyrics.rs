@@ -6,6 +6,9 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
@@ -36,11 +39,15 @@ const DESIGN_MIN: f32 = 140.;
 const DESIGN_MAX: f32 = 320.;
 /// The pair slides out over this long after its second line ends.
 const SWAP: Duration = Duration::from_millis(220);
-/// The dark plate that fades in under the lyrics on hover.
+/// The dark plate that fades in under the lyrics on hover, and the heavier one that backs
+/// the strip while it is being moved or resized.
 const HOVER_ALPHA: f32 = 0.6;
+const INTERACT_ALPHA: f32 = 0.7;
 const HOVER_FADE: Duration = Duration::from_millis(300);
-/// Repaint cadence while a line fills word by word.
-const SWEEP_FRAME: Duration = Duration::from_millis(22);
+/// The lyrics ease towards the size their window now calls for, rather than snapping.
+const FONT_SETTLE: Duration = Duration::from_millis(220);
+/// Repaint cadence for the word sweep and the size transition.
+const SWEEP_FRAME: Duration = Duration::from_millis(16);
 const SWEEP_LEAST: Duration = Duration::from_millis(180);
 const SWEEP_STRETCH: f32 = 1.4;
 const SWEPT: f32 = 0.98;
@@ -145,6 +152,7 @@ fn open(cx: &mut App) {
             window.on_window_should_close(cx, {
                 let settings = settings.clone();
                 move |_, cx| {
+                    clear_interaction();
                     settings.update(cx, |settings, cx| settings.set_desktop_lyrics(false, cx));
                     cx.remove_global::<DesktopWindow>();
                     true
@@ -201,6 +209,28 @@ fn hide_frame(window: &Window) {
 #[cfg(not(target_os = "windows"))]
 fn hide_frame(_window: &Window) {}
 
+/// Set while Windows runs the move or resize loop, so the view can show its outline.
+#[cfg(target_os = "windows")]
+static INTERACTING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+fn interacting() -> bool {
+    INTERACTING.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn interacting() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn clear_interaction() {
+    INTERACTING.store(false, Ordering::Relaxed);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_interaction() {}
+
 #[cfg(target_os = "windows")]
 const RESIZE_SUBCLASS: usize = 1;
 
@@ -213,6 +243,7 @@ fn make_resizable(handle: *mut std::ffi::c_void) {
         GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_THICKFRAME,
     };
+    clear_interaction();
     unsafe {
         SetWindowSubclass(handle, Some(resize_subclass), RESIZE_SUBCLASS, 0);
         let style = GetWindowLongPtrW(handle, GWL_STYLE);
@@ -262,11 +293,20 @@ unsafe extern "system" fn resize_subclass(
     use windows_sys::Win32::UI::Shell::DefSubclassProc;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, GetClientRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
-        HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+        HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCALCSIZE,
+        WM_NCHITTEST, WM_NCLBUTTONDOWN,
     };
 
     unsafe {
         match message {
+            WM_ENTERSIZEMOVE => {
+                INTERACTING.store(true, Ordering::Relaxed);
+                DefSubclassProc(handle, message, wparam, lparam)
+            }
+            WM_EXITSIZEMOVE => {
+                INTERACTING.store(false, Ordering::Relaxed);
+                DefSubclassProc(handle, message, wparam, lparam)
+            }
             WM_NCCALCSIZE if wparam != 0 => 0,
             WM_NCHITTEST => {
                 let mut point = POINT {
@@ -403,6 +443,11 @@ struct DesktopLyric {
     swap: Option<Swap>,
     track: Option<String>,
     fit_font: Option<f32>,
+    /// The size on screen, easing towards what the window measures.
+    font: Option<f32>,
+    font_goal: f32,
+    font_from: f32,
+    font_started: Option<Instant>,
     hovering: bool,
     hover_changed: bool,
     hover_epoch: u32,
@@ -430,6 +475,10 @@ impl DesktopLyric {
             swap: None,
             track: None,
             fit_font: None,
+            font: None,
+            font_goal: 0.,
+            font_from: 0.,
+            font_started: None,
             hovering: false,
             hover_changed: false,
             hover_epoch: 0,
@@ -818,11 +867,40 @@ impl Render for DesktopLyric {
         }
         let setting_font = self.settings.read(cx).desktop_lyrics_font_size();
         let bounds = window.bounds();
-        let font = effective_font(
+        let goal = effective_font(
             setting_font,
             bounds.size.width.as_f32(),
             bounds.size.height.as_f32(),
         );
+        let now = Instant::now();
+        match self.font {
+            None => {
+                self.font = Some(goal);
+                self.font_goal = goal;
+            }
+            Some(current) => {
+                if (goal - self.font_goal).abs() >= 0.5 {
+                    self.font_goal = goal;
+                    self.font_from = current;
+                    self.font_started = Some(now);
+                }
+            }
+        }
+        if let Some(started) = self.font_started {
+            let progress =
+                ((now - started).as_secs_f32() / FONT_SETTLE.as_secs_f32()).clamp(0., 1.);
+            if progress >= 1. {
+                self.font = Some(self.font_goal);
+                self.font_started = None;
+            } else {
+                let eased = ui::ease_out_cubic(progress);
+                self.font = Some(self.font_from + (self.font_goal - self.font_from) * eased);
+                self.pump(cx);
+            }
+        } else if self.font != Some(self.font_goal) {
+            self.font = Some(self.font_goal);
+        }
+        let font = self.font.unwrap_or(goal);
         let slot = font * SLOT_RATIO;
         // Changing the saved size resizes the strip once; the effective size then follows
         // whatever the window measures.
@@ -1010,6 +1088,10 @@ impl Render for DesktopLyric {
             }
         }
 
+        let interacting = interacting();
+        if interacting {
+            self.pump(cx);
+        }
         let hovering = self.hovering;
         let hover_changed = self.hover_changed;
         let plate = SharedString::from(format!(
@@ -1027,6 +1109,7 @@ impl Render for DesktopLyric {
             .id("desktop-lyrics")
             .group("desktop-lyrics")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .rounded(px(RADIUS))
@@ -1043,12 +1126,13 @@ impl Render for DesktopLyric {
                 plate,
                 Animation::new(HOVER_FADE).with_easing(ui::ease_out_cubic),
                 move |this, delta| {
-                    if !hover_changed {
+                    if !hover_changed && !interacting {
                         return this;
                     }
-                    let alpha = match hovering {
-                        true => HOVER_ALPHA * delta,
-                        false => HOVER_ALPHA * (1. - delta),
+                    let alpha = match (interacting, hovering) {
+                        (true, _) => INTERACT_ALPHA,
+                        (false, true) => HOVER_ALPHA * delta,
+                        (false, false) => HOVER_ALPHA * (1. - delta),
                     };
                     this.bg(black().opacity(alpha))
                 },
@@ -1075,6 +1159,18 @@ impl Render for DesktopLyric {
                             .when_some(placeholder, |this, node| this.child(node)),
                     ),
             )
+            .when(interacting, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .rounded(px(RADIUS))
+                        .border_2()
+                        .border_color(white().opacity(0.4)),
+                )
+            })
     }
 }
 
