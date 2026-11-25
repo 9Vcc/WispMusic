@@ -6,14 +6,10 @@ use gpui::{App, AssetSource, SharedString};
 
 include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
 
-/// Where About asks for the app icon, and the icon this platform shows for the app.
-const APP_ICON: &str = "brand/wisp.png";
-#[cfg(target_os = "macos")]
-const APP_ICON_SVG: &[u8] = include_bytes!("../../../assets/macos/wisp.svg");
-#[cfg(target_os = "windows")]
-const APP_ICON_SVG: &[u8] = include_bytes!("../../../assets/windows/wisp.png");
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const APP_ICON_SVG: &[u8] = include_bytes!("../../../assets/linux/wisp.svg");
+/// Where About and the sign-in card ask for the app icon.
+const APP_ICON: &str = "brand/wisp.svg";
+/// The vector master, so the in-app mark stays crisp at any size and DPI.
+const APP_ICON_SVG: &[u8] = include_bytes!("../../../assets/icon.svg");
 
 /// RGBA icon sizes shared by X11 windows and status notifier pixmaps.
 #[cfg(target_os = "linux")]

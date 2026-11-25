@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, img};
+use gpui::{AnyElement, Context, FontWeight, SharedString, div, svg};
 use i18n::t;
 use state::{Channel, CheckFeedback, Wisp};
 use ui::{ActiveTheme as _, Button, Spinner, Text};
@@ -13,8 +13,8 @@ use super::{Group, SettingsView, Slot};
 
 /// How large the app icon stands, in covers.
 const MARK_TILE: f32 = 0.5;
-/// The app icon as this platform shows it, registered by the binary's asset source.
-const APP_ICON: &str = "brand/wisp.png";
+/// The app icon, registered by the binary's asset source as the vector master.
+const APP_ICON: &str = "brand/wisp.svg";
 /// The GPL-3.0 project Wisp's player is built from, named on the page since Wisp ships its
 /// source in binary form and the licence asks for the attribution to travel with it.
 const UPSTREAM_URL: &str = "https://github.com/sonorahq/sonora";
@@ -152,7 +152,7 @@ impl SettingsView {
             .flex()
             .items_center()
             .gap_5()
-            .child(img(APP_ICON).size(tile).flex_none())
+            .child(svg().path(APP_ICON).size(tile).flex_none())
             .child(
                 div()
                     .id("settings-about-name")
