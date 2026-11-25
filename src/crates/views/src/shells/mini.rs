@@ -13,7 +13,7 @@ use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
     FontWeight, Global, IntoElement, MouseButton, MouseUpEvent, Pixels, Point, Render,
-    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window,
+    ScrollStrategy, SharedString, Size, Task, UniformListScrollHandle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, relative,
     size, svg, uniform_list,
 };
@@ -120,14 +120,17 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
             ..Default::default()
         },
         |window, cx| {
-            crate::install_legacy_client_area(window, false);
+            let inset = crate::install_legacy_client_area(window, false);
             set_window_frame(window, window_frame_shown());
+            // Apply the material after the frame policy, so the acrylic is the last word on
+            // Windows 10.
+            window.set_background_appearance(background);
             window.on_window_should_close(cx, |_, cx| {
                 reveal_main(cx);
                 cx.remove_global::<MiniSession>();
                 true
             });
-            cx.new(|cx| MiniPlayer::new(playback, settings, cx))
+            cx.new(|cx| MiniPlayer::new(playback, settings, inset, cx))
         },
     ) else {
         return;
@@ -269,8 +272,10 @@ fn set_window_frame(_window: &Window, _shown: bool) {}
 /// Restores the window material after an animation that had to hide it.
 fn restore_material(window: &mut Window, cx: &App) {
     let theme = *cx.theme();
-    window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
+    // The acrylic is applied last: on Windows 10 the non-client policy would otherwise be
+    // the last state DWM sees after a transparent pass.
     set_window_frame(window, window_frame_shown());
+    window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
 }
 
 /// Windows 10 cannot round a per-pixel-alpha window, so its DWM shadow and border show as a
@@ -337,6 +342,8 @@ struct MiniPlayer {
     /// What the window material and its corners were last told, so they only change with the
     /// settings.
     background: Option<(bool, bool)>,
+    /// The frame GPUI still adds around a resize on Windows 10.
+    inset: Size<Pixels>,
     #[cfg(target_os = "windows")]
     rounding: Option<ui::Rounding>,
 }
@@ -345,6 +352,7 @@ impl MiniPlayer {
     fn new(
         playback: Entity<Playback>,
         settings: Entity<AppSettings>,
+        inset: Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
         let ticks = playback.read(cx).ticks().clone();
@@ -369,6 +377,7 @@ impl MiniPlayer {
             volume: ScrubberState::new("mini-volume"),
             pending_seek: None,
             background: None,
+            inset,
             #[cfg(target_os = "windows")]
             rounding: None,
         }
@@ -394,6 +403,16 @@ impl MiniPlayer {
         }
     }
 
+    /// Resizes the window to the card's content size. On Windows 10 GPUI still asks for the
+    /// frame it measured before the client area was widened, so that frame is taken back out
+    /// here; otherwise the window stays a few pixels taller than the card and its material
+    /// shows below the rounded edge.
+    fn resize_surface(&self, height: f32, window: &mut Window) {
+        let width = (WIDTH - self.inset.width.as_f32()).max(1.);
+        let height = (height - self.inset.height.as_f32()).max(1.);
+        window.resize(size(px(width), px(height)));
+    }
+
     fn set_expanded(&mut self, expanded: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.expanded == expanded {
             return;
@@ -408,6 +427,7 @@ impl MiniPlayer {
             if self.folding {
                 self.folding = false;
                 restore_material(window, cx);
+                self.background = None;
             }
             let sections = self.playback.read(cx).shown_queue(cx).sections;
             if sections.current {
@@ -416,7 +436,7 @@ impl MiniPlayer {
             }
             // The window is made tall once; the card height animates inside it. The OS is
             // never resized every frame, which re-entered GPUI and stalled the motion.
-            window.resize(size(px(WIDTH), px(EXPANDED)));
+            self.resize_surface(EXPANDED, window);
             cx.notify();
             return;
         }
@@ -426,6 +446,7 @@ impl MiniPlayer {
         self.folding = true;
         let handle = window.window_handle();
         let epoch = self.epoch;
+        let inset = self.inset;
         self.finish = Some(cx.spawn(async move |this, cx| {
             // Let the solid card paint once while the material is still on, so turning the
             // material off cannot reveal a translucent frame.
@@ -482,7 +503,10 @@ impl MiniPlayer {
             }
             handle
                 .update(cx, |_, window, _| {
-                    window.resize(size(px(WIDTH), px(BAR)));
+                    window.resize(size(
+                        px((WIDTH - inset.width.as_f32()).max(1.)),
+                        px((BAR - inset.height.as_f32()).max(1.)),
+                    ));
                 })
                 .ok();
             for _ in 0..40 {
@@ -533,6 +557,9 @@ impl MiniPlayer {
                     this.folding = false;
                     this.fold_started = false;
                     this.settling = false;
+                    // Re-assert the material once the folded window has settled, in case
+                    // the final resize reset DWM's acrylic layer.
+                    this.background = None;
                     cx.notify();
                 }
             })

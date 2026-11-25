@@ -5,7 +5,7 @@
 //! answers the resize hit tests the removed frame used to serve. Windows 11 tints its acrylic
 //! and covers the frame itself, so it is left alone.
 
-use gpui::Window;
+use gpui::{Pixels, Size, Window, WindowVisibility, px, size};
 
 /// Whether this is Windows 10 or older, by build number: 22000 is where Windows 11 starts.
 #[cfg(target_os = "windows")]
@@ -27,18 +27,38 @@ pub(crate) fn legacy_windows() -> bool {
 
 /// Widens a window's client area over the frame on Windows 10. `resizable` serves the frame
 /// edges' hit tests too; a popup that cannot resize only needs the client area widened.
-pub fn install(window: &Window, resizable: bool) {
+///
+/// Returns the frame inset GPUI still adds to `Window::resize` on this platform. The client
+/// area is widened after GPUI measured that inset, so a later resize request must subtract it
+/// or the window stays one frame larger than the surface the view paints.
+pub fn install(window: &Window, resizable: bool) -> Size<Pixels> {
     #[cfg(target_os = "windows")]
     {
         if !legacy_windows() {
-            return;
+            return size(px(0.), px(0.));
         }
         let Some(handle) = hwnd(window) else {
-            return;
+            return size(px(0.), px(0.));
         };
+        use windows_sys::Win32::Foundation::RECT;
         use windows_sys::Win32::UI::Shell::SetWindowSubclass;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+            GetClientRect, GetWindowRect, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        };
+        let scale = window.scale_factor();
+        let content = window.viewport_size();
+        let visible = window.visibility() == WindowVisibility::Visible;
+        let inset = unsafe {
+            let mut outer = RECT::default();
+            let mut client = RECT::default();
+            if GetWindowRect(handle, &mut outer) == 0 || GetClientRect(handle, &mut client) == 0 {
+                return size(px(0.), px(0.));
+            }
+            size(
+                px(((outer.right - outer.left) - (client.right - client.left)) as f32 / scale),
+                px(((outer.bottom - outer.top) - (client.bottom - client.top)) as f32 / scale),
+            )
         };
         unsafe {
             SetWindowSubclass(handle, Some(client_area), LEGACY_CLIENT_SUBCLASS, resizable as usize);
@@ -52,11 +72,31 @@ pub fn install(window: &Window, resizable: bool) {
                 0,
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            // A popup that was already laid out keeps its old outer size (and the material
+            // shows in the widened frame) until it is sized again. Visible popups have a
+            // usable content size here; hidden ones get theirs when they are first shown.
+            if !resizable && visible {
+                let width = (content.width.as_f32() * scale).round() as i32;
+                let height = (content.height.as_f32() * scale).round() as i32;
+                if width > 0 && height > 0 {
+                    SetWindowPos(
+                        handle,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        width,
+                        height,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
         }
+        inset
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (window, resizable);
+        size(px(0.), px(0.))
     }
 }
 
