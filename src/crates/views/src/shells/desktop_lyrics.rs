@@ -44,6 +44,8 @@ const SWAP: Duration = Duration::from_millis(220);
 const HOVER_ALPHA: f32 = 0.6;
 const INTERACT_ALPHA: f32 = 0.7;
 const HOVER_FADE: Duration = Duration::from_millis(300);
+/// How often the pointer is checked against the window, catching leaves the hover events miss.
+const HOVER_POLL: Duration = Duration::from_millis(200);
 /// The lyrics ease towards the size their window now calls for, rather than snapping.
 const FONT_SETTLE: Duration = Duration::from_millis(220);
 /// Repaint cadence for the word sweep and the size transition.
@@ -230,6 +232,48 @@ fn clear_interaction() {
 
 #[cfg(not(target_os = "windows"))]
 fn clear_interaction() {}
+
+#[cfg(target_os = "windows")]
+fn window_host(window: &Window) -> Option<usize> {
+    hwnd(window).map(|handle| handle as usize)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn window_host(_window: &Window) -> Option<usize> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn cursor_over_window(host: usize) -> bool {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    let mut point = POINT::default();
+    let mut rect = RECT::default();
+    unsafe {
+        GetCursorPos(&mut point) != 0
+            && GetWindowRect(host as *mut std::ffi::c_void, &mut rect) != 0
+            && point.x >= rect.left
+            && point.x < rect.right
+            && point.y >= rect.top
+            && point.y < rect.bottom
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cursor_over_window(_host: usize) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn left_button_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn left_button_down() -> bool {
+    false
+}
 
 #[cfg(target_os = "windows")]
 const RESIZE_SUBCLASS: usize = 1;
@@ -437,6 +481,7 @@ struct DesktopLyric {
     lyrics: Entity<Lyrics>,
     settings: Entity<AppSettings>,
     framed: bool,
+    host: Option<usize>,
     sweeping: Option<Task<()>>,
     /// The pair of lines on stage. It holds still while the second line sings.
     pair: Option<usize>,
@@ -465,11 +510,21 @@ impl DesktopLyric {
         cx.observe(&playback, |_, _, cx| cx.notify()).detach();
         cx.observe(&lyrics, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        // The window can move out from under the pointer in the middle of a drag, so its
+        // leave message is not enough to keep hover honest.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(HOVER_POLL).await;
+            if this.update(cx, |this, cx| this.poll_hover(cx)).is_err() {
+                break;
+            }
+        })
+        .detach();
         Self {
             playback,
             lyrics,
             settings,
             framed: false,
+            host: None,
             sweeping: None,
             pair: None,
             swap: None,
@@ -482,6 +537,26 @@ impl DesktopLyric {
             hovering: false,
             hover_changed: false,
             hover_epoch: 0,
+        }
+    }
+
+    /// Keeps hover and the move/resize outline honest when the pointer leaves without a leave
+    /// message, which happens when the window moves under the cursor during a drag.
+    fn poll_hover(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.host else {
+            return;
+        };
+        let inside = cursor_over_window(host);
+        let held = left_button_down();
+        if !held && interacting() {
+            clear_interaction();
+        }
+        let want = inside || (held && interacting());
+        if want != self.hovering {
+            self.hovering = want;
+            self.hover_changed = true;
+            self.hover_epoch = self.hover_epoch.wrapping_add(1);
+            cx.notify();
         }
     }
 
@@ -615,8 +690,14 @@ impl DesktopLyric {
     }
 }
 
-fn shadow() -> TextShadow {
-    TextShadow::new(black().opacity(0.7)).blur(px(6.))
+/// A tight dark rim that gives the glyphs a clean edge over a bright wallpaper, and a wide
+/// soft one that keeps them readable. The tight one is what masks grayscale antialiasing,
+/// since a transparent window cannot use subpixel text.
+fn shadows() -> [TextShadow; 2] {
+    [
+        TextShadow::new(black().opacity(0.6)).blur(px(2.)),
+        TextShadow::new(black().opacity(0.4)).blur(px(9.)),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -659,7 +740,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
             .whitespace_nowrap()
             .text_size(px(size))
             .line_height(relative(SLOT_RATIO))
-            .text_shadow([shadow()])
+            .text_shadow(shadows())
             .font_weight(FontWeight::SEMIBOLD);
         let row = fragments.into_iter().fold(row, |row, (text, word)| {
             let (start, end) = word_window(line.start, words, word);
@@ -706,7 +787,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
         .whitespace_nowrap()
         .text_size(px(size))
         .line_height(relative(SLOT_RATIO))
-        .text_shadow([shadow()])
+        .text_shadow(shadows())
         .text_color(role.color())
         .font_weight(FontWeight::SEMIBOLD)
         .child(line.text.clone())
@@ -792,7 +873,7 @@ fn plain_line(text: &str, role: LineRole, size: f32) -> AnyElement {
         .whitespace_nowrap()
         .text_size(px(size))
         .line_height(relative(SLOT_RATIO))
-        .text_shadow([shadow()])
+        .text_shadow(shadows())
         .text_color(role.color())
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(text.to_owned()))
@@ -856,7 +937,7 @@ fn placeholder_lyric(font: f32) -> AnyElement {
         .justify_center()
         .text_size(px(font))
         .text_color(white().opacity(0.6))
-        .text_shadow([shadow()])
+        .text_shadow(shadows())
         .child("♪")
         .into_any_element()
 }
@@ -866,6 +947,7 @@ impl Render for DesktopLyric {
         if !self.framed {
             self.framed = true;
             hide_frame(window);
+            self.host = window_host(window);
         }
         let setting_font = self.settings.read(cx).desktop_lyrics_font_size();
         let bounds = window.bounds();
@@ -902,7 +984,8 @@ impl Render for DesktopLyric {
         } else if self.font != Some(self.font_goal) {
             self.font = Some(self.font_goal);
         }
-        let font = self.font.unwrap_or(goal);
+        // Whole-pixel sizes rasterize cleanly; the eased value above only paces the steps.
+        let font = self.font.unwrap_or(goal).round().max(1.);
         let slot = font * SLOT_RATIO;
         // Changing the saved size resizes the strip once; the effective size then follows
         // whatever the window measures.
