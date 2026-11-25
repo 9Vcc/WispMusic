@@ -133,7 +133,7 @@ fn open(cx: &mut App) {
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::PopUp,
             titlebar: None,
-            is_resizable: false,
+            is_resizable: true,
             is_minimizable: false,
             is_movable: true,
             app_owns_titlebar_drag: true,
@@ -179,6 +179,7 @@ fn hide_frame(window: &Window) {
     let Some(hwnd) = hwnd(window) else {
         return;
     };
+    make_resizable(hwnd);
     let policy = DWMNCRP_DISABLED;
     let border = DWMWA_COLOR_NONE;
     unsafe {
@@ -199,6 +200,112 @@ fn hide_frame(window: &Window) {
 
 #[cfg(not(target_os = "windows"))]
 fn hide_frame(_window: &Window) {}
+
+#[cfg(target_os = "windows")]
+const RESIZE_SUBCLASS: usize = 1;
+
+/// Adds the sizing frame back and owns its hit testing: the client area covers the whole
+/// window, and the outer few pixels answer as resize edges instead of as content.
+#[cfg(target_os = "windows")]
+fn make_resizable(handle: *mut std::ffi::c_void) {
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_THICKFRAME,
+    };
+    unsafe {
+        SetWindowSubclass(handle, Some(resize_subclass), RESIZE_SUBCLASS, 0);
+        let style = GetWindowLongPtrW(handle, GWL_STYLE);
+        SetWindowLongPtrW(handle, GWL_STYLE, style | WS_THICKFRAME as isize);
+        SetWindowPos(
+            handle,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resize_hit(code: u32) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    };
+    matches!(
+        code,
+        HTLEFT
+            | HTRIGHT
+            | HTTOP
+            | HTTOPLEFT
+            | HTTOPRIGHT
+            | HTBOTTOM
+            | HTBOTTOMLEFT
+            | HTBOTTOMRIGHT
+    )
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn resize_subclass(
+    handle: *mut std::ffi::c_void,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    _subclass: usize,
+    _data: usize,
+) -> isize {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, GetClientRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
+        HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    };
+
+    unsafe {
+        match message {
+            WM_NCCALCSIZE if wparam != 0 => 0,
+            WM_NCHITTEST => {
+                let mut point = POINT {
+                    x: (lparam as u32 & 0xffff) as u16 as i16 as i32,
+                    y: ((lparam as u32 >> 16) & 0xffff) as u16 as i16 as i32,
+                };
+                let mut rect = RECT::default();
+                if GetClientRect(handle, &mut rect) == 0
+                    || ScreenToClient(handle, &mut point) == 0
+                {
+                    return DefSubclassProc(handle, message, wparam, lparam);
+                }
+                let dpi = GetDpiForWindow(handle);
+                let border = (8. * dpi as f32 / 96.).round().max(4.) as i32;
+                let left = point.x < border;
+                let right = point.x >= rect.right - border;
+                let top = point.y < border;
+                let bottom = point.y >= rect.bottom - border;
+                let edge = match (left, right, top, bottom) {
+                    (true, _, true, _) => HTTOPLEFT,
+                    (_, true, true, _) => HTTOPRIGHT,
+                    (true, _, _, true) => HTBOTTOMLEFT,
+                    (_, true, _, true) => HTBOTTOMRIGHT,
+                    (true, _, _, _) => HTLEFT,
+                    (_, true, _, _) => HTRIGHT,
+                    (_, _, true, _) => HTTOP,
+                    (_, _, _, true) => HTBOTTOM,
+                    _ => return DefSubclassProc(handle, message, wparam, lparam),
+                };
+                edge as isize
+            }
+            WM_NCLBUTTONDOWN if resize_hit(wparam as u32) => {
+                DefWindowProcW(handle, message, wparam, lparam);
+                0
+            }
+            _ => DefSubclassProc(handle, message, wparam, lparam),
+        }
+    }
+}
 
 /// The window height a font size designs for: two 1.35em slots plus the header.
 fn design_height(font: f32) -> f32 {
