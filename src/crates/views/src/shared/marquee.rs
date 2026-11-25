@@ -128,9 +128,8 @@ pub(crate) fn marquee<T: 'static>(
                 Animation::new(Duration::from_secs_f32(total))
                     .with_easing(move |t| match t <= hold_fraction {
                         true => 0.,
-                        false => ui::ease_in_out_cubic((t - hold_fraction) / (1. - hold_fraction)),
+                        false => ((t - hold_fraction) / (1. - hold_fraction)).clamp(0., 1.),
                     })
-                    .with_max_fps(30.)
                     .repeat(),
                 move |this, delta| this.left(px(-distance * delta)),
             ),
