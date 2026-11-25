@@ -1682,6 +1682,7 @@ fn stroke_cell(
     item: &StrokeChar,
     cell: f32,
     color: gpui::Hsla,
+    rim: bool,
     out_at: Option<Instant>,
     now: Instant,
 ) -> AnyElement {
@@ -1692,21 +1693,22 @@ fn stroke_cell(
             size: px(cell),
             poses,
             color: color.opacity(alpha),
-            halo: Some(black().opacity(0.6 * alpha)),
-            halo_scale: 1.08,
         }
         .into_any_element(),
-        None => div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .opacity(alpha)
-            .text_size(px((cell * 0.62).max(8.)))
-            .text_shadow(shadows((cell * 0.62).max(8.)))
-            .text_color(color)
-            .child(SharedString::from(item.timing.text.to_string()))
-            .into_any_element(),
+        None => {
+            let size = (cell * 0.62).max(8.);
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(alpha)
+                .text_size(px(size))
+                .when(rim, |this| this.text_shadow(shadows(size)))
+                .text_color(color)
+                .child(SharedString::from(item.timing.text.to_string()))
+                .into_any_element()
+        }
     };
     div()
         .flex_none()
@@ -1721,12 +1723,13 @@ fn stroke_cells(
     cell: f32,
     gap: f32,
     color: gpui::Hsla,
+    rim: bool,
     out_at: Option<Instant>,
     now: Instant,
 ) -> AnyElement {
     let mut row = div().flex().items_center().gap(px(gap));
     for item in &line.chars {
-        row = row.child(stroke_cell(item, cell, color, out_at, now));
+        row = row.child(stroke_cell(item, cell, color, rim, out_at, now));
     }
     row.into_any_element()
 }
@@ -1736,14 +1739,28 @@ fn stroke_column(
     cell: f32,
     gap: f32,
     color: gpui::Hsla,
+    rim: bool,
     out_at: Option<Instant>,
     now: Instant,
 ) -> AnyElement {
     let mut column = div().flex().flex_col().items_center().gap(px(gap));
     for item in &line.chars {
-        column = column.child(stroke_cell(item, cell, color, out_at, now));
+        column = column.child(stroke_cell(item, cell, color, rim, out_at, now));
     }
     column.into_any_element()
+}
+
+/// A dark, blurred copy of a stroke line drawn just below it, which is what makes light
+/// strokes read over light artwork. One blurred layer per line, not one filter per glyph.
+fn stroke_shadow(cells: AnyElement, cell: f32) -> AnyElement {
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px((cell * 0.04).max(1.)))
+        .blur(px((cell * 0.055).max(1.5)))
+        .child(cells)
+        .into_any_element()
 }
 
 fn stroke_view(
@@ -1772,7 +1789,23 @@ fn stroke_view(
         let mut scene = div().size_full().flex().items_stretch();
         for offset in 0..2 {
             let line = &pair.lines[offset];
-            let cells = stroke_column(line, cell, gap, color, pair.out_at, now);
+            let shadow = stroke_column(
+                line,
+                cell,
+                gap,
+                black().opacity(0.55),
+                false,
+                pair.out_at,
+                now,
+            );
+            let cells = stroke_column(line, cell, gap, color, true, pair.out_at, now);
+            let cells = {
+                let shadowed = stroke_shadow(shadow, cell);
+                // Keep the shadow behind the coloured column without changing its layout.
+                let mut layered = div().relative().child(shadowed);
+                layered = layered.child(cells);
+                layered.into_any_element()
+            };
             let column = div()
                 .flex_1()
                 .min_w_0()
@@ -1801,7 +1834,22 @@ fn stroke_view(
     let mut scene = div().size_full().flex().flex_col();
     for offset in 0..2 {
         let line = &pair.lines[offset];
-        let cells = stroke_cells(line, cell, gap, color, pair.out_at, now);
+        let shadow = stroke_cells(
+            line,
+            cell,
+            gap,
+            black().opacity(0.55),
+            false,
+            pair.out_at,
+            now,
+        );
+        let cells = stroke_cells(line, cell, gap, color, true, pair.out_at, now);
+        let cells = {
+            let shadowed = stroke_shadow(shadow, cell);
+            let mut layered = div().relative().child(shadowed);
+            layered = layered.child(cells);
+            layered.into_any_element()
+        };
         let row = div()
             .flex_1()
             .min_h_0()

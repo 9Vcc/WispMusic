@@ -327,10 +327,6 @@ pub(crate) struct StrokeCell {
     pub(crate) size: Pixels,
     pub(crate) poses: Vec<Pose>,
     pub(crate) color: Hsla,
-    /// A dark copy behind every stroke, scaled out a little, so light strokes stay visible
-    /// over a light wallpaper.
-    pub(crate) halo: Option<Hsla>,
-    pub(crate) halo_scale: f32,
 }
 
 impl IntoElement for StrokeCell {
@@ -389,58 +385,33 @@ impl Element for StrokeCell {
     ) {
         let factor = window.scale_factor();
         let pivot = bounds.center().scale(factor);
-        let pose_at = |index: usize| {
-            self.poses.get(index).copied().unwrap_or(Pose {
+        for (index, stroke) in self.hanzi.strokes.iter().enumerate() {
+            let pose = self.poses.get(index).copied().unwrap_or(Pose {
                 dx: 0.,
                 dy: 0.,
                 rot: 0.,
                 scale: 1.,
                 alpha: 1.,
-            })
-        };
-        let turn_for = |pose: Pose, scale: f32| {
+            });
+            if pose.alpha <= 0.002 {
+                continue;
+            }
             let offset = point(
                 ScaledPixels(pose.dx * factor),
                 ScaledPixels(pose.dy * factor),
             );
-            TransformationMatrix::unit()
+            let turn = TransformationMatrix::unit()
                 .translate(offset)
                 .translate(pivot)
                 .rotate(radians(pose.rot))
-                .scale(Size::new(scale, scale))
-                .translate(pivot.map(|inset| ScaledPixels(-inset.0)))
-        };
-        // Every stroke's dark copy goes down first, so later halos cannot cover an earlier
-        // stroke's colour.
-        if let Some(halo) = self.halo {
-            for (index, stroke) in self.hanzi.strokes.iter().enumerate() {
-                let pose = pose_at(index);
-                if pose.alpha <= 0.002 {
-                    continue;
-                }
-                window
-                    .paint_svg(
-                        bounds,
-                        stroke.key.clone(),
-                        Some(stroke.svg.as_bytes()),
-                        turn_for(pose, pose.scale * self.halo_scale),
-                        halo.opacity(pose.alpha),
-                        cx,
-                    )
-                    .ok();
-            }
-        }
-        for (index, stroke) in self.hanzi.strokes.iter().enumerate() {
-            let pose = pose_at(index);
-            if pose.alpha <= 0.002 {
-                continue;
-            }
+                .scale(Size::new(pose.scale, pose.scale))
+                .translate(pivot.map(|inset| ScaledPixels(-inset.0)));
             window
                 .paint_svg(
                     bounds,
                     stroke.key.clone(),
                     Some(stroke.svg.as_bytes()),
-                    turn_for(pose, pose.scale),
+                    turn,
                     self.color.opacity(pose.alpha),
                     cx,
                 )
@@ -1049,8 +1020,6 @@ impl Render for StrokeLyrics {
                             size: cell,
                             poses,
                             color,
-                            halo: None,
-                            halo_scale: 1.,
                         }
                         .into_any_element(),
                         None => div()
