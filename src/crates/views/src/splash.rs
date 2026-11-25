@@ -5,7 +5,8 @@ use gpui::{
     Context, IntoElement, MouseButton, Render, Window, WindowControlArea, canvas, div, px,
 };
 
-use crate::brand::{FADE_END, FADE_START, TOTAL, ease_out_cubic, paint_mark};
+use crate::brand::{FADE_END, FADE_START, TOTAL, MarkPalette, ease_out_cubic, paint_mark};
+use ui::ActiveTheme as _;
 
 /// How early the hidden UI starts building before the cross-fade, so its first layout is not a
 /// hitch on the frame the fade begins.
@@ -51,7 +52,7 @@ impl Splash {
 }
 
 impl Render for Splash {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = || div().absolute().inset_0().into_any_element();
         if self.done {
             return empty();
@@ -67,6 +68,7 @@ impl Render for Splash {
         let viewport = window.viewport_size();
         let shortest = viewport.width.min(viewport.height) / px(1.);
         let side = px(shortest * 0.66);
+        let palette = MarkPalette::launch(cx.theme());
         div()
             .absolute()
             .inset_0()
@@ -80,7 +82,7 @@ impl Render for Splash {
             .child(
                 canvas(
                     |_, _, _| {},
-                    move |bounds, _, window, _| paint_mark(bounds, t, window),
+                    move |bounds, _, window, _| paint_mark(bounds, t, palette, window),
                 )
                 .size(side)
                 .flex_none(),

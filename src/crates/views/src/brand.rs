@@ -13,6 +13,48 @@ const STONE: u32 = 0xBEB6A8;
 const BLUE: u32 = 0x4C8DFF;
 const RING: u32 = 0x2D3134;
 
+#[derive(Clone, Copy)]
+pub(crate) struct MarkPalette {
+    ring: Hsla,
+    left: Hsla,
+    right: Hsla,
+    accent: Hsla,
+}
+
+impl MarkPalette {
+    fn brand() -> Self {
+        Self {
+            ring: color(RING, 1.),
+            left: color(WHITE, 1.),
+            right: color(STONE, 1.),
+            accent: color(BLUE, 1.),
+        }
+    }
+
+    /// The launch mark follows the page it is painted on, while the app icon keeps the fixed
+    /// brand palette. A tinted theme also gives the two-colour W and the equalizer its cover hue.
+    pub(crate) fn launch(theme: &ui::Theme) -> Self {
+        let tinted = theme.tint.is_some();
+        Self {
+            ring: theme.muted_foreground,
+            left: theme.foreground,
+            right: match tinted {
+                true => theme.primary,
+                false => theme.muted_foreground,
+            },
+            accent: match tinted {
+                true => theme.primary,
+                false => color(BLUE, 1.),
+            },
+        }
+    }
+}
+
+fn faded(mut tint: Hsla, alpha: f32) -> Hsla {
+    tint.a *= alpha;
+    tint
+}
+
 pub(crate) const TOTAL: f32 = 3.0;
 pub(crate) const FADE_START: f32 = 2.65;
 pub(crate) const FADE_END: f32 = 3.00;
@@ -206,6 +248,7 @@ fn draw_pip(
     scale: f32,
     angle_deg: f32,
     radius_scale: f32,
+    tint: Hsla,
     alpha: f32,
 ) {
     if alpha <= 0.001 {
@@ -214,15 +257,15 @@ fn draw_pip(
     let angle = angle_deg.to_radians();
     let x = 512. + 340. * angle.cos();
     let y = 512. + 340. * angle.sin();
-    dot(
-        window,
-        at(x, y),
-        px(24. * radius_scale * scale),
-        color(BLUE, alpha),
-    );
+    dot(window, at(x, y), px(24. * radius_scale * scale), faded(tint, alpha));
 }
 
-pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
+pub(crate) fn paint_mark(
+    bounds: Bounds<Pixels>,
+    t: f32,
+    palette: MarkPalette,
+    window: &mut Window,
+) {
     let scale = bounds.size.width / px(1024.);
     let at = |x: f32, y: f32| {
         point(
@@ -239,7 +282,7 @@ pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
             scale,
             RING_FROM,
             RING_TO,
-            color(RING, faint),
+            faded(palette.ring, faint),
         );
     }
 
@@ -252,12 +295,12 @@ pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
             scale,
             RING_FROM,
             pip_deg,
-            color(RING, 1.),
+            palette.ring,
         );
     }
     let rest = phase(t, 1.95, 2.40);
     if rest > 0.001 {
-        draw_arc(window, &at, scale, pip_deg, RING_TO, color(RING, 1.));
+        draw_arc(window, &at, scale, pip_deg, RING_TO, palette.ring);
     }
 
     if p > 0.001 {
@@ -272,10 +315,10 @@ pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
             size: size(half, bounds.size.height),
         };
         window.with_content_mask(Some(ContentMask { bounds: left }), |window| {
-            draw_w(window, &at, scale, &points, color(WHITE, 1.));
+            draw_w(window, &at, scale, &points, palette.left);
         });
         window.with_content_mask(Some(ContentMask { bounds: right }), |window| {
-            draw_w(window, &at, scale, &points, color(STONE, 1.));
+            draw_w(window, &at, scale, &points, palette.right);
         });
     }
 
@@ -292,7 +335,7 @@ pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
                 x,
                 BAR_CY - height / 2.,
                 BAR_CY + height / 2.,
-                color(BLUE, 1.),
+                palette.accent,
             );
         }
     }
@@ -305,6 +348,7 @@ pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
             scale,
             pip_deg,
             radius_scale,
+            palette.accent,
             (p * 3.).min(1.),
         );
     }
@@ -316,6 +360,7 @@ pub(crate) fn paint_mark(bounds: Bounds<Pixels>, t: f32, window: &mut Window) {
             scale,
             PIP_ANGLE,
             1. + 0.10 * (std::f32::consts::PI * pop).sin(),
+            palette.accent,
             1.,
         );
     }
@@ -345,7 +390,7 @@ pub(crate) fn paint_icon(bounds: Bounds<Pixels>, window: &mut Window) {
         window.paint_path(tile, color(TILE, 1.));
     }
 
-    paint_mark(bounds, TOTAL, window);
+    paint_mark(bounds, TOTAL, MarkPalette::brand(), window);
 }
 
 /// The app icon at `size`, painted at the display resolution rather than scaling a bitmap.
@@ -357,4 +402,31 @@ pub(crate) fn icon(size: Pixels) -> gpui::Div {
         )
         .size(size),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_neutral_launch_uses_theme_text_and_the_brand_accent() {
+        let theme = ui::Theme::dark();
+        let palette = MarkPalette::launch(&theme);
+
+        assert_eq!(palette.ring, theme.muted_foreground);
+        assert_eq!(palette.left, theme.foreground);
+        assert_eq!(palette.right, theme.muted_foreground);
+        assert_eq!(palette.accent, color(BLUE, 1.));
+    }
+
+    #[test]
+    fn a_tinted_launch_uses_the_theme_accent_for_the_mark() {
+        let mut theme = ui::Theme::dark();
+        theme.tint = Some(rgb(0x7C5CFF).into());
+        theme.primary = rgb(0x9B8CFF).into();
+        let palette = MarkPalette::launch(&theme);
+
+        assert_eq!(palette.right, theme.primary);
+        assert_eq!(palette.accent, theme.primary);
+    }
 }
