@@ -101,29 +101,6 @@ fn login_method(options: &[SignIn]) -> Option<SignIn> {
         .cloned()
 }
 
-/// Whether this is Windows 10, whose acrylic does not follow the app's dark surface.
-#[cfg(target_os = "windows")]
-fn legacy_windows() -> bool {
-    use std::sync::OnceLock;
-    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
-    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
-
-    static LEGACY: OnceLock<bool> = OnceLock::new();
-    *LEGACY.get_or_init(|| unsafe {
-        let mut version = OSVERSIONINFOW {
-            dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
-            ..Default::default()
-        };
-        RtlGetVersion(&mut version);
-        version.dwBuildNumber < 22000
-    })
-}
-
-#[cfg(not(target_os = "windows"))]
-fn legacy_windows() -> bool {
-    false
-}
-
 impl TitleBar {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let navigation = router::trail(cx);
@@ -505,15 +482,9 @@ impl Render for TitleBar {
             .h(height)
             .flex_none()
             .when_some(radius, |this, radius| this.rounded_t(radius))
-            .when(
-                (!self.options.transparent && !theme.transparent)
-                    // Windows 10's acrylic is not tinted like Windows 11's, so a see-through
-                    // title bar would show a bright blurred band above the dark page.
-                    || (theme.transparent && theme.blur_window && legacy_windows()),
-                // The page keeps the thinner wash under a blurred window, but Windows 10's
-                // title bar needs its original colour back to cover the untinted acrylic.
-                |this| this.bg(theme.background),
-            )
+            .when(!self.options.transparent && !theme.transparent, |this| {
+                this.bg(theme.background)
+            })
             // The height is a border box, so a bar that drops its border centres its controls
             // one pixel lower than one that keeps it. The edge is always an edge; only its
             // colour goes, and fullscreen's controls land where the workspace's do.
