@@ -694,7 +694,6 @@ impl DesktopLyric {
                         }
                     }
                 }
-                this.pump(cx);
                 cx.notify();
             },
             cx,
@@ -839,12 +838,11 @@ impl DesktopLyric {
         }
     }
 
-    fn tick_stroke(&mut self, now_ms: f64, playing: bool, cx: &mut Context<Self>) {
+    fn tick_stroke(&mut self, now_ms: f64) {
         let Some(scene) = self.stroke.as_mut() else {
             return;
         };
         if scene.out_at.is_some() {
-            self.pump(cx);
             return;
         }
         let now = Instant::now();
@@ -878,9 +876,6 @@ impl DesktopLyric {
                     None => {}
                 }
             }
-        }
-        if playing {
-            self.pump(cx);
         }
     }
 
@@ -1458,28 +1453,34 @@ fn vertical_line(
     columns.into_any_element()
 }
 
-fn vertical_pair(
-    lines: &[LyricsLine],
-    pair: usize,
+#[derive(Clone, Copy)]
+struct VerticalStage<'a> {
+    lines: &'a [LyricsLine],
     at: Duration,
     font: f32,
     height: f32,
+}
+
+fn vertical_pair(
+    stage: VerticalStage<'_>,
+    pair: usize,
     opacity: f32,
+    offsets: (f32, f32),
     roles: Option<(LineRole, LineRole)>,
 ) -> AnyElement {
-    let first = lines.get(pair);
-    let second = lines.get(pair + 1);
+    let first = stage.lines.get(pair);
+    let second = stage.lines.get(pair + 1);
     let (left_role, right_role) = roles.unwrap_or_else(|| {
         (
-            first.map_or(LineRole::Preview, |line| LineRole::at(line, at)),
-            second.map_or(LineRole::Preview, |line| LineRole::at(line, at)),
+            first.map_or(LineRole::Preview, |line| LineRole::at(line, stage.at)),
+            second.map_or(LineRole::Preview, |line| LineRole::at(line, stage.at)),
         )
     });
     let left = first
-        .map(|line| vertical_line(line, at, left_role, font, height, false))
+        .map(|line| vertical_line(line, stage.at, left_role, stage.font, stage.height, false))
         .unwrap_or_else(|| div().into_any_element());
     let right = second
-        .map(|line| vertical_line(line, at, right_role, font, height, true))
+        .map(|line| vertical_line(line, stage.at, right_role, stage.font, stage.height, true))
         .unwrap_or_else(|| div().into_any_element());
     div()
         .absolute()
@@ -1492,6 +1493,8 @@ fn vertical_pair(
                 .flex_1()
                 .min_w_0()
                 .h_full()
+                .relative()
+                .left(px(offsets.0))
                 .flex()
                 .items_start()
                 .justify_start()
@@ -1505,6 +1508,8 @@ fn vertical_pair(
                 .flex_1()
                 .min_w_0()
                 .h_full()
+                .relative()
+                .left(px(offsets.1))
                 .flex()
                 .items_end()
                 .justify_end()
@@ -1529,21 +1534,23 @@ fn synthetic_line(text: String, start_ms: u64) -> LyricsLine {
 }
 
 fn vertical_scene(
-    lines: &[LyricsLine],
+    stage: VerticalStage<'_>,
     pair: usize,
     swap: Option<(usize, f32)>,
-    at: Duration,
-    font: f32,
-    height: f32,
+    slide: f32,
     roles: Option<(LineRole, LineRole)>,
 ) -> AnyElement {
     let mut scene = div().relative().size_full();
     if let Some((from, eased)) = swap {
+        // Both pair columns leave towards their own edge, and the incoming pair
+        // arrives from the same side.
+        let out = (-slide * eased, slide * eased);
+        let back = -slide * (1. - eased);
         scene = scene
-            .child(vertical_pair(lines, from, at, font, height, 1. - eased, roles))
-            .child(vertical_pair(lines, pair, at, font, height, eased, roles));
+            .child(vertical_pair(stage, from, 1. - eased, out, roles))
+            .child(vertical_pair(stage, pair, eased, (back, -back), roles));
     } else {
-        scene = scene.child(vertical_pair(lines, pair, at, font, height, 1., roles));
+        scene = scene.child(vertical_pair(stage, pair, 1., (0., 0.), roles));
     }
     scene.into_any_element()
 }
@@ -1570,23 +1577,6 @@ fn scatter_poses(trigger_ms: f64, index: usize, count: usize) -> Vec<Pose> {
         .collect()
 }
 
-fn blank_poses(item: &StrokeChar) -> Vec<Pose> {
-    item.data
-        .as_ref()
-        .map(|data| {
-            (0..data.stroke_count())
-                .map(|_| Pose {
-                    dx: 0.,
-                    dy: 0.,
-                    rot: 0.,
-                    scale: 1.,
-                    alpha: 0.,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Vec<Pose>, f32) {
     if let Some(out_at) = out_at {
         let progress = ((now.saturating_duration_since(out_at).as_secs_f64() * 1000.)
@@ -1594,7 +1584,7 @@ fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Ve
             .clamp(0., 1.);
         let alpha = (1. - progress) as f32;
         let Some(scatter) = item.scatter.as_ref() else {
-            return (blank_poses(item), alpha);
+            return (Vec::new(), alpha);
         };
         let eased = (progress * progress) as f32;
         let poses = scatter
@@ -1608,7 +1598,7 @@ fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Ve
                 alpha,
             })
             .collect();
-        return (poses, alpha);
+        return (poses, 1.);
     }
     if let Some(fly) = item.fly.as_ref() {
         let elapsed = now.saturating_duration_since(fly.start).as_secs_f64() * 1000.;
@@ -1631,27 +1621,13 @@ fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Ve
         return (poses, 1.);
     }
     if item.assembled {
-        let poses = item
-            .data
-            .as_ref()
-            .map(|data| {
-                (0..data.stroke_count())
-                    .map(|_| Pose {
-                        dx: 0.,
-                        dy: 0.,
-                        rot: 0.,
-                        scale: 1.,
-                        alpha: 1.,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        return (poses, 1.);
+        // An empty list makes StrokeCell fall back to its rest pose for every stroke.
+        return (Vec::new(), 1.);
     }
     if let Some(at) = item.fallback_at {
         return (Vec::new(), if now >= at { 1. } else { 0. });
     }
-    (blank_poses(item), 0.)
+    (Vec::new(), 0.)
 }
 
 fn stroke_cell(
@@ -1667,7 +1643,7 @@ fn stroke_cell(
             hanzi: hanzi.clone(),
             size: px(cell),
             poses,
-            color,
+            color: color.opacity(alpha),
         }
         .into_any_element(),
         None => div()
@@ -1871,7 +1847,11 @@ impl Render for DesktopLyric {
                 || (bounds.size.height.as_f32() - target_height).abs() > 1.
             {
                 cx.defer_in(window, move |_, window, cx| {
-                    fit_to_shape(window, setting_font, vertical, cx)
+                    fit_to_shape(window, setting_font, vertical, cx);
+                    // SetWindowPos settles the native size; read it back before the next
+                    // frame so layout does not keep drawing at the old shape.
+                    window.bounds_changed(cx);
+                    cx.notify();
                 });
             }
         }
@@ -1923,19 +1903,22 @@ impl Render for DesktopLyric {
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut vertical_stage: Option<AnyElement> = None;
         let mut placeholder = None;
+        let mut stroke_animating = false;
         match lyric {
             Some(MusicLyrics::Synced { lines }) => {
                 let active = music::lyrics::active(&lines, at);
                 if stroke_mode {
                     self.swap = None;
-                    if playing {
-                        self.pump(cx);
-                    }
                     self.advance_stroke_pair(active, Instant::now());
                     if let Some(pair) = self.pair.filter(|pair| *pair < lines.len()) {
                         self.build_stroke_pair(&lines, pair, cx);
-                        self.tick_stroke(at.as_secs_f64() * 1000., playing, cx);
+                        self.tick_stroke(at.as_secs_f64() * 1000.);
                     }
+                    stroke_animating = self
+                        .stroke
+                        .as_ref()
+                        .is_some_and(|scene| scene.out_at.is_some())
+                        || (playing && self.stroke.is_some());
                 } else {
                     let filling = active
                         .and_then(|index| lines.get(index))
@@ -1973,78 +1956,86 @@ impl Render for DesktopLyric {
                         self.pump(cx);
                     }
                 }
-                if vertical {
-                    match self.pair.filter(|pair| *pair < lines.len()) {
-                        Some(pair) => {
-                            let swap = self
-                                .swap
-                                .filter(|swap| swap.from < lines.len())
-                                .map(|swap| {
+                // The stroke view owns the stage; do not build the text layers under it.
+                if !stroke_mode {
+                    if vertical {
+                        match self.pair.filter(|pair| *pair < lines.len()) {
+                            Some(pair) => {
+                                let swap = self
+                                    .swap
+                                    .filter(|swap| swap.from < lines.len())
+                                    .map(|swap| {
+                                        let progress = (swap.started.elapsed().as_secs_f32()
+                                            / SWAP.as_secs_f32())
+                                        .clamp(0., 1.);
+                                        (swap.from, 1. - (1. - progress).powi(3))
+                                    });
+                                vertical_stage = Some(vertical_scene(
+                                    VerticalStage {
+                                        lines: &lines,
+                                        at,
+                                        font,
+                                        height: bounds.size.height.as_f32() - EDGE,
+                                    },
+                                    pair,
+                                    swap,
+                                    slot,
+                                    None,
+                                ));
+                            }
+                            None => placeholder = Some(placeholder_lyric(font)),
+                        }
+                    } else {
+                        let stage = Stage {
+                            lines: &lines,
+                            at,
+                            font,
+                            slot,
+                        };
+                        match self.pair.filter(|pair| *pair < lines.len()) {
+                            Some(pair) => {
+                                if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len()) {
                                     let progress = (swap.started.elapsed().as_secs_f32()
                                         / SWAP.as_secs_f32())
                                     .clamp(0., 1.);
-                                    (swap.from, 1. - (1. - progress).powi(3))
-                                });
-                            vertical_stage = Some(vertical_scene(
-                                &lines,
-                                pair,
-                                swap,
-                                at,
-                                font,
-                                bounds.size.height.as_f32() - EDGE,
-                                None,
-                            ));
-                        }
-                        None => placeholder = Some(placeholder_lyric(font)),
-                    }
-                } else {
-                    let stage = Stage {
-                        lines: &lines,
-                        at,
-                        font,
-                        slot,
-                    };
-                    match self.pair.filter(|pair| *pair < lines.len()) {
-                        Some(pair) => {
-                            if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len()) {
-                                let progress = (swap.started.elapsed().as_secs_f32()
-                                    / SWAP.as_secs_f32())
-                                .clamp(0., 1.);
-                                let eased = 1. - (1. - progress).powi(3);
-                                for offset in 0..2 {
-                                    let tail = offset == 1;
-                                    let index = swap.from + offset;
-                                    rows.push(pair_row(
-                                        &stage,
-                                        index,
-                                        offset as f32 * slot - slot * eased,
-                                        1. - eased,
-                                        tail,
-                                    ));
-                                    let index = pair + offset;
-                                    rows.push(pair_row(
-                                        &stage,
-                                        index,
-                                        offset as f32 * slot + 2. * slot * (1. - eased),
-                                        eased,
-                                        tail,
-                                    ));
-                                }
-                            } else {
-                                for offset in 0..2 {
-                                    let index = pair + offset;
-                                    rows.push(pair_row(
-                                        &stage,
-                                        index,
-                                        offset as f32 * slot,
-                                        1.,
-                                        offset == 1,
-                                    ));
+                                    let eased = 1. - (1. - progress).powi(3);
+                                    for offset in 0..2 {
+                                        let tail = offset == 1;
+                                        let index = swap.from + offset;
+                                        rows.push(pair_row(
+                                            &stage,
+                                            index,
+                                            offset as f32 * slot - slot * eased,
+                                            1. - eased,
+                                            tail,
+                                        ));
+                                        let index = pair + offset;
+                                        rows.push(pair_row(
+                                            &stage,
+                                            index,
+                                            offset as f32 * slot + 2. * slot * (1. - eased),
+                                            eased,
+                                            tail,
+                                        ));
+                                    }
+                                } else {
+                                    for offset in 0..2 {
+                                        let index = pair + offset;
+                                        rows.push(pair_row(
+                                            &stage,
+                                            index,
+                                            offset as f32 * slot,
+                                            1.,
+                                            offset == 1,
+                                        ));
+                                    }
                                 }
                             }
+                            None => placeholder = Some(placeholder_lyric(font)),
                         }
-                        None => placeholder = Some(placeholder_lyric(font)),
                     }
+                } else if self.stroke.is_none() {
+                    placeholder = Some(placeholder_lyric(font));
                 }
             }
             Some(MusicLyrics::Plain { text, .. }) => {
@@ -2058,12 +2049,15 @@ impl Render for DesktopLyric {
                 if vertical {
                     let lines = vec![synthetic_line(first, 0), synthetic_line(second, 10_000)];
                     vertical_stage = Some(vertical_scene(
-                        &lines,
+                        VerticalStage {
+                            lines: &lines,
+                            at,
+                            font,
+                            height: bounds.size.height.as_f32() - EDGE,
+                        },
                         0,
                         None,
-                        at,
-                        font,
-                        bounds.size.height.as_f32() - EDGE,
+                        font * SLOT_RATIO,
                         Some((LineRole::Singing, LineRole::Preview)),
                     ));
                 } else {
@@ -2098,12 +2092,15 @@ impl Render for DesktopLyric {
                         synthetic_line(artist.to_string(), 10_000),
                     ];
                     vertical_stage = Some(vertical_scene(
-                        &lines,
+                        VerticalStage {
+                            lines: &lines,
+                            at,
+                            font,
+                            height: bounds.size.height.as_f32() - EDGE,
+                        },
                         0,
                         None,
-                        at,
-                        font,
-                        bounds.size.height.as_f32() - EDGE,
+                        font * SLOT_RATIO,
                         Some((LineRole::Singing, LineRole::Preview)),
                     ));
                 } else {
@@ -2142,6 +2139,9 @@ impl Render for DesktopLyric {
                 (true, false) => "out",
             }
         ));
+        if stroke_animating {
+            window.request_animation_frame();
+        }
         let stage_height = slot * 2.;
         let showing_stroke = stroke_mode && self.stroke.is_some();
         let vertical_content = vertical_stage.unwrap_or_else(|| placeholder_lyric(font));
