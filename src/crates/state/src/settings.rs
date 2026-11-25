@@ -432,6 +432,10 @@ struct Values {
     desktop_lyrics: bool,
     /// 桌面歌词字号（逻辑像素）。
     desktop_lyrics_font_size: f32,
+    /// 桌面歌词是否竖排。
+    desktop_lyrics_vertical: bool,
+    /// 桌面歌词是否使用笔画动效。
+    desktop_lyrics_stroke: bool,
     parallax_lyrics: bool,
     lyrics_motion_preset: LyricMotionPreset,
     romanized_lyrics: bool,
@@ -703,6 +707,8 @@ impl Default for Values {
             stroke_lyrics: false,
             desktop_lyrics: false,
             desktop_lyrics_font_size: 40.,
+            desktop_lyrics_vertical: false,
+            desktop_lyrics_stroke: false,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
             romanized_lyrics: true,
@@ -1351,6 +1357,14 @@ impl AppSettings {
         self.values.desktop_lyrics_font_size.clamp(24., 64.)
     }
 
+    pub fn desktop_lyrics_vertical(&self) -> bool {
+        self.values.desktop_lyrics_vertical
+    }
+
+    pub fn desktop_lyrics_stroke(&self) -> bool {
+        self.values.desktop_lyrics_stroke
+    }
+
     pub fn parallax_lyrics(&self) -> bool {
         self.values.parallax_lyrics
     }
@@ -1972,6 +1986,22 @@ impl AppSettings {
             return;
         }
         self.values.desktop_lyrics_font_size = size;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics_vertical(&mut self, vertical: bool, cx: &mut Context<Self>) {
+        if self.values.desktop_lyrics_vertical == vertical {
+            return;
+        }
+        self.values.desktop_lyrics_vertical = vertical;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics_stroke(&mut self, stroke: bool, cx: &mut Context<Self>) {
+        if self.values.desktop_lyrics_stroke == stroke {
+            return;
+        }
+        self.values.desktop_lyrics_stroke = stroke;
         self.schedule_save(cx);
     }
 

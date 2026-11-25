@@ -87,3 +87,8 @@ speed-control = Playback speed
 lyric-version-number = Version #{ $count }
 lyric-version-restore = Restore default lyrics
 lyric-version-lines = { $count } lines
+
+desktop-lyrics-vertical = Switch to vertical
+desktop-lyrics-horizontal = Switch to horizontal
+desktop-lyrics-stroke = Switch to stroke animation
+desktop-lyrics-default = Switch to default animation

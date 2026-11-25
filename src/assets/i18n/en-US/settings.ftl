@@ -472,3 +472,7 @@ settings-log = Log file
 settings-log-detail = What Wisp wrote while running. Attach it to a bug report
 settings-log-open = Open log
 
+settings-desktop-lyrics-vertical = Vertical layout
+settings-desktop-lyrics-vertical-detail = Traditional vertical columns instead of two rows
+settings-desktop-lyrics-stroke = Stroke animation
+settings-desktop-lyrics-stroke-detail = Write each character stroke by stroke, then scatter it at the end of the line

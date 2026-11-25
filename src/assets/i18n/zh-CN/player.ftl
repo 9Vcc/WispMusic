@@ -88,3 +88,8 @@ lyric-version-lines = { $count } 行
 player-time-left = -{ $time }
 player-time-left-spoken = 剩余 { $time }
 lyrics-instrumental-break = 间奏
+
+desktop-lyrics-vertical = 切换为竖向显示
+desktop-lyrics-horizontal = 切换为横向显示
+desktop-lyrics-stroke = 切换为笔画动效
+desktop-lyrics-default = 切换为默认动效

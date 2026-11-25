@@ -25,7 +25,7 @@ use ui::ActiveTheme as _;
 
 use super::aside::lyrics_frame_scale;
 
-const STROKE_SCATTER_MS: f64 = 320.;
+pub(crate) const STROKE_SCATTER_MS: f64 = 320.;
 const CELL_MIN: f32 = 26.;
 const CELL_MAX: f32 = 46.;
 const COLUMN_HEIGHT_RATIO: f32 = 0.68;
@@ -48,24 +48,24 @@ const STROKE_CHAR_RE: &[(u32, u32)] = &[
     (0xF900, 0xFAFF),
 ];
 
-fn is_strokable(ch: char) -> bool {
+pub(crate) fn is_strokable(ch: char) -> bool {
     STROKE_CHAR_RE
         .iter()
         .any(|(from, to)| (*from..=*to).contains(&(ch as u32)))
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Timing {
-    text: char,
-    trigger_ms: f64,
-    span_ms: f64,
+pub(crate) struct Timing {
+    pub(crate) text: char,
+    pub(crate) trigger_ms: f64,
+    pub(crate) span_ms: f64,
 }
 
 fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.
 }
 
-fn flatten_line(line: &LyricsLine) -> Vec<Timing> {
+pub(crate) fn flatten_line(line: &LyricsLine) -> Vec<Timing> {
     let mut timings = Vec::new();
     if let Some(words) = line.words.as_ref().filter(|words| !words.is_empty()) {
         for word in words {
@@ -139,7 +139,7 @@ fn char_interval(timings: &[Timing]) -> f64 {
     }
 }
 
-fn instant_line(timings: &[Timing]) -> bool {
+pub(crate) fn instant_line(timings: &[Timing]) -> bool {
     char_interval(timings) < INSTANT_CHAR_BUDGET_MS
 }
 
@@ -197,12 +197,12 @@ fn cell_size(stage_height: f32, column_length: usize, scale: f32) -> f32 {
 }
 
 #[derive(Clone, Copy)]
-struct Timeline {
-    scale: f64,
-    tail_ms: f64,
+pub(crate) struct Timeline {
+    pub(crate) scale: f64,
+    pub(crate) tail_ms: f64,
 }
 
-fn fit_timeline(budget_ms: f64) -> Timeline {
+pub(crate) fn fit_timeline(budget_ms: f64) -> Timeline {
     let fast_natural = FLY_STAGGER_SPACE_MS + FLY_PATH_NATURAL_MS;
     let natural = fast_natural + FLY_TAIL_MS;
     if budget_ms >= natural {
@@ -224,12 +224,12 @@ fn fit_timeline(budget_ms: f64) -> Timeline {
     }
 }
 
-fn ease_out_cubic(value: f64) -> f64 {
+pub(crate) fn ease_out_cubic(value: f64) -> f64 {
     let invert = 1. - value.clamp(0., 1.);
     1. - invert * invert * invert
 }
 
-fn next_random(seed: &mut u64) -> f64 {
+pub(crate) fn next_random(seed: &mut u64) -> f64 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 7;
     *seed ^= *seed << 17;
@@ -239,8 +239,14 @@ fn next_random(seed: &mut u64) -> f64 {
 // ---------------------------------------------------------------------------
 // 笔画数据
 
-struct Hanzi {
+pub(crate) struct Hanzi {
     strokes: Vec<HanziStroke>,
+}
+
+impl Hanzi {
+    pub(crate) fn stroke_count(&self) -> usize {
+        self.strokes.len()
+    }
 }
 
 struct HanziStroke {
@@ -255,7 +261,7 @@ static HANZI_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .unwrap_or_default()
 });
 
-async fn fetch_hanzi(ch: char) -> Result<Option<Arc<Hanzi>>> {
+pub(crate) async fn fetch_hanzi(ch: char) -> Result<Option<Arc<Hanzi>>> {
     const SOURCES: [&str; 2] = [
         "https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1/",
         "https://unpkg.com/hanzi-writer-data@2.0.1/",
@@ -308,19 +314,19 @@ async fn fetch_hanzi(ch: char) -> Result<Option<Arc<Hanzi>>> {
 // 渲染
 
 #[derive(Clone, Copy)]
-struct Pose {
-    dx: f32,
-    dy: f32,
-    rot: f32,
-    scale: f32,
-    alpha: f32,
+pub(crate) struct Pose {
+    pub(crate) dx: f32,
+    pub(crate) dy: f32,
+    pub(crate) rot: f32,
+    pub(crate) scale: f32,
+    pub(crate) alpha: f32,
 }
 
-struct StrokeCell {
-    hanzi: Arc<Hanzi>,
-    size: Pixels,
-    poses: Vec<Pose>,
-    color: Hsla,
+pub(crate) struct StrokeCell {
+    pub(crate) hanzi: Arc<Hanzi>,
+    pub(crate) size: Pixels,
+    pub(crate) poses: Vec<Pose>,
+    pub(crate) color: Hsla,
 }
 
 impl IntoElement for StrokeCell {
@@ -417,13 +423,13 @@ impl Element for StrokeCell {
 // ---------------------------------------------------------------------------
 // 视图
 
-struct FlyStroke {
-    delay_ms: f64,
-    duration_ms: f64,
-    dx: f32,
-    dy: f32,
-    rot: f32,
-    scale: f32,
+pub(crate) struct FlyStroke {
+    pub(crate) delay_ms: f64,
+    pub(crate) duration_ms: f64,
+    pub(crate) dx: f32,
+    pub(crate) dy: f32,
+    pub(crate) rot: f32,
+    pub(crate) scale: f32,
 }
 
 struct Fly {
@@ -469,7 +475,7 @@ enum Phase {
     Out,
 }
 
-pub(super) struct StrokeLyrics {
+pub(crate) struct StrokeLyrics {
     lyrics: gpui::Entity<state::Lyrics>,
     playback: gpui::Entity<Playback>,
     settings: gpui::Entity<AppSettings>,
@@ -488,7 +494,7 @@ pub(super) struct StrokeLyrics {
 }
 
 impl StrokeLyrics {
-    pub(super) fn new(
+    pub(crate) fn new(
         lyrics: gpui::Entity<state::Lyrics>,
         playback: gpui::Entity<Playback>,
         settings: gpui::Entity<AppSettings>,
@@ -795,7 +801,7 @@ impl StrokeLyrics {
     }
 }
 
-fn fly_strokes(
+pub(crate) fn fly_strokes(
     data: &Hanzi,
     seed: &mut u64,
     timeline: Timeline,

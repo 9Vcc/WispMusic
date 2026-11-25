@@ -4,6 +4,8 @@
 //! and it never takes focus when it opens. The settings toggle is the only source of truth:
 //! the installer watches it and opens or closes this window accordingly.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
@@ -19,16 +21,28 @@ use gpui::{
 };
 use i18n::t;
 use music::{Lyrics as MusicLyrics, LyricsLine, LyricsWord};
-use state::{AppSettings, Lyrics, Playback, PlaybackState, Wisp};
+use state::{AppSettings, Io, Lyrics, Playback, PlaybackState, Wisp};
 use ui::Button;
+
+use crate::chrome::stroke_lyrics::{
+    FlyStroke, Hanzi, Pose, StrokeCell, Timing, fetch_hanzi, fit_timeline, flatten_line,
+    fly_strokes, instant_line, is_strokable, next_random, STROKE_SCATTER_MS,
+};
 
 use crate::shared::transport::{next, previous, toggle};
 
 const WIDTH: f32 = 1000.;
+/// Vertical windows trade the wide strip for a tall one, two columns wide.
+const VERTICAL_HEIGHT: f32 = 620.;
+const VERTICAL_MIN_WIDTH: f32 = 300.;
+const VERTICAL_MAX_WIDTH: f32 = 600.;
+const VERTICAL_RATIO: f32 = 6.5;
 /// Room above the taskbar for the window's bottom edge.
 const MARGIN: f32 = 56.;
 const HEADER: f32 = 48.;
 const EDGE: f32 = 16.;
+/// Keep the vertical toolbar and the right column clear of each other.
+const VERTICAL_SAFE: f32 = 48.;
 const RADIUS: f32 = 12.;
 const MIN_FONT: f32 = 24.;
 const MAX_FONT: f32 = 64.;
@@ -112,7 +126,8 @@ fn open(cx: &mut App) {
     let lyrics = Wisp::global(cx).lyrics.clone();
     let settings = Wisp::global(cx).settings.clone();
     let font = settings.read(cx).desktop_lyrics_font_size();
-    let height = design_height(font);
+    let vertical = settings.read(cx).desktop_lyrics_vertical();
+    let height = design_height(font, vertical);
 
     let frame = host.0.update(cx, |_, window, _| window.bounds()).ok();
     let displays = cx.displays();
@@ -129,12 +144,17 @@ fn open(cx: &mut App) {
     let (origin, size) = match area {
         Some(area) => {
             let available = area.size.width.as_f32();
-            let width = WIDTH.min((available - 64.).max(320.));
+            let width = design_width(font, vertical).min((available - 64.).max(320.));
+            let height = height.min(area.size.height.as_f32());
             let x = area.origin.x.as_f32() + (available - width) / 2.;
-            let y = area.origin.y.as_f32() + area.size.height.as_f32() - height - MARGIN;
+            let y = (area.origin.y.as_f32() + area.size.height.as_f32() - height - MARGIN)
+                .max(area.origin.y.as_f32());
             (point(px(x), px(y)), size(px(width), px(height)))
         }
-        None => (point(px(100.), px(100.)), size(px(WIDTH), px(height))),
+        None => (
+            point(px(100.), px(100.)),
+            size(px(design_width(font, vertical)), px(height)),
+        ),
     };
     let opened = cx.open_window(
         WindowOptions {
@@ -391,26 +411,51 @@ unsafe extern "system" fn resize_subclass(
     }
 }
 
-/// The window height a font size designs for: two 1.35em slots plus the header.
-fn design_height(font: f32) -> f32 {
-    (font * DESIGN_RATIO).round().clamp(DESIGN_MIN, DESIGN_MAX) + HEADER
+fn design_width(font: f32, vertical: bool) -> f32 {
+    match vertical {
+        true => (font * VERTICAL_RATIO)
+            .round()
+            .clamp(VERTICAL_MIN_WIDTH, VERTICAL_MAX_WIDTH),
+        false => WIDTH,
+    }
+}
+
+/// The window height a font size designs for: two 1.35em slots plus the header, or a tall
+/// column that fits a whole line.
+fn design_height(font: f32, vertical: bool) -> f32 {
+    match vertical {
+        true => VERTICAL_HEIGHT,
+        false => (font * DESIGN_RATIO).round().clamp(DESIGN_MIN, DESIGN_MAX) + HEADER,
+    }
 }
 
 /// The size lyrics draw at: the saved size times how far the window has strayed from the
 /// geometry its size designs for. A window made shorter or narrower brings smaller lyrics.
-fn effective_font(setting: f32, width: f32, height: f32) -> f32 {
-    let stage = design_height(setting) - HEADER;
-    let actual = (height - HEADER).max(0.);
-    if stage <= 0. || actual <= 0. || width <= 0. {
+fn effective_font(setting: f32, width: f32, height: f32, vertical: bool) -> f32 {
+    let design_width = design_width(setting, vertical);
+    let design_height = design_height(setting, vertical);
+    let (base, actual) = match vertical {
+        true => (design_width, width),
+        false => (design_height - HEADER, height - HEADER),
+    };
+    if base <= 0. || actual <= 0. || width <= 0. || height <= 0. {
         return setting;
     }
-    let factor = (actual / stage).min(width / WIDTH);
+    let factor = match vertical {
+        true => (actual / base).min(height / design_height),
+        false => (actual / base).min(width / design_width),
+    };
     (setting * factor).round().clamp(16., 96.)
 }
 
-/// Resizes the strip for a new font size, keeping its centre where it was.
-fn fit_to_font(window: &mut Window, font: f32, cx: &App) {
-    place_window(window, WIDTH, design_height(font), cx);
+/// Resizes the strip for a new font size or direction, keeping its centre where it was.
+fn fit_to_shape(window: &mut Window, font: f32, vertical: bool, cx: &App) {
+    place_window(
+        window,
+        design_width(font, vertical),
+        design_height(font, vertical),
+        cx,
+    );
 }
 
 fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
@@ -487,7 +532,7 @@ struct DesktopLyric {
     pair: Option<usize>,
     swap: Option<Swap>,
     track: Option<String>,
-    fit_font: Option<f32>,
+    fit: Option<(f32, bool)>,
     /// The size on screen, easing towards what the window measures.
     font: Option<f32>,
     font_goal: f32,
@@ -496,6 +541,43 @@ struct DesktopLyric {
     hovering: bool,
     hover_changed: bool,
     hover_epoch: u32,
+    stroke: Option<StrokePair>,
+    stroke_pending: Option<usize>,
+    hanzi: HashMap<char, Option<Arc<Hanzi>>>,
+    fetching: HashSet<char>,
+    stroke_tasks: Vec<Task<()>>,
+}
+
+struct StrokePair {
+    first: usize,
+    lines: [StrokeLine; 2],
+    out_at: Option<Instant>,
+}
+
+struct StrokeLine {
+    chars: Vec<StrokeChar>,
+    instant: bool,
+    fly_budget: f64,
+}
+
+struct StrokeChar {
+    timing: Timing,
+    data: Option<Arc<Hanzi>>,
+    no_data: bool,
+    fly: Option<StrokeFly>,
+    assembled: bool,
+    scatter: Option<StrokeScatter>,
+    fallback_at: Option<Instant>,
+}
+
+struct StrokeFly {
+    start: Instant,
+    strokes: Vec<FlyStroke>,
+}
+
+struct StrokeScatter {
+    start: Instant,
+    poses: Vec<Pose>,
 }
 
 impl DesktopLyric {
@@ -529,7 +611,7 @@ impl DesktopLyric {
             pair: None,
             swap: None,
             track: None,
-            fit_font: None,
+            fit: None,
             font: None,
             font_goal: 0.,
             font_from: 0.,
@@ -537,6 +619,11 @@ impl DesktopLyric {
             hovering: false,
             hover_changed: false,
             hover_epoch: 0,
+            stroke: None,
+            stroke_pending: None,
+            hanzi: HashMap::new(),
+            fetching: HashSet::new(),
+            stroke_tasks: Vec::new(),
         }
     }
 
@@ -581,6 +668,222 @@ impl DesktopLyric {
         }));
     }
 
+    fn request_hanzi(&mut self, ch: char, cx: &mut Context<Self>) {
+        if !is_strokable(ch) || self.hanzi.contains_key(&ch) || self.fetching.contains(&ch) {
+            return;
+        }
+        self.fetching.insert(ch);
+        let task = Io::global(cx).load(
+            async move { fetch_hanzi(ch).await },
+            move |this: &mut Self, answer, cx| {
+                this.fetching.remove(&ch);
+                let data = answer.ok().flatten();
+                this.hanzi.insert(ch, data.clone());
+                if this.hanzi.len() > 800
+                    && let Some(old) = this.hanzi.keys().copied().find(|key| *key != ch)
+                {
+                    this.hanzi.remove(&old);
+                }
+                if let Some(pair) = this.stroke.as_mut() {
+                    for line in &mut pair.lines {
+                        for item in &mut line.chars {
+                            if item.timing.text == ch && item.data.is_none() {
+                                item.data = data.clone();
+                                item.no_data = data.is_none();
+                            }
+                        }
+                    }
+                }
+                this.pump(cx);
+                cx.notify();
+            },
+            cx,
+        );
+        self.stroke_tasks.push(task);
+    }
+
+    fn build_stroke_pair(&mut self, lines: &[LyricsLine], pair: usize, cx: &mut Context<Self>) {
+        if self.stroke.as_ref().is_some_and(|scene| scene.first == pair) {
+            return;
+        }
+        let mut built = Vec::with_capacity(2);
+        for offset in 0..2 {
+            let index = pair + offset;
+            let Some(line) = lines.get(index) else {
+                built.push(StrokeLine {
+                    chars: Vec::new(),
+                    instant: true,
+                    fly_budget: 0.,
+                });
+                continue;
+            };
+            let timings = flatten_line(line);
+            let next_start = lines
+                .get(index + 1)
+                .map(|next| next.start)
+                .unwrap_or(line.start + Duration::from_secs(5));
+            let window = next_start
+                .saturating_sub(line.start)
+                .max(Duration::from_millis(600));
+            let last_offset = timings
+                .last()
+                .map(|timing| timing.trigger_ms)
+                .unwrap_or(0.)
+                - line.start.as_secs_f64() * 1000.;
+            let fly_budget = (window.as_secs_f64() * 1000. - 120. - last_offset).max(0.);
+            let instant = instant_line(&timings);
+            let chars = timings
+                .into_iter()
+                .map(|timing| {
+                    let cached = self.hanzi.get(&timing.text).cloned().flatten();
+                    let no_data = !is_strokable(timing.text)
+                        || self
+                            .hanzi
+                            .get(&timing.text)
+                            .is_some_and(|data| data.is_none());
+                    StrokeChar {
+                        timing,
+                        data: cached,
+                        no_data,
+                        fly: None,
+                        assembled: false,
+                        scatter: None,
+                        fallback_at: None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            built.push(StrokeLine {
+                chars,
+                instant,
+                fly_budget,
+            });
+        }
+        let wanted = built
+            .iter()
+            .flat_map(|line| line.chars.iter().map(|item| item.timing.text))
+            .collect::<HashSet<_>>();
+        for ch in wanted {
+            self.request_hanzi(ch, cx);
+        }
+        for index in [pair + 2, pair + 3] {
+            if let Some(line) = lines.get(index) {
+                for ch in line.text.chars() {
+                    self.request_hanzi(ch, cx);
+                }
+            }
+        }
+        self.stroke = Some(StrokePair {
+            first: pair,
+            lines: [built.remove(0), built.remove(0)],
+            out_at: None,
+        });
+        self.stroke_pending = None;
+    }
+
+    fn advance_stroke_pair(&mut self, active: Option<usize>, now: Instant) {
+        match (self.pair, active) {
+            (None, Some(active)) => {
+                self.pair = Some(active);
+                self.stroke = None;
+            }
+            (Some(pair), Some(active)) if active == pair || active == pair + 1 => {
+                self.stroke_pending = None;
+                if let Some(scene) = self.stroke.as_mut()
+                    && scene.out_at.take().is_some()
+                {
+                    for line in &mut scene.lines {
+                        for item in &mut line.chars {
+                            item.scatter = None;
+                        }
+                    }
+                }
+            }
+            (Some(_), Some(active)) => {
+                self.stroke_pending = Some(active);
+                if let Some(scene) = self.stroke.as_mut()
+                    && scene.out_at.is_none()
+                {
+                    scene.out_at = Some(now);
+                    for line in &mut scene.lines {
+                        for (index, item) in line.chars.iter_mut().enumerate() {
+                            if let Some(data) = item.data.as_ref() {
+                                item.scatter = Some(StrokeScatter {
+                                    start: now,
+                                    poses: scatter_poses(
+                                        item.timing.trigger_ms,
+                                        index,
+                                        data.stroke_count(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            (_, None) => {
+                self.pair = None;
+                self.stroke = None;
+                self.stroke_pending = None;
+            }
+        }
+        if self
+            .stroke
+            .as_ref()
+            .and_then(|scene| scene.out_at)
+            .is_some_and(|at| at.elapsed().as_secs_f64() * 1000. >= STROKE_SCATTER_MS)
+        {
+            if let Some(next) = self.stroke_pending.take() {
+                self.pair = Some(next);
+            }
+            self.stroke = None;
+        }
+    }
+
+    fn tick_stroke(&mut self, now_ms: f64, playing: bool, cx: &mut Context<Self>) {
+        let Some(scene) = self.stroke.as_mut() else {
+            return;
+        };
+        if scene.out_at.is_some() {
+            self.pump(cx);
+            return;
+        }
+        let now = Instant::now();
+        for line in &mut scene.lines {
+            for (index, item) in line.chars.iter_mut().enumerate() {
+                if item.assembled || item.fly.is_some() || item.scatter.is_some() {
+                    continue;
+                }
+                let delay = item.timing.trigger_ms - now_ms;
+                if delay > 0. {
+                    continue;
+                }
+                let late = -delay;
+                match item.data.clone() {
+                    Some(data) => {
+                        if line.instant || late > 600. {
+                            item.assembled = true;
+                            continue;
+                        }
+                        let timeline = fit_timeline((line.fly_budget - late).max(0.));
+                        let start = now - Duration::from_millis(late.max(0.) as u64);
+                        let mut seed = (item.timing.trigger_ms as u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add(index as u64);
+                        let (strokes, _) = fly_strokes(&data, &mut seed, timeline, start);
+                        item.fly = Some(StrokeFly { start, strokes });
+                    }
+                    None if item.no_data => {
+                        item.fallback_at = Some(now);
+                    }
+                    None => {}
+                }
+            }
+        }
+        if playing {
+            self.pump(cx);
+        }
+    }
+
     fn change_font(&mut self, delta: f32, cx: &mut Context<Self>) {
         let size = self.settings.read(cx).desktop_lyrics_font_size();
         self.settings.update(cx, |settings, cx| {
@@ -588,36 +891,11 @@ impl DesktopLyric {
         });
     }
 
-    fn header(&self, title: SharedString, size: f32, cx: &mut Context<Self>) -> AnyElement {
-        let font = SharedString::from(format!("{}", size.round() as i32));
-        let title = div()
-            .flex()
-            .min_w_0()
-            .flex_1()
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .child(
-                div()
-                    .flex()
-                    .min_w_0()
-                    .items_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(white().opacity(0.15))
-                    .bg(black().opacity(0.45))
-                    .px(px(12.))
-                    .py(px(4.))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(13.))
-                            .text_color(white().opacity(0.75))
-                            .child(title),
-                    ),
-            );
-        let transport = div()
+    fn transport(&self, vertical: bool, cx: &mut Context<Self>) -> AnyElement {
+        div()
             .flex()
             .flex_none()
+            .when(vertical, |this| this.flex_col())
             .items_center()
             .gap(px(1.))
             .rounded_full()
@@ -627,10 +905,18 @@ impl DesktopLyric {
             .p(px(2.))
             .child(previous(&self.playback, false, cx).tint(white()))
             .child(toggle(&self.playback, false, false, cx).tint(white()))
-            .child(next(&self.playback, false, cx).tint(white()));
-        let controls = div()
+            .child(next(&self.playback, false, cx).tint(white()))
+            .into_any_element()
+    }
+
+    fn display(&self, vertical: bool, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        let font = SharedString::from(format!("{}", size.round() as i32));
+        let vertical_layout = self.settings.read(cx).desktop_lyrics_vertical();
+        let stroke = self.settings.read(cx).desktop_lyrics_stroke();
+        div()
             .flex()
             .flex_none()
+            .when(vertical, |this| this.flex_col())
             .items_center()
             .gap(px(1.))
             .rounded_full()
@@ -638,6 +924,43 @@ impl DesktopLyric {
             .border_color(white().opacity(0.15))
             .bg(black().opacity(0.45))
             .p(px(2.))
+            .child(
+                Button::new("desktop-lyrics-direction")
+                    .ghost()
+                    .small()
+                    .icon(match vertical_layout {
+                        true => "icons/sliders-horizontal.svg",
+                        false => "icons/columns-3.svg",
+                    })
+                    .tint(white())
+                    .tooltip_above(match vertical_layout {
+                        true => "desktop-lyrics-horizontal",
+                        false => "desktop-lyrics-vertical",
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let vertical = this.settings.read(cx).desktop_lyrics_vertical();
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_desktop_lyrics_vertical(!vertical, cx)
+                        });
+                    })),
+            )
+            .child(
+                Button::new("desktop-lyrics-stroke")
+                    .ghost()
+                    .small()
+                    .icon("icons/pencil.svg")
+                    .tint(white())
+                    .tooltip_above(match stroke {
+                        true => "desktop-lyrics-default",
+                        false => "desktop-lyrics-stroke",
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let stroke = this.settings.read(cx).desktop_lyrics_stroke();
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_desktop_lyrics_stroke(!stroke, cx)
+                        });
+                    })),
+            )
             .child(
                 Button::new("desktop-lyrics-font-down")
                     .ghost()
@@ -676,8 +999,36 @@ impl DesktopLyric {
                         this.settings
                             .update(cx, |settings, cx| settings.set_desktop_lyrics(false, cx));
                     })),
-            );
+            )
+            .into_any_element()
+    }
 
+    fn header(&self, title: SharedString, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        let title = div()
+            .flex()
+            .min_w_0()
+            .flex_1()
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(white().opacity(0.15))
+                    .bg(black().opacity(0.45))
+                    .px(px(12.))
+                    .py(px(4.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(white().opacity(0.75))
+                            .child(title),
+                    ),
+            );
         div()
             .flex_none()
             .flex()
@@ -688,8 +1039,25 @@ impl DesktopLyric {
             .px(px(12.))
             .when(!self.hovering, |this| this.invisible())
             .child(title)
-            .child(transport)
-            .child(controls)
+            .child(self.transport(false, cx))
+            .child(self.display(false, size, cx))
+            .into_any_element()
+    }
+
+    fn vertical_header(&self, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .right(px(8.))
+            .top(px(8.))
+            .bottom(px(8.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .when(!self.hovering, |this| this.invisible())
+            .child(self.transport(true, cx))
+            .child(self.display(true, size, cx))
             .into_any_element()
     }
 }
@@ -938,6 +1306,489 @@ fn plain_row(text: String, role: LineRole, font: f32, slot: f32, top: f32, tail:
         .into_any_element()
 }
 
+#[derive(Clone)]
+struct CharTiming {
+    text: char,
+    start: Duration,
+    end: Duration,
+}
+
+/// Splits a line into one timing per visible character, using the word timing when there is
+/// one and spreading the line otherwise.
+fn char_timings(line: &LyricsLine) -> Vec<CharTiming> {
+    let mut timings = Vec::new();
+    if let Some(words) = line.words.as_deref().filter(|words| !words.is_empty()) {
+        for word in words {
+            let chars = word.text.chars().filter(|ch| !ch.is_whitespace()).collect::<Vec<_>>();
+            let count = chars.len() as f64;
+            if count == 0. {
+                continue;
+            }
+            let span = word.end.saturating_sub(word.start);
+            for (index, text) in chars.into_iter().enumerate() {
+                let start = word.start + span.mul_f64(index as f64 / count);
+                let end = word.start + span.mul_f64((index + 1) as f64 / count);
+                timings.push(CharTiming {
+                    text,
+                    start,
+                    end: end.max(start + Duration::from_millis(1)),
+                });
+            }
+        }
+        return timings;
+    }
+    let chars = line
+        .text
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<Vec<_>>();
+    let count = chars.len() as f64;
+    if count == 0. {
+        return timings;
+    }
+    let span = line
+        .end
+        .map(|end| end.saturating_sub(line.start))
+        .unwrap_or(Duration::from_secs(4));
+    for (index, text) in chars.into_iter().enumerate() {
+        let start = line.start + span.mul_f64(index as f64 / count);
+        let end = line.start + span.mul_f64((index + 1) as f64 / count);
+        timings.push(CharTiming {
+            text,
+            start,
+            end: end.max(start + Duration::from_millis(1)),
+        });
+    }
+    timings
+}
+
+fn vertical_char(
+    timing: &CharTiming,
+    at: Duration,
+    role: LineRole,
+    font: f32,
+    slot: f32,
+    tail: bool,
+) -> AnyElement {
+    let width = (font * 1.2).max(1.);
+    let base = div()
+        .relative()
+        .flex_none()
+        .w(px(width))
+        .h(px(slot))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(font))
+        .line_height(relative(1.))
+        .text_shadow(shadows(font))
+        .text_color(role.color())
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(SharedString::from(timing.text.to_string()));
+    let base = match role == LineRole::Singing {
+        true => {
+            let share = swept(timing.start, timing.end, at, tail);
+            match share > 0. {
+                true => base.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(relative(share))
+                        .overflow_hidden()
+                        .text_shadow([])
+                        .text_color(white())
+                        .when(share < 1., |this| this.fade_edges(px(0.), px(font * SWEEP_EDGE)))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(slot))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(font))
+                                .line_height(relative(1.))
+                                .child(SharedString::from(timing.text.to_string())),
+                        ),
+                ),
+                false => base,
+            }
+        }
+        false => base,
+    };
+    base.into_any_element()
+}
+
+/// One line as vertical columns: characters stack downwards, and a long line continues in the
+/// next column to the left, the way vertical writing flows.
+fn vertical_line(
+    line: &LyricsLine,
+    at: Duration,
+    role: LineRole,
+    font: f32,
+    height: f32,
+    align_end: bool,
+) -> AnyElement {
+    let timings = char_timings(line);
+    if timings.is_empty() {
+        return div().into_any_element();
+    }
+    let slot = font * SLOT_RATIO;
+    let per = ((height / slot).floor() as usize).max(1);
+    let last = timings.len().saturating_sub(1);
+    let mut columns = div()
+        .flex()
+        .flex_row_reverse()
+        .when(align_end, |this| this.items_end())
+        .when(!align_end, |this| this.items_start())
+        .gap(px((font * 0.12).max(2.)));
+    let chunks = timings.chunks(per).collect::<Vec<_>>();
+    for chunk in chunks {
+        let mut column = div().flex().flex_col().items_center();
+        for timing in chunk {
+            let tail = std::ptr::eq(timing, &timings[last]);
+            column = column.child(vertical_char(timing, at, role, font, slot, tail));
+        }
+        columns = columns.child(column);
+    }
+    columns.into_any_element()
+}
+
+fn vertical_pair(
+    lines: &[LyricsLine],
+    pair: usize,
+    at: Duration,
+    font: f32,
+    height: f32,
+    opacity: f32,
+    roles: Option<(LineRole, LineRole)>,
+) -> AnyElement {
+    let first = lines.get(pair);
+    let second = lines.get(pair + 1);
+    let (left_role, right_role) = roles.unwrap_or_else(|| {
+        (
+            first.map_or(LineRole::Preview, |line| LineRole::at(line, at)),
+            second.map_or(LineRole::Preview, |line| LineRole::at(line, at)),
+        )
+    });
+    let left = first
+        .map(|line| vertical_line(line, at, left_role, font, height, false))
+        .unwrap_or_else(|| div().into_any_element());
+    let right = second
+        .map(|line| vertical_line(line, at, right_role, font, height, true))
+        .unwrap_or_else(|| div().into_any_element());
+    div()
+        .absolute()
+        .size_full()
+        .flex()
+        .items_stretch()
+        .opacity(opacity)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_start()
+                .justify_start()
+                .overflow_hidden()
+                .pl(px(EDGE / 2.))
+                .pr(px(4.))
+                .child(left),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_end()
+                .justify_end()
+                .overflow_hidden()
+                .pl(px(4.))
+                .pr(px(VERTICAL_SAFE))
+                .child(right),
+        )
+        .into_any_element()
+}
+
+fn synthetic_line(text: String, start_ms: u64) -> LyricsLine {
+    LyricsLine {
+        start: Duration::from_millis(start_ms),
+        end: Some(Duration::from_millis(start_ms + 4000)),
+        text,
+        romanized: None,
+        words: None,
+        secondary: Vec::new(),
+        voice: Default::default(),
+    }
+}
+
+fn vertical_scene(
+    lines: &[LyricsLine],
+    pair: usize,
+    swap: Option<(usize, f32)>,
+    at: Duration,
+    font: f32,
+    height: f32,
+    roles: Option<(LineRole, LineRole)>,
+) -> AnyElement {
+    let mut scene = div().relative().size_full();
+    if let Some((from, eased)) = swap {
+        scene = scene
+            .child(vertical_pair(lines, from, at, font, height, 1. - eased, roles))
+            .child(vertical_pair(lines, pair, at, font, height, eased, roles));
+    } else {
+        scene = scene.child(vertical_pair(lines, pair, at, font, height, 1., roles));
+    }
+    scene.into_any_element()
+}
+
+fn scatter_poses(trigger_ms: f64, index: usize, count: usize) -> Vec<Pose> {
+    let mut seed = (trigger_ms as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(index as u64)
+        .wrapping_add(0x5DEE_CE66);
+    (0..count)
+        .map(|_| {
+            let depth = next_random(&mut seed);
+            let angle = next_random(&mut seed) * std::f64::consts::TAU;
+            let radius = 120. + 360. * depth;
+            let rot = (next_random(&mut seed) * 2. - 1.) * (24. + 48. * depth);
+            Pose {
+                dx: (angle.cos() * radius) as f32,
+                dy: (angle.sin() * radius) as f32,
+                rot: rot.to_radians() as f32,
+                scale: (0.78 + 0.36 * (1. - depth)) as f32,
+                alpha: 1.,
+            }
+        })
+        .collect()
+}
+
+fn blank_poses(item: &StrokeChar) -> Vec<Pose> {
+    item.data
+        .as_ref()
+        .map(|data| {
+            (0..data.stroke_count())
+                .map(|_| Pose {
+                    dx: 0.,
+                    dy: 0.,
+                    rot: 0.,
+                    scale: 1.,
+                    alpha: 0.,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Vec<Pose>, f32) {
+    if let Some(out_at) = out_at {
+        let progress = ((now.saturating_duration_since(out_at).as_secs_f64() * 1000.)
+            / STROKE_SCATTER_MS)
+            .clamp(0., 1.);
+        let alpha = (1. - progress) as f32;
+        let Some(scatter) = item.scatter.as_ref() else {
+            return (blank_poses(item), alpha);
+        };
+        let eased = (progress * progress) as f32;
+        let poses = scatter
+            .poses
+            .iter()
+            .map(|pose| Pose {
+                dx: pose.dx * eased,
+                dy: pose.dy * eased,
+                rot: pose.rot * eased,
+                scale: 1. + (pose.scale - 1.) * eased,
+                alpha,
+            })
+            .collect();
+        return (poses, alpha);
+    }
+    if let Some(fly) = item.fly.as_ref() {
+        let elapsed = now.saturating_duration_since(fly.start).as_secs_f64() * 1000.;
+        let poses = fly
+            .strokes
+            .iter()
+            .map(|stroke| {
+                let progress =
+                    ((elapsed - stroke.delay_ms) / stroke.duration_ms).clamp(0., 1.);
+                let eased = 1. - (1. - progress).powi(3);
+                Pose {
+                    dx: stroke.dx * (1. - eased as f32),
+                    dy: stroke.dy * (1. - eased as f32),
+                    rot: stroke.rot * (1. - eased as f32),
+                    scale: stroke.scale + (1. - stroke.scale) * eased as f32,
+                    alpha: eased as f32,
+                }
+            })
+            .collect();
+        return (poses, 1.);
+    }
+    if item.assembled {
+        let poses = item
+            .data
+            .as_ref()
+            .map(|data| {
+                (0..data.stroke_count())
+                    .map(|_| Pose {
+                        dx: 0.,
+                        dy: 0.,
+                        rot: 0.,
+                        scale: 1.,
+                        alpha: 1.,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return (poses, 1.);
+    }
+    if let Some(at) = item.fallback_at {
+        return (Vec::new(), if now >= at { 1. } else { 0. });
+    }
+    (blank_poses(item), 0.)
+}
+
+fn stroke_cell(
+    item: &StrokeChar,
+    cell: f32,
+    color: gpui::Hsla,
+    out_at: Option<Instant>,
+    now: Instant,
+) -> AnyElement {
+    let (poses, alpha) = stroke_poses(item, out_at, now);
+    let content = match item.data.as_ref() {
+        Some(hanzi) => StrokeCell {
+            hanzi: hanzi.clone(),
+            size: px(cell),
+            poses,
+            color,
+        }
+        .into_any_element(),
+        None => div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .opacity(alpha)
+            .text_size(px((cell * 0.62).max(8.)))
+            .text_color(color)
+            .child(SharedString::from(item.timing.text.to_string()))
+            .into_any_element(),
+    };
+    div()
+        .flex_none()
+        .w(px(cell))
+        .h(px(cell))
+        .child(content)
+        .into_any_element()
+}
+
+fn stroke_cells(
+    line: &StrokeLine,
+    cell: f32,
+    gap: f32,
+    color: gpui::Hsla,
+    out_at: Option<Instant>,
+    now: Instant,
+) -> AnyElement {
+    let mut row = div().flex().items_center().gap(px(gap));
+    for item in &line.chars {
+        row = row.child(stroke_cell(item, cell, color, out_at, now));
+    }
+    row.into_any_element()
+}
+
+fn stroke_column(
+    line: &StrokeLine,
+    cell: f32,
+    gap: f32,
+    color: gpui::Hsla,
+    out_at: Option<Instant>,
+    now: Instant,
+) -> AnyElement {
+    let mut column = div().flex().flex_col().items_center().gap(px(gap));
+    for item in &line.chars {
+        column = column.child(stroke_cell(item, cell, color, out_at, now));
+    }
+    column.into_any_element()
+}
+
+fn stroke_view(
+    pair: &StrokePair,
+    font: f32,
+    width: f32,
+    height: f32,
+    vertical: bool,
+    now: Instant,
+) -> AnyElement {
+    let max_chars = pair
+        .lines
+        .iter()
+        .map(|line| line.chars.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let color = white();
+    if vertical {
+        let cell = font
+            .min((height - EDGE) * 0.94 / max_chars as f32)
+            .min((width - VERTICAL_SAFE - EDGE) / 2. / 1.4)
+            .max(12.);
+        let gap = (cell * 0.14).max(4.);
+        let mut scene = div().size_full().flex().items_stretch();
+        for offset in 0..2 {
+            let line = &pair.lines[offset];
+            let cells = stroke_column(line, cell, gap, color, pair.out_at, now);
+            let column = div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .when(offset == 0, |this| this.items_start().justify_start())
+                .when(offset == 1, |this| this.items_end().justify_end())
+                .gap(px(gap))
+                .pt(px(EDGE / 2.))
+                .pb(px(EDGE / 2.))
+                .when(offset == 0, |this| this.pl(px(EDGE / 2.)));
+            let column = match offset {
+                1 => column.pr(px(VERTICAL_SAFE)),
+                _ => column,
+            };
+            scene = scene.child(column.child(cells));
+        }
+        return scene.into_any_element();
+    }
+    let cell = font
+        .min(height * 0.42)
+        .min(width * 0.92 / max_chars as f32)
+        .max(12.);
+    let gap = (cell * 0.14).max(4.);
+    let mut scene = div().size_full().flex().flex_col();
+    for offset in 0..2 {
+        let line = &pair.lines[offset];
+        let cells = stroke_cells(line, cell, gap, color, pair.out_at, now);
+        let row = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .items_center()
+            .px(px(EDGE))
+            .when(offset == 0, |this| this.justify_start())
+            .when(offset == 1, |this| this.justify_end())
+            .child(cells);
+        scene = scene.child(row);
+    }
+    scene.into_any_element()
+}
+
 fn placeholder_lyric(font: f32) -> AnyElement {
     div()
         .absolute()
@@ -960,12 +1811,25 @@ impl Render for DesktopLyric {
             self.host = window_host(window);
         }
         let setting_font = self.settings.read(cx).desktop_lyrics_font_size();
+        let vertical = self.settings.read(cx).desktop_lyrics_vertical();
+        let stroke_mode = self.settings.read(cx).desktop_lyrics_stroke();
+        if !stroke_mode {
+            self.stroke = None;
+            self.stroke_pending = None;
+        }
         let bounds = window.bounds();
-        let goal = effective_font(
-            setting_font,
-            bounds.size.width.as_f32(),
-            bounds.size.height.as_f32(),
-        );
+        let shape_changed = self.fit != Some((setting_font, vertical));
+        // While the window still has its old shape, draw at the saved size instead of
+        // reading a huge horizontal size out of a tall window (or the reverse).
+        let goal = match shape_changed {
+            true => setting_font,
+            false => effective_font(
+                setting_font,
+                bounds.size.width.as_f32(),
+                bounds.size.height.as_f32(),
+                vertical,
+            ),
+        };
         let now = Instant::now();
         match self.font {
             None => {
@@ -997,13 +1861,17 @@ impl Render for DesktopLyric {
         // Whole-pixel sizes rasterize cleanly; the eased value above only paces the steps.
         let font = self.font.unwrap_or(goal).round().max(1.);
         let slot = font * SLOT_RATIO;
-        // Changing the saved size resizes the strip once; the effective size then follows
-        // whatever the window measures.
-        if self.fit_font != Some(setting_font) {
-            self.fit_font = Some(setting_font);
-            if (bounds.size.height.as_f32() - design_height(setting_font)).abs() > 1. {
+        // Changing the saved size or direction resizes the strip once; the effective size
+        // then follows whatever the window measures.
+        if shape_changed {
+            self.fit = Some((setting_font, vertical));
+            let target_width = design_width(setting_font, vertical);
+            let target_height = design_height(setting_font, vertical);
+            if (bounds.size.width.as_f32() - target_width).abs() > 1.
+                || (bounds.size.height.as_f32() - target_height).abs() > 1.
+            {
                 cx.defer_in(window, move |_, window, cx| {
-                    fit_to_font(window, setting_font, cx)
+                    fit_to_shape(window, setting_font, vertical, cx)
                 });
             }
         }
@@ -1020,6 +1888,8 @@ impl Render for DesktopLyric {
             self.track = track_id;
             self.pair = None;
             self.swap = None;
+            self.stroke = None;
+            self.stroke_pending = None;
         }
         let (lyric, offset) = {
             let lyrics = self.lyrics.read(cx);
@@ -1051,108 +1921,202 @@ impl Render for DesktopLyric {
         };
 
         let mut rows: Vec<AnyElement> = Vec::new();
+        let mut vertical_stage: Option<AnyElement> = None;
         let mut placeholder = None;
         match lyric {
             Some(MusicLyrics::Synced { lines }) => {
                 let active = music::lyrics::active(&lines, at);
-                let filling = active
-                    .and_then(|index| lines.get(index))
-                    .filter(|line| at >= line.start)
-                    .and_then(|line| line.words.as_deref());
-                if playing
-                    && filling
-                        .and_then(|words| words.last())
-                        .is_some_and(|word| at < word.end)
-                {
-                    self.pump(cx);
-                }
-                if self
-                    .swap
-                    .is_some_and(|swap| swap.started.elapsed() >= SWAP)
-                {
+                if stroke_mode {
                     self.swap = None;
-                }
-                match (self.pair, active) {
-                    (Some(pair), Some(active)) if active == pair || active == pair + 1 => {}
-                    (Some(pair), Some(active)) => {
-                        self.swap = Some(Swap {
-                            from: pair,
-                            started: Instant::now(),
-                        });
-                        self.pair = Some(active);
+                    if playing {
+                        self.pump(cx);
                     }
-                    (None, Some(active)) => self.pair = Some(active),
-                    (_, None) => {
-                        self.pair = None;
+                    self.advance_stroke_pair(active, Instant::now());
+                    if let Some(pair) = self.pair.filter(|pair| *pair < lines.len()) {
+                        self.build_stroke_pair(&lines, pair, cx);
+                        self.tick_stroke(at.as_secs_f64() * 1000., playing, cx);
+                    }
+                } else {
+                    let filling = active
+                        .and_then(|index| lines.get(index))
+                        .filter(|line| at >= line.start)
+                        .and_then(|line| line.words.as_deref());
+                    if playing
+                        && filling
+                            .and_then(|words| words.last())
+                            .is_some_and(|word| at < word.end)
+                    {
+                        self.pump(cx);
+                    }
+                    if self
+                        .swap
+                        .is_some_and(|swap| swap.started.elapsed() >= SWAP)
+                    {
                         self.swap = None;
                     }
-                }
-                if self.swap.is_some() {
-                    self.pump(cx);
-                }
-                let stage = Stage {
-                    lines: &lines,
-                    at,
-                    font,
-                    slot,
-                };
-                match self.pair.filter(|pair| *pair < lines.len()) {
-                    Some(pair) => {
-                        if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len()) {
-                            let progress =
-                                (swap.started.elapsed().as_secs_f32() / SWAP.as_secs_f32())
-                                    .clamp(0., 1.);
-                            let eased = 1. - (1. - progress).powi(3);
-                            for offset in 0..2 {
-                                let tail = offset == 1;
-                                let index = swap.from + offset;
-                                rows.push(pair_row(
-                                    &stage,
-                                    index,
-                                    offset as f32 * slot - slot * eased,
-                                    1. - eased,
-                                    tail,
-                                ));
-                                let index = pair + offset;
-                                rows.push(pair_row(
-                                    &stage,
-                                    index,
-                                    offset as f32 * slot + 2. * slot * (1. - eased),
-                                    eased,
-                                    tail,
-                                ));
-                            }
-                        } else {
-                            for offset in 0..2 {
-                                let index = pair + offset;
-                                rows.push(pair_row(
-                                    &stage,
-                                    index,
-                                    offset as f32 * slot,
-                                    1.,
-                                    offset == 1,
-                                ));
-                            }
+                    match (self.pair, active) {
+                        (Some(pair), Some(active)) if active == pair || active == pair + 1 => {}
+                        (Some(pair), Some(active)) => {
+                            self.swap = Some(Swap {
+                                from: pair,
+                                started: Instant::now(),
+                            });
+                            self.pair = Some(active);
+                        }
+                        (None, Some(active)) => self.pair = Some(active),
+                        (_, None) => {
+                            self.pair = None;
+                            self.swap = None;
                         }
                     }
-                    None => placeholder = Some(placeholder_lyric(font)),
+                    if self.swap.is_some() {
+                        self.pump(cx);
+                    }
+                }
+                if vertical {
+                    match self.pair.filter(|pair| *pair < lines.len()) {
+                        Some(pair) => {
+                            let swap = self
+                                .swap
+                                .filter(|swap| swap.from < lines.len())
+                                .map(|swap| {
+                                    let progress = (swap.started.elapsed().as_secs_f32()
+                                        / SWAP.as_secs_f32())
+                                    .clamp(0., 1.);
+                                    (swap.from, 1. - (1. - progress).powi(3))
+                                });
+                            vertical_stage = Some(vertical_scene(
+                                &lines,
+                                pair,
+                                swap,
+                                at,
+                                font,
+                                bounds.size.height.as_f32() - EDGE,
+                                None,
+                            ));
+                        }
+                        None => placeholder = Some(placeholder_lyric(font)),
+                    }
+                } else {
+                    let stage = Stage {
+                        lines: &lines,
+                        at,
+                        font,
+                        slot,
+                    };
+                    match self.pair.filter(|pair| *pair < lines.len()) {
+                        Some(pair) => {
+                            if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len()) {
+                                let progress = (swap.started.elapsed().as_secs_f32()
+                                    / SWAP.as_secs_f32())
+                                .clamp(0., 1.);
+                                let eased = 1. - (1. - progress).powi(3);
+                                for offset in 0..2 {
+                                    let tail = offset == 1;
+                                    let index = swap.from + offset;
+                                    rows.push(pair_row(
+                                        &stage,
+                                        index,
+                                        offset as f32 * slot - slot * eased,
+                                        1. - eased,
+                                        tail,
+                                    ));
+                                    let index = pair + offset;
+                                    rows.push(pair_row(
+                                        &stage,
+                                        index,
+                                        offset as f32 * slot + 2. * slot * (1. - eased),
+                                        eased,
+                                        tail,
+                                    ));
+                                }
+                            } else {
+                                for offset in 0..2 {
+                                    let index = pair + offset;
+                                    rows.push(pair_row(
+                                        &stage,
+                                        index,
+                                        offset as f32 * slot,
+                                        1.,
+                                        offset == 1,
+                                    ));
+                                }
+                            }
+                        }
+                        None => placeholder = Some(placeholder_lyric(font)),
+                    }
                 }
             }
             Some(MusicLyrics::Plain { text, .. }) => {
                 self.pair = None;
                 self.swap = None;
+                self.stroke = None;
+                self.stroke_pending = None;
                 let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-                rows.push(plain_row(
-                    lines.next().unwrap_or_default().to_owned(),
-                    LineRole::Singing,
-                    font,
-                    slot,
-                    0.,
-                    false,
-                ));
-                if let Some(line) = lines.next() {
+                let first = lines.next().unwrap_or_default().to_owned();
+                let second = lines.next().unwrap_or_default().to_owned();
+                if vertical {
+                    let lines = vec![synthetic_line(first, 0), synthetic_line(second, 10_000)];
+                    vertical_stage = Some(vertical_scene(
+                        &lines,
+                        0,
+                        None,
+                        at,
+                        font,
+                        bounds.size.height.as_f32() - EDGE,
+                        Some((LineRole::Singing, LineRole::Preview)),
+                    ));
+                } else {
                     rows.push(plain_row(
-                        line.to_owned(),
+                        first,
+                        LineRole::Singing,
+                        font,
+                        slot,
+                        0.,
+                        false,
+                    ));
+                    if !second.is_empty() {
+                        rows.push(plain_row(
+                            second,
+                            LineRole::Preview,
+                            font,
+                            slot,
+                            slot,
+                            true,
+                        ));
+                    }
+                }
+            }
+            _ => {
+                self.pair = None;
+                self.swap = None;
+                self.stroke = None;
+                self.stroke_pending = None;
+                if vertical {
+                    let lines = vec![
+                        synthetic_line(title.to_string(), 0),
+                        synthetic_line(artist.to_string(), 10_000),
+                    ];
+                    vertical_stage = Some(vertical_scene(
+                        &lines,
+                        0,
+                        None,
+                        at,
+                        font,
+                        bounds.size.height.as_f32() - EDGE,
+                        Some((LineRole::Singing, LineRole::Preview)),
+                    ));
+                } else {
+                    rows.push(plain_row(
+                        title.to_string(),
+                        LineRole::Singing,
+                        font,
+                        slot,
+                        0.,
+                        false,
+                    ));
+                    rows.push(plain_row(
+                        artist.to_string(),
                         LineRole::Preview,
                         font,
                         slot,
@@ -1160,26 +2124,6 @@ impl Render for DesktopLyric {
                         true,
                     ));
                 }
-            }
-            _ => {
-                self.pair = None;
-                self.swap = None;
-                rows.push(plain_row(
-                    title.to_string(),
-                    LineRole::Singing,
-                    font,
-                    slot,
-                    0.,
-                    false,
-                ));
-                rows.push(plain_row(
-                    artist.to_string(),
-                    LineRole::Preview,
-                    font,
-                    slot,
-                    slot,
-                    true,
-                ));
             }
         }
 
@@ -1199,6 +2143,57 @@ impl Render for DesktopLyric {
             }
         ));
         let stage_height = slot * 2.;
+        let showing_stroke = stroke_mode && self.stroke.is_some();
+        let vertical_content = vertical_stage.unwrap_or_else(|| placeholder_lyric(font));
+        let vertical_stage_element = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .overflow_hidden()
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .child(match showing_stroke {
+                true => stroke_view(
+                    self.stroke.as_ref().expect("checked above"),
+                    font,
+                    bounds.size.width.as_f32(),
+                    bounds.size.height.as_f32(),
+                    true,
+                    Instant::now(),
+                ),
+                false => vertical_content,
+            })
+            .into_any_element();
+        let horizontal_stage = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .child(match showing_stroke {
+                true => stroke_view(
+                    self.stroke.as_ref().expect("checked above"),
+                    font,
+                    bounds.size.width.as_f32(),
+                    (bounds.size.height.as_f32() - HEADER).max(0.),
+                    false,
+                    Instant::now(),
+                ),
+                false => div()
+                    .relative()
+                    .w_full()
+                    .h(px(stage_height))
+                    .overflow_hidden()
+                    .children(rows)
+                    .when_some(placeholder, |this, node| this.child(node))
+                    .into_any_element(),
+            })
+            .into_any_element();
 
         div()
             .id("desktop-lyrics")
@@ -1235,28 +2230,14 @@ impl Render for DesktopLyric {
                     this.bg(black().opacity(alpha))
                 },
             )
-            .child(self.header(header_title, setting_font, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .overflow_hidden()
-                    .window_control_area(WindowControlArea::Drag)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-                    .child(
-                        div()
-                            .relative()
-                            .w_full()
-                            .h(px(stage_height))
-                            .overflow_hidden()
-                            .children(rows)
-                            .when_some(placeholder, |this, node| this.child(node)),
-                    ),
-            )
+            .when(vertical, |this| {
+                this.child(vertical_stage_element)
+                    .child(self.vertical_header(setting_font, cx))
+            })
+            .when(!vertical, |this| {
+                this.child(self.header(header_title, setting_font, cx))
+                    .child(horizontal_stage)
+            })
             .when(interacting, |this| {
                 this.child(
                     div()
@@ -1330,12 +2311,34 @@ mod tests {
 
     #[test]
     fn the_font_follows_the_window_but_not_under_sixteen() {
-        assert_eq!(design_height(40.), 188.);
-        assert_eq!(design_height(64.), 266.);
-        assert_eq!(effective_font(40., 1000., 188.), 40.);
-        assert!(effective_font(40., 1000., 120.) < 40.);
-        assert_eq!(effective_font(40., 500., 188.), 20.);
-        assert_eq!(effective_font(40., 200., 60.), 16.);
+        assert_eq!(design_height(40., false), 188.);
+        assert_eq!(design_height(64., false), 266.);
+        assert_eq!(design_height(40., true), 620.);
+        assert_eq!(design_width(40., true), 300.);
+        assert_eq!(effective_font(40., 1000., 188., false), 40.);
+        assert!(effective_font(40., 1000., 120., false) < 40.);
+        assert_eq!(effective_font(40., 500., 188., false), 20.);
+        assert_eq!(effective_font(40., 200., 60., false), 16.);
+        assert_eq!(effective_font(40., 400., 620., true), 40.);
+        assert!(effective_font(40., 200., 620., true) < 40.);
+    }
+
+    #[test]
+    fn a_word_splits_into_even_character_windows() {
+        let line = LyricsLine {
+            start: Duration::from_millis(1000),
+            end: Some(Duration::from_millis(2000)),
+            text: "你好".to_owned(),
+            romanized: None,
+            words: Some(vec![word("你好", 1000, 2000)]),
+            secondary: Vec::new(),
+            voice: Default::default(),
+        };
+        let timings = char_timings(&line);
+        assert_eq!(timings.len(), 2);
+        assert_eq!(timings[0].start, Duration::from_millis(1000));
+        assert_eq!(timings[1].start, Duration::from_millis(1500));
+        assert_eq!(timings[1].end, Duration::from_millis(2000));
     }
 
     #[test]

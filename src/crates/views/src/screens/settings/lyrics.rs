@@ -58,8 +58,12 @@ impl SettingsView {
                 .rows([Slot::LyricsSources, Slot::LyricsForLocal]),
         );
         groups.push(
-            Group::new("settings-group-desktop-lyrics", "icons/monitor.svg")
-                .rows([Slot::DesktopLyrics, Slot::DesktopLyricsFont]),
+            Group::new("settings-group-desktop-lyrics", "icons/monitor.svg").rows([
+                Slot::DesktopLyrics,
+                Slot::DesktopLyricsVertical,
+                Slot::DesktopLyricsStroke,
+                Slot::DesktopLyricsFont,
+            ]),
         );
         groups
     }
@@ -88,6 +92,36 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.settings
                         .update(cx, |settings, cx| settings.set_desktop_lyrics(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn desktop_lyrics_vertical_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let vertical = self.settings.read(cx).desktop_lyrics_vertical();
+        self.row(
+            t!("settings-desktop-lyrics-vertical"),
+            Switch::new("desktop-lyrics-vertical", vertical)
+                .name(t!("settings-desktop-lyrics-vertical"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_desktop_lyrics_vertical(!vertical, cx)
+                    });
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn desktop_lyrics_stroke_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let stroke = self.settings.read(cx).desktop_lyrics_stroke();
+        self.row(
+            t!("settings-desktop-lyrics-stroke"),
+            Switch::new("desktop-lyrics-stroke", stroke)
+                .name(t!("settings-desktop-lyrics-stroke"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_desktop_lyrics_stroke(!stroke, cx)
+                    });
                 }))
                 .into_any_element(),
         )

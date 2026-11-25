@@ -106,6 +106,8 @@ enum Slot {
     PanelLyricsSize,
     FullscreenLyricsSize,
     DesktopLyrics,
+    DesktopLyricsVertical,
+    DesktopLyricsStroke,
     DesktopLyricsFont,
     LyricsSources,
     LyricsPriority,
@@ -823,6 +825,14 @@ impl SettingsView {
                 t!("settings-desktop-lyrics"),
                 t!("settings-desktop-lyrics-detail"),
             ),
+            Slot::DesktopLyricsVertical => (
+                t!("settings-desktop-lyrics-vertical"),
+                t!("settings-desktop-lyrics-vertical-detail"),
+            ),
+            Slot::DesktopLyricsStroke => (
+                t!("settings-desktop-lyrics-stroke"),
+                t!("settings-desktop-lyrics-stroke-detail"),
+            ),
             Slot::DesktopLyricsFont => (
                 t!("settings-desktop-lyrics-font"),
                 t!("settings-desktop-lyrics-font-detail"),
@@ -1046,6 +1056,8 @@ impl SettingsView {
             Slot::PanelLyricsSize => self.panel_lyrics_size_row(cx),
             Slot::FullscreenLyricsSize => self.fullscreen_lyrics_size_row(cx),
             Slot::DesktopLyrics => self.desktop_lyrics_row(cx),
+            Slot::DesktopLyricsVertical => self.desktop_lyrics_vertical_row(cx),
+            Slot::DesktopLyricsStroke => self.desktop_lyrics_stroke_row(cx),
             Slot::DesktopLyricsFont => self.desktop_lyrics_font_row(cx),
             Slot::BlurLyrics => self.blur_lyrics_row(cx),
             Slot::LyricsBlurAmount => self.lyrics_blur_amount_row(cx),
