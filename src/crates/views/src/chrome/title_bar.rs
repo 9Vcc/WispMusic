@@ -510,7 +510,7 @@ impl Render for TitleBar {
                     // Windows 10's acrylic is not tinted like Windows 11's, so a see-through
                     // title bar would show a bright blurred band above the dark page.
                     || (theme.transparent && theme.blur_window && legacy_windows()),
-                |this| this.bg(theme.background),
+                |this| this.bg(ui::page_wash(theme)),
             )
             // The height is a border box, so a bar that drops its border centres its controls
             // one pixel lower than one that keeps it. The edge is always an edge; only its

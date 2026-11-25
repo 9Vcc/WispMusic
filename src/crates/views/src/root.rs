@@ -1612,7 +1612,7 @@ impl Render for Root {
             .when_some(radius, |this, radius| {
                 this.rounded(radius).overflow_hidden()
             })
-            .when(!ambient && !opening, |this| this.bg(theme.background))
+            .when(!ambient && !opening, |this| this.bg(ui::page_wash(&theme)))
             .text_color(theme.foreground)
             .capture_any_mouse_down(cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                 if let Some(splash) = this.splash.as_ref() {

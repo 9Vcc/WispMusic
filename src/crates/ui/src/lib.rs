@@ -158,7 +158,7 @@ pub use tabs::{TabBar, Tabs};
 pub use theme::{
     ActiveTheme, BACKDROP_TRANSPARENCY, CoverFill, Look, MAX_FONT, MAX_LYRICS_SCALE,
     MAX_TRANSPARENCY, MIN_FONT, MIN_LYRICS_SCALE, Theme, ThemeKind, ThemeOverrides, WindowBlur,
-    backdrop,
+    backdrop, page_wash,
 };
 pub use themed::Themed;
 pub use time::{clock, runtime, tabular};

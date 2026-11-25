@@ -99,6 +99,17 @@ impl WindowBlur {
 /// The window background a look asks the platform for. Blur needs something to show through,
 /// so only a see-through window gets it, and only an opaque one can take the platform's own
 /// fill. A platform that cannot blur draws a blurred background as a plain see-through one.
+/// The page wash a see-through window paints behind its content. With the desktop blurred
+/// behind it the separate blur already sets the page apart, so only half the wash is kept and
+/// the wallpaper reads through; without that blur the wash stays whole.
+pub fn page_wash(theme: &Theme) -> Hsla {
+    let mut wash = theme.background;
+    if theme.transparent && theme.blur_window {
+        wash.a *= 0.5;
+    }
+    wash
+}
+
 pub fn backdrop(blur_window: bool, transparent: bool) -> WindowBackgroundAppearance {
     match blur_window && transparent {
         true => WindowBackgroundAppearance::Blurred,
