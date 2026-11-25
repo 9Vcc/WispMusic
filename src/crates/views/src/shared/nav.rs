@@ -42,13 +42,9 @@ pub(crate) fn nav_icon(
         .active(move |style| style.bg(accent))
 }
 
-/// Whether the sidebar shows `entry`. An optional row shows once the listener adds it, any other
-/// until they hide it.
+/// Whether the sidebar shows `entry`, until the listener hides it.
 pub(crate) fn entry_shown(entry: NavEntry, settings: &AppSettings) -> bool {
-    match entry.optional() {
-        true => settings.nav_added(entry.id()),
-        false => settings.nav_shown(entry.id()),
-    }
+    settings.nav_shown(entry.id())
 }
 
 /// Shows or hides `entry` in the sidebar, the counterpart of `entry_shown`.
@@ -58,8 +54,5 @@ pub(crate) fn set_entry_shown(
     settings: &mut AppSettings,
     cx: &mut Context<AppSettings>,
 ) {
-    match entry.optional() {
-        true => settings.set_nav_added(entry.id(), shown, cx),
-        false => settings.set_nav_shown(entry.id(), shown, cx),
-    }
+    settings.set_nav_shown(entry.id(), shown, cx);
 }
