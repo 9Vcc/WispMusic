@@ -14,9 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
-    FontWeight, Global, IntoElement, MouseButton, MouseMoveEvent, Render, SharedString, Task,
-    TextShadow, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowOptions, black,
+    FontWeight, Global, Hsla, IntoElement, MouseButton, MouseMoveEvent, Render, SharedString,
+    Task, TextShadow, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowOptions, black,
     div, point, px, relative, size, white,
 };
 use i18n::t;
@@ -168,6 +167,9 @@ fn open(cx: &mut App) {
             app_owns_titlebar_drag: true,
             focus: false,
             show: true,
+            // This window animates while another app is focused, so it must not take
+            // the default inactive-window frame cap.
+            inactive_frame_interval: None,
             ..Default::default()
         },
         |window, cx| {
@@ -543,6 +545,9 @@ struct DesktopLyric {
     hover_epoch: u32,
     stroke: Option<StrokePair>,
     stroke_pending: Option<usize>,
+    cover: Option<String>,
+    accent: Option<Hsla>,
+    accent_task: Option<Task<()>>,
     hanzi: HashMap<char, Option<Arc<Hanzi>>>,
     fetching: HashSet<char>,
     stroke_tasks: Vec<Task<()>>,
@@ -621,6 +626,9 @@ impl DesktopLyric {
             hover_epoch: 0,
             stroke: None,
             stroke_pending: None,
+            cover: None,
+            accent: None,
+            accent_task: None,
             hanzi: HashMap::new(),
             fetching: HashSet::new(),
             stroke_tasks: Vec::new(),
@@ -1057,6 +1065,20 @@ impl DesktopLyric {
     }
 }
 
+/// Turns a cover's leading hue into a lyric colour that reads over a dark, transparent
+/// strip. Greyscale art names no hue, and then the lyrics stay white.
+fn lyric_accent(colour: Hsla) -> Option<Hsla> {
+    if colour.s < 0.08 {
+        return None;
+    }
+    Some(Hsla {
+        h: colour.h,
+        s: colour.s.clamp(0.45, 0.85),
+        l: colour.l.clamp(0.55, 0.72),
+        a: 1.,
+    })
+}
+
 /// A dark rim around the glyphs, then a tight and a wide soft shadow. The rim substitutes for
 /// a text stroke: a transparent window cannot use subpixel text, and the rim is what hides
 /// the gray antialiasing steps over a bright wallpaper.
@@ -1087,10 +1109,10 @@ enum LineRole {
 }
 
 impl LineRole {
-    fn color(self) -> gpui::Hsla {
+    fn color(self, accent: Hsla) -> Hsla {
         match self {
-            Self::Singing | Self::Sung => white(),
-            Self::Preview => white().opacity(0.45),
+            Self::Singing | Self::Sung => accent,
+            Self::Preview => accent.opacity(0.45),
         }
     }
 
@@ -1107,7 +1129,7 @@ impl LineRole {
     }
 }
 
-fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyElement {
+fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32, accent: Hsla) -> AnyElement {
     if role == LineRole::Singing
         && let Some(words) = line.words.as_deref()
         && let Some(fragments) = word_fragments(&line.text, words)
@@ -1128,7 +1150,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
                 .relative()
                 .flex_none()
                 .whitespace_nowrap()
-                .text_color(white().opacity(0.32))
+                .text_color(accent.opacity(0.32))
                 .child(SharedString::from(text.clone()));
             let cell = match share > 0. {
                 true => cell.child(
@@ -1142,7 +1164,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
                         // The shadow lives on the line below. Inheriting it here would
                         // let the word's clipping box cut it into a visible rectangle.
                         .text_shadow([])
-                        .text_color(white())
+                        .text_color(accent)
                         .when(share < 1., |this| this.fade_sides(px(0.), px(edge)))
                         .child(
                             div()
@@ -1161,7 +1183,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
         .text_size(px(size))
         .line_height(relative(SLOT_RATIO))
         .text_shadow(shadows(size))
-        .text_color(role.color())
+        .text_color(role.color(accent))
         .font_weight(FontWeight::SEMIBOLD)
         .child(line.text.clone())
         .into_any_element()
@@ -1241,13 +1263,13 @@ fn progress(start: Duration, end: Duration, at: Duration) -> f32 {
     ((at - start).as_secs_f32() / span).clamp(0., 1.)
 }
 
-fn plain_line(text: &str, role: LineRole, size: f32) -> AnyElement {
+fn plain_line(text: &str, role: LineRole, size: f32, accent: Hsla) -> AnyElement {
     div()
         .whitespace_nowrap()
         .text_size(px(size))
         .line_height(relative(SLOT_RATIO))
         .text_shadow(shadows(size))
-        .text_color(role.color())
+        .text_color(role.color(accent))
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(text.to_owned()))
         .into_any_element()
@@ -1259,13 +1281,22 @@ struct Stage<'a> {
     at: Duration,
     font: f32,
     slot: f32,
+    accent: Hsla,
 }
 
 fn pair_row(stage: &Stage, index: usize, top: f32, opacity: f32, tail: bool) -> AnyElement {
     let text = stage
         .lines
         .get(index)
-        .map(|line| line_text(line, stage.at, LineRole::at(line, stage.at), stage.font))
+        .map(|line| {
+            line_text(
+                line,
+                stage.at,
+                LineRole::at(line, stage.at),
+                stage.font,
+                stage.accent,
+            )
+        })
         .unwrap_or_else(|| div().into_any_element());
     div()
         .absolute()
@@ -1284,7 +1315,15 @@ fn pair_row(stage: &Stage, index: usize, top: f32, opacity: f32, tail: bool) -> 
         .into_any_element()
 }
 
-fn plain_row(text: String, role: LineRole, font: f32, slot: f32, top: f32, tail: bool) -> AnyElement {
+fn plain_row(
+    text: String,
+    role: LineRole,
+    font: f32,
+    slot: f32,
+    top: f32,
+    tail: bool,
+    accent: Hsla,
+) -> AnyElement {
     div()
         .absolute()
         .left_0()
@@ -1297,7 +1336,7 @@ fn plain_row(text: String, role: LineRole, font: f32, slot: f32, top: f32, tail:
         .when(tail, |this| this.justify_end())
         .when(!tail, |this| this.justify_start())
         .overflow_hidden()
-        .child(plain_line(&text, role, font))
+        .child(plain_line(&text, role, font, accent))
         .into_any_element()
 }
 
@@ -1364,6 +1403,7 @@ fn vertical_char(
     font: f32,
     slot: f32,
     tail: bool,
+    accent: Hsla,
 ) -> AnyElement {
     let width = (font * 1.2).max(1.);
     let base = div()
@@ -1377,7 +1417,7 @@ fn vertical_char(
         .text_size(px(font))
         .line_height(relative(1.))
         .text_shadow(shadows(font))
-        .text_color(role.color())
+        .text_color(role.color(accent))
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(timing.text.to_string()));
     let base = match role == LineRole::Singing {
@@ -1393,7 +1433,7 @@ fn vertical_char(
                         .h(relative(share))
                         .overflow_hidden()
                         .text_shadow([])
-                        .text_color(white())
+                        .text_color(accent)
                         .when(share < 1., |this| this.fade_edges(px(0.), px(font * SWEEP_EDGE)))
                         .child(
                             div()
@@ -1427,6 +1467,7 @@ fn vertical_line(
     font: f32,
     height: f32,
     align_end: bool,
+    accent: Hsla,
 ) -> AnyElement {
     let timings = char_timings(line);
     if timings.is_empty() {
@@ -1446,7 +1487,7 @@ fn vertical_line(
         let mut column = div().flex().flex_col().items_center();
         for timing in chunk {
             let tail = std::ptr::eq(timing, &timings[last]);
-            column = column.child(vertical_char(timing, at, role, font, slot, tail));
+            column = column.child(vertical_char(timing, at, role, font, slot, tail, accent));
         }
         columns = columns.child(column);
     }
@@ -1459,6 +1500,7 @@ struct VerticalStage<'a> {
     at: Duration,
     font: f32,
     height: f32,
+    accent: Hsla,
 }
 
 fn vertical_pair(
@@ -1477,10 +1519,30 @@ fn vertical_pair(
         )
     });
     let left = first
-        .map(|line| vertical_line(line, stage.at, left_role, stage.font, stage.height, false))
+        .map(|line| {
+            vertical_line(
+                line,
+                stage.at,
+                left_role,
+                stage.font,
+                stage.height,
+                false,
+                stage.accent,
+            )
+        })
         .unwrap_or_else(|| div().into_any_element());
     let right = second
-        .map(|line| vertical_line(line, stage.at, right_role, stage.font, stage.height, true))
+        .map(|line| {
+            vertical_line(
+                line,
+                stage.at,
+                right_role,
+                stage.font,
+                stage.height,
+                true,
+                stage.accent,
+            )
+        })
         .unwrap_or_else(|| div().into_any_element());
     div()
         .absolute()
@@ -1701,6 +1763,7 @@ fn stroke_view(
     width: f32,
     height: f32,
     vertical: bool,
+    accent: Hsla,
     now: Instant,
 ) -> AnyElement {
     let max_chars = pair
@@ -1710,7 +1773,7 @@ fn stroke_view(
         .max()
         .unwrap_or(1)
         .max(1);
-    let color = white();
+    let color = accent;
     if vertical {
         let cell = font
             .min((height - EDGE) * 0.94 / max_chars as f32)
@@ -1765,7 +1828,7 @@ fn stroke_view(
     scene.into_any_element()
 }
 
-fn placeholder_lyric(font: f32) -> AnyElement {
+fn placeholder_lyric(font: f32, accent: Hsla) -> AnyElement {
     div()
         .absolute()
         .size_full()
@@ -1773,7 +1836,7 @@ fn placeholder_lyric(font: f32) -> AnyElement {
         .items_center()
         .justify_center()
         .text_size(px(font))
-        .text_color(white().opacity(0.6))
+        .text_color(accent.opacity(0.6))
         .text_shadow(shadows(font))
         .child("♪")
         .into_any_element()
@@ -1871,6 +1934,31 @@ impl Render for DesktopLyric {
             self.stroke = None;
             self.stroke_pending = None;
         }
+        let cover = track.as_ref().and_then(|track| track.cover.clone());
+        if self.cover != cover {
+            self.cover = cover.clone();
+            match cover {
+                Some(url) => {
+                    let sampled = ui::palette(SharedString::from(url.clone()), cx);
+                    self.accent_task = Some(cx.spawn(async move |this, cx| {
+                        let palette = sampled.await;
+                        let accent = palette.primary.and_then(lyric_accent);
+                        this.update(cx, |this, cx| {
+                            if this.cover.as_deref() == Some(url.as_str()) {
+                                this.accent = accent;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    }));
+                }
+                None => {
+                    self.accent_task = None;
+                    self.accent = None;
+                }
+            }
+        }
+        let accent = self.accent.unwrap_or_else(white);
         let (lyric, offset) = {
             let lyrics = self.lyrics.read(cx);
             (
@@ -1976,6 +2064,7 @@ impl Render for DesktopLyric {
                                         at,
                                         font,
                                         height: bounds.size.height.as_f32() - EDGE,
+                                        accent,
                                     },
                                     pair,
                                     swap,
@@ -1983,7 +2072,7 @@ impl Render for DesktopLyric {
                                     None,
                                 ));
                             }
-                            None => placeholder = Some(placeholder_lyric(font)),
+                            None => placeholder = Some(placeholder_lyric(font, accent)),
                         }
                     } else {
                         let stage = Stage {
@@ -1991,6 +2080,7 @@ impl Render for DesktopLyric {
                             at,
                             font,
                             slot,
+                            accent,
                         };
                         match self.pair.filter(|pair| *pair < lines.len()) {
                             Some(pair) => {
@@ -2031,11 +2121,11 @@ impl Render for DesktopLyric {
                                     }
                                 }
                             }
-                            None => placeholder = Some(placeholder_lyric(font)),
+                            None => placeholder = Some(placeholder_lyric(font, accent)),
                         }
                     }
                 } else if self.stroke.is_none() {
-                    placeholder = Some(placeholder_lyric(font));
+                    placeholder = Some(placeholder_lyric(font, accent));
                 }
             }
             Some(MusicLyrics::Plain { text, .. }) => {
@@ -2054,6 +2144,7 @@ impl Render for DesktopLyric {
                             at,
                             font,
                             height: bounds.size.height.as_f32() - EDGE,
+                            accent,
                         },
                         0,
                         None,
@@ -2068,6 +2159,7 @@ impl Render for DesktopLyric {
                         slot,
                         0.,
                         false,
+                        accent,
                     ));
                     if !second.is_empty() {
                         rows.push(plain_row(
@@ -2077,6 +2169,7 @@ impl Render for DesktopLyric {
                             slot,
                             slot,
                             true,
+                            accent,
                         ));
                     }
                 }
@@ -2097,6 +2190,7 @@ impl Render for DesktopLyric {
                             at,
                             font,
                             height: bounds.size.height.as_f32() - EDGE,
+                            accent,
                         },
                         0,
                         None,
@@ -2111,6 +2205,7 @@ impl Render for DesktopLyric {
                         slot,
                         0.,
                         false,
+                        accent,
                     ));
                     rows.push(plain_row(
                         artist.to_string(),
@@ -2119,6 +2214,7 @@ impl Render for DesktopLyric {
                         slot,
                         slot,
                         true,
+                        accent,
                     ));
                 }
             }
@@ -2144,7 +2240,7 @@ impl Render for DesktopLyric {
         }
         let stage_height = slot * 2.;
         let showing_stroke = stroke_mode && self.stroke.is_some();
-        let vertical_content = vertical_stage.unwrap_or_else(|| placeholder_lyric(font));
+        let vertical_content = vertical_stage.unwrap_or_else(|| placeholder_lyric(font, accent));
         let vertical_stage_element = div()
             .flex_1()
             .min_h_0()
@@ -2160,6 +2256,7 @@ impl Render for DesktopLyric {
                     bounds.size.width.as_f32(),
                     bounds.size.height.as_f32(),
                     true,
+                    accent,
                     Instant::now(),
                 ),
                 false => vertical_content,
@@ -2182,6 +2279,7 @@ impl Render for DesktopLyric {
                     bounds.size.width.as_f32(),
                     (bounds.size.height.as_f32() - HEADER).max(0.),
                     false,
+                    accent,
                     Instant::now(),
                 ),
                 false => div()
@@ -2321,6 +2419,30 @@ mod tests {
         assert_eq!(effective_font(40., 200., 60., false), 16.);
         assert_eq!(effective_font(40., 400., 620., true), 40.);
         assert!(effective_font(40., 200., 620., true) < 40.);
+    }
+
+    #[test]
+    fn a_grey_cover_leaves_the_lyrics_white() {
+        assert!(lyric_accent(Hsla {
+            h: 0.2,
+            s: 0.02,
+            l: 0.5,
+            a: 1.,
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn a_cover_hue_is_lifted_into_a_readable_text_colour() {
+        let accent = lyric_accent(Hsla {
+            h: 0.3,
+            s: 0.1,
+            l: 0.2,
+            a: 1.,
+        })
+        .unwrap();
+        assert!(accent.s >= 0.45);
+        assert!(accent.l >= 0.55);
     }
 
     #[test]
