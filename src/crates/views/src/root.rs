@@ -1611,9 +1611,12 @@ impl Render for Root {
             })
             .when(!ambient && !opening, |this| this.bg(theme.background))
             .text_color(theme.foreground)
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+            .capture_any_mouse_down(cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                 if let Some(splash) = this.splash.as_ref() {
                     if !splash.read(cx).done() {
+                        if event.button == MouseButton::Left {
+                            return;
+                        }
                         cx.stop_propagation();
                         return;
                     }
