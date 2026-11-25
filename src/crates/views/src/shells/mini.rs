@@ -12,14 +12,16 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
-    Global, IntoElement, MouseButton, MouseUpEvent, Pixels, Point, Render, ScrollStrategy,
-    SharedString, Task, UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowKind, WindowOptions, div, point, px, relative, size, svg, uniform_list,
+    FontWeight, Global, IntoElement, MouseButton, MouseUpEvent, Pixels, Point, Render,
+    ScrollStrategy, SharedString, Task, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, px, relative,
+    size, svg, uniform_list,
 };
 use i18n::t;
 use state::{AppSettings, Playback, QueuePosition, Wisp};
 use ui::{ActiveTheme as _, Artwork, Button, Scrubber, ScrubberState, clock, tabular};
 
+use crate::shared::marquee::{MarqueeState, marquee};
 use crate::shared::transport::{next, play_mode, previous, toggle};
 
 const WIDTH: f32 = 360.;
@@ -50,6 +52,12 @@ const HEAD: f32 = 24.;
 const REVEAL: Duration = Duration::from_millis(300);
 /// How long the folded card takes to go from solid back to its normal translucent fill.
 const SETTLE: Duration = Duration::from_millis(240);
+/// The gap a rolling title leaves between its two copies.
+const MARQUEE_GAP: f32 = 32.;
+/// How fast a long title cruises, in logical pixels per second.
+const MARQUEE_SPEED: f32 = 50.;
+/// How long a rolling title rests at its start before each run.
+const MARQUEE_HOLD: Duration = Duration::from_millis(3000);
 
 #[derive(Clone, Copy)]
 struct MiniSession {
@@ -288,6 +296,8 @@ fn room(frame: Bounds<Pixels>, cx: &App) -> Point<Pixels> {
 
 struct MiniPlayer {
     playback: Entity<Playback>,
+    title_marquee: MarqueeState,
+    artist_marquee: MarqueeState,
     expanded: bool,
     /// Whether the queue is mounted. It stays mounted while folding so the shrinking card
     /// clips it instead of exposing a bare bar over the backdrop.
@@ -329,6 +339,8 @@ impl MiniPlayer {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         Self {
             playback,
+            title_marquee: MarqueeState::new(),
+            artist_marquee: MarqueeState::new(),
             expanded: false,
             panel: false,
             folding: false,
@@ -527,6 +539,43 @@ impl MiniPlayer {
             .filter(|artists| !artists.is_empty())
             .unwrap_or_else(|| t!("player-nothing-playing"));
         let cover = track.and_then(|track| track.cover);
+        let title_key = title.to_string();
+        let title = marquee(
+            &self.title_marquee,
+            "mini-title",
+            &title_key,
+            {
+                let color = theme.foreground;
+                move |_| {
+                    div()
+                        .whitespace_nowrap()
+                        .text_size(px(TITLE_SIZE))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child(title.clone())
+                        .into_any_element()
+                }
+            },
+            cx,
+        );
+        let artist_key = artist.to_string();
+        let artist = marquee(
+            &self.artist_marquee,
+            "mini-artist",
+            &artist_key,
+            {
+                let color = theme.muted_foreground;
+                move |_| {
+                    div()
+                        .whitespace_nowrap()
+                        .text_size(px(CAPTION_SIZE))
+                        .text_color(color)
+                        .child(artist.clone())
+                        .into_any_element()
+                }
+            },
+            cx,
+        );
 
         div()
             .id("mini-bar")
@@ -567,21 +616,8 @@ impl MiniPlayer {
                                     .flex_col()
                                     .gap(px(1.))
                                     .group_hover("mini-info", |style| style.opacity(0.))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(TITLE_SIZE))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(CAPTION_SIZE))
-                                            .text_color(theme.muted_foreground)
-                                            .child(artist),
-                                    ),
+                                    .child(title)
+                                    .child(artist),
                             )
                             .child(
                                 div()

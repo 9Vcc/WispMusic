@@ -6,8 +6,8 @@ use ui::Tipped as _;
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, Render, SharedString, StyledText,
+    AnyElement, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
+    Render, SharedString, StyledText,
 };
 use gpui::{Window, deferred, div, px};
 use i18n::t;
@@ -21,10 +21,11 @@ use ui::{
 use crate::chrome::SpeedButton;
 use crate::chrome::timeline::Timeline;
 use crate::chrome::{Chrome, SidebarRight};
+use crate::shared::marquee::{MarqueeState, marquee};
 use crate::shared::menus::ItemMenu;
 use crate::shared::pins::Pinned as _;
 use crate::shared::transport::{
-    COVER_FLIGHT, CoverAway, ShellSwap, like, play_mode, transport,
+    COVER_FLIGHT, CoverAway, ShellSwap, climax, like, play_mode, transport, transport_controls,
 };
 use crate::shared::volume::{RisingVolume, VolumeHost, rising_volume};
 
@@ -68,6 +69,8 @@ pub(crate) struct PlayerBar {
     context_menu: Option<(music::Track, Point<Pixels>)>,
     /// The clocks and the seek bar, which follow the position without redrawing the bar.
     timeline: Entity<Timeline>,
+    title_marquee: MarqueeState,
+    artist_marquee: MarqueeState,
     /// over the button where the bar has no room for one beside it.
     rising: RisingVolume,
 }
@@ -106,6 +109,8 @@ impl PlayerBar {
             speed,
             context_menu: None,
             timeline,
+            title_marquee: MarqueeState::new(),
+            artist_marquee: MarqueeState::new(),
             rising: RisingVolume::new("volume-rise"),
         }
     }
@@ -281,9 +286,10 @@ impl PlayerBar {
             .when_some(track.and_then(|track| track.pin()), Pinnable::pin)
             // [wisp] 点封面进全屏播放器；专辑页改由点歌名进（见 track_details）。
             .when(track.is_some(), |this| {
-                this.cursor_pointer().on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    navigate(Destination::Fullscreen, cx)
-                })
+                this.cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        navigate(Destination::Fullscreen, cx)
+                    })
             })
             .when_some(album, |this, album| this.aria_label(album))
             .when(track.is_some(), |this| {
@@ -312,13 +318,53 @@ impl PlayerBar {
     /// Track and artist links, explicit badge and favorite action, optionally centered without
     /// moving the cover or transport with them.
     fn track_details(&self, centered: bool, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = cx.theme();
+        let theme = *cx.theme();
         let muted = theme.muted_foreground;
         let artists = theme.text(ui::Text::Small);
         let shown = self.playback.read(cx).shown_track(cx);
         let track = shown.as_ref();
         let explicit = track.is_some_and(|track| track.explicit);
         let title = match track {
+            Some(track) if !centered => {
+                let name = SharedString::from(track.name.clone());
+                let album_id = track.album_id.clone();
+                let pin = track.pin();
+                let weak = cx.entity().downgrade();
+                let key = format!("{}-{:?}", track.name, album_id);
+                marquee(
+                    &self.title_marquee,
+                    "now-playing-track",
+                    &key,
+                    move |copy| {
+                        let name = name.clone();
+                        let album_id = album_id.clone();
+                        div()
+                            .id(("now-playing-track", copy))
+                            .whitespace_nowrap()
+                            .when_some(pin.clone(), Pinnable::pin)
+                            .map(|this| match album_id {
+                                Some(album_id) => this
+                                    .aria_label(name.clone())
+                                    .hover(|style| style.underline())
+                                    .link(Destination::Album(album_id.into())),
+                                None => this.role(Role::Label).aria_value(name.clone()),
+                            })
+                            .on_mouse_down(MouseButton::Right, {
+                                let weak = weak.clone();
+                                move |event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    weak.update(cx, |this, cx| {
+                                        this.open_playing_menu(event.position, cx)
+                                    })
+                                    .ok();
+                                }
+                            })
+                            .child(name)
+                            .into_any_element()
+                    },
+                    cx,
+                )
+            }
             Some(track) => {
                 let name = SharedString::from(track.name.clone());
                 let text = StyledText::new(name.clone());
@@ -345,6 +391,7 @@ impl PlayerBar {
                     .min_w_0()
                     .truncate()
                     .tails()
+                    .into_any_element()
             }
             None => div()
                 .id("now-playing-album")
@@ -353,7 +400,8 @@ impl PlayerBar {
                 .child(t!("player-nothing-playing"))
                 .min_w_0()
                 .text_color(muted)
-                .truncate(),
+                .truncate()
+                .into_any_element(),
         };
         let actions = div()
             .flex()
@@ -401,8 +449,60 @@ impl PlayerBar {
                 .items_center()
                 .h(theme.text(ui::Text::Body) * ui::LEADING)
                 .gap_1()
-                .child(title)
+                .child(div().flex_1().min_w_0().child(title))
                 .child(actions),
+        };
+        let subtitle = match (centered, track) {
+            (false, Some(track)) => {
+                let refs = track.artist_refs.clone();
+                let text = SharedString::from(track.artists.clone());
+                let key = text.clone();
+                let color = muted;
+                let size = artists;
+                let content = marquee(
+                    &self.artist_marquee,
+                    "now-playing-artist",
+                    key.as_ref(),
+                    move |copy| {
+                        InlineLinks::new(
+                            SharedString::from(format!("now-playing-artist-{copy}")),
+                            refs.iter().map(|artist| {
+                                InlineLink::new(
+                                    artist.name.clone(),
+                                    artist.id.clone().map(Into::into),
+                                )
+                            }),
+                            text.clone(),
+                            color,
+                        )
+                        .text_size(size)
+                        .on_click(|id, cx| {
+                            navigate(Destination::Artist(id), cx);
+                        })
+                        .into_any_element()
+                    },
+                    cx,
+                );
+                Some(content)
+            }
+            (true, Some(track)) => Some(
+                InlineLinks::new(
+                    "now-playing-artist",
+                    track.artist_refs.iter().map(|artist| {
+                        InlineLink::new(artist.name.clone(), artist.id.clone().map(Into::into))
+                    }),
+                    track.artists.clone(),
+                    muted,
+                )
+                .text_size(artists)
+                .justify_center()
+                .truncate()
+                .on_click(|id, cx| {
+                    navigate(Destination::Artist(id), cx);
+                })
+                .into_any_element(),
+            ),
+            _ => None,
         };
         div()
             .flex()
@@ -414,24 +514,7 @@ impl PlayerBar {
             .flex_1()
             .min_w_0()
             .child(headline)
-            .when_some(track, |this, track| {
-                this.child(
-                    InlineLinks::new(
-                        "now-playing-artist",
-                        track.artist_refs.iter().map(|artist| {
-                            InlineLink::new(artist.name.clone(), artist.id.clone().map(Into::into))
-                        }),
-                        track.artists.clone(),
-                        muted,
-                    )
-                    .text_size(artists)
-                    .when(centered, |this| this.justify_center())
-                    .truncate()
-                    .on_click(|id, cx| {
-                        navigate(Destination::Artist(id), cx);
-                    }),
-                )
-            })
+            .when_some(subtitle, |this, subtitle| this.child(subtitle))
     }
 }
 
@@ -669,7 +752,24 @@ impl Render for PlayerBar {
                             .gap_1()
                             .flex_none()
                             .w(middle)
-                            .child(transport(&self.playback, false, cx))
+                            .child(
+                                div()
+                                    .relative()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center()
+                                    .child(transport_controls(&self.playback, cx))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .right(px(0.))
+                                            .top_0()
+                                            .bottom_0()
+                                            .flex()
+                                            .items_center()
+                                            .child(climax(&self.playback, false, cx)),
+                                    ),
+                            )
                             .child(seek),
                     )
                     .child(

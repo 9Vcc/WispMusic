@@ -100,6 +100,15 @@ pub(crate) fn like(track: Option<&music::Track>, playback: &Entity<Playback>, cx
 pub(crate) fn transport(playback: &Entity<Playback>, big: bool, cx: &App) -> impl IntoElement {
     let frosted = big && ambient::shown(cx);
 
+    controls(playback, big, frosted, cx).child(climax(playback, frosted, cx))
+}
+
+/// The transport without the climax button, for a bar whose climax key sits elsewhere.
+pub(crate) fn transport_controls(playback: &Entity<Playback>, cx: &App) -> impl IntoElement {
+    controls(playback, false, false, cx)
+}
+
+fn controls(playback: &Entity<Playback>, big: bool, frosted: bool, cx: &App) -> gpui::Div {
     div()
         .flex()
         .items_center()
@@ -107,11 +116,10 @@ pub(crate) fn transport(playback: &Entity<Playback>, big: bool, cx: &App) -> imp
         .child(previous(playback, frosted, cx))
         .child(toggle(playback, big, frosted, cx))
         .child(next(playback, frosted, cx))
-        .child(climax(playback, frosted, cx))
 }
 
 /// Jumps to the next climax start, or back to the first once the track has passed them all.
-fn climax(playback: &Entity<Playback>, frosted: bool, cx: &App) -> Button {
+pub(crate) fn climax(playback: &Entity<Playback>, frosted: bool, cx: &App) -> Button {
     let enabled = !Wisp::global(cx).climax.read(cx).marks().is_empty();
     let playback = playback.clone();
 
