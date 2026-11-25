@@ -713,7 +713,7 @@ impl Default for Values {
             desktop_lyrics_font_size: 40.,
             desktop_lyrics_vertical: false,
             desktop_lyrics_stroke: false,
-            desktop_lyrics_cover_color: true,
+            desktop_lyrics_cover_color: false,
             lyrics_cover_color: false,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,

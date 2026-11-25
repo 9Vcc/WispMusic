@@ -1692,6 +1692,8 @@ fn stroke_cell(
             size: px(cell),
             poses,
             color: color.opacity(alpha),
+            halo: Some(black().opacity(0.6 * alpha)),
+            halo_scale: 1.08,
         }
         .into_any_element(),
         None => div()
@@ -1701,6 +1703,7 @@ fn stroke_cell(
             .justify_center()
             .opacity(alpha)
             .text_size(px((cell * 0.62).max(8.)))
+            .text_shadow(shadows((cell * 0.62).max(8.)))
             .text_color(color)
             .child(SharedString::from(item.timing.text.to_string()))
             .into_any_element(),
