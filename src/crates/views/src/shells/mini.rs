@@ -121,6 +121,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
         },
         |window, cx| {
             crate::install_legacy_client_area(window, false);
+            set_window_frame(window, window_frame_shown());
             window.on_window_should_close(cx, |_, cx| {
                 reveal_main(cx);
                 cx.remove_global::<MiniSession>();
@@ -269,7 +270,21 @@ fn set_window_frame(_window: &Window, _shown: bool) {}
 fn restore_material(window: &mut Window, cx: &App) {
     let theme = *cx.theme();
     window.set_background_appearance(ui::backdrop(theme.blur_window, theme.transparent));
-    set_window_frame(window, true);
+    set_window_frame(window, window_frame_shown());
+}
+
+/// Windows 10 cannot round a per-pixel-alpha window, so its DWM shadow and border show as a
+/// light rectangle around the rounded card. Keep that frame off there; Windows 11 rounds the
+/// surface and keeps its shadow.
+fn window_frame_shown() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        !crate::chrome::legacy_frame::legacy_windows()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
 }
 
 /// Where the expanded window fits around `frame`, keeping its top unless the screen runs out.
