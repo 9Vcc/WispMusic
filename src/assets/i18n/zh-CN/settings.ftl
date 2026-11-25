@@ -476,3 +476,8 @@ settings-desktop-lyrics-vertical = 竖向显示
 settings-desktop-lyrics-vertical-detail = 传统直书，两行歌词改为左右两列
 settings-desktop-lyrics-stroke = 笔画动效
 settings-desktop-lyrics-stroke-detail = 逐字按笔画飞入拼合，句尾四散
+
+settings-karaoke-cover-color = 逐字颜色跟随封面
+settings-karaoke-cover-color-detail = 逐字填充使用当前封面主色，无彩色封面时保持主题前景色
+settings-desktop-lyrics-cover-color = 跟随封面配色
+settings-desktop-lyrics-cover-color-detail = 桌面歌词的文字与笔画字格取当前封面主色，无彩色封面时保持白色

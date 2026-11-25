@@ -436,6 +436,10 @@ struct Values {
     desktop_lyrics_vertical: bool,
     /// 桌面歌词是否使用笔画动效。
     desktop_lyrics_stroke: bool,
+    /// 桌面歌词颜色是否跟随封面。
+    desktop_lyrics_cover_color: bool,
+    /// 歌词页逐字填充是否跟随封面。
+    lyrics_cover_color: bool,
     parallax_lyrics: bool,
     lyrics_motion_preset: LyricMotionPreset,
     romanized_lyrics: bool,
@@ -709,6 +713,8 @@ impl Default for Values {
             desktop_lyrics_font_size: 40.,
             desktop_lyrics_vertical: false,
             desktop_lyrics_stroke: false,
+            desktop_lyrics_cover_color: true,
+            lyrics_cover_color: false,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
             romanized_lyrics: true,
@@ -1365,6 +1371,14 @@ impl AppSettings {
         self.values.desktop_lyrics_stroke
     }
 
+    pub fn desktop_lyrics_cover_color(&self) -> bool {
+        self.values.desktop_lyrics_cover_color
+    }
+
+    pub fn lyrics_cover_color(&self) -> bool {
+        self.values.lyrics_cover_color
+    }
+
     pub fn parallax_lyrics(&self) -> bool {
         self.values.parallax_lyrics
     }
@@ -2002,6 +2016,22 @@ impl AppSettings {
             return;
         }
         self.values.desktop_lyrics_stroke = stroke;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics_cover_color(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.values.desktop_lyrics_cover_color == on {
+            return;
+        }
+        self.values.desktop_lyrics_cover_color = on;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_lyrics_cover_color(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.values.lyrics_cover_color == on {
+            return;
+        }
+        self.values.lyrics_cover_color = on;
         self.schedule_save(cx);
     }
 

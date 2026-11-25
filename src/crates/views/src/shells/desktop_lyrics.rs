@@ -1065,20 +1065,6 @@ impl DesktopLyric {
     }
 }
 
-/// Turns a cover's leading hue into a lyric colour that reads over a dark, transparent
-/// strip. Greyscale art names no hue, and then the lyrics stay white.
-fn lyric_accent(colour: Hsla) -> Option<Hsla> {
-    if colour.s < 0.08 {
-        return None;
-    }
-    Some(Hsla {
-        h: colour.h,
-        s: colour.s.clamp(0.45, 0.85),
-        l: colour.l.clamp(0.55, 0.72),
-        a: 1.,
-    })
-}
-
 /// A dark rim around the glyphs, then a tight and a wide soft shadow. The rim substitutes for
 /// a text stroke: a transparent window cannot use subpixel text, and the rim is what hides
 /// the gray antialiasing steps over a bright wallpaper.
@@ -1934,7 +1920,10 @@ impl Render for DesktopLyric {
             self.stroke = None;
             self.stroke_pending = None;
         }
-        let cover = track.as_ref().and_then(|track| track.cover.clone());
+        let cover_color = self.settings.read(cx).desktop_lyrics_cover_color();
+        let cover = cover_color
+            .then(|| track.as_ref().and_then(|track| track.cover.clone()))
+            .flatten();
         if self.cover != cover {
             self.cover = cover.clone();
             match cover {
@@ -1942,7 +1931,9 @@ impl Render for DesktopLyric {
                     let sampled = ui::palette(SharedString::from(url.clone()), cx);
                     self.accent_task = Some(cx.spawn(async move |this, cx| {
                         let palette = sampled.await;
-                        let accent = palette.primary.and_then(lyric_accent);
+                        let accent = palette
+                            .primary
+                            .and_then(|color| crate::shared::cover_color::accent(color, true));
                         this.update(cx, |this, cx| {
                             if this.cover.as_deref() == Some(url.as_str()) {
                                 this.accent = accent;
@@ -1958,7 +1949,10 @@ impl Render for DesktopLyric {
                 }
             }
         }
-        let accent = self.accent.unwrap_or_else(white);
+        let accent = match cover_color {
+            true => self.accent.unwrap_or_else(white),
+            false => white(),
+        };
         let (lyric, offset) = {
             let lyrics = self.lyrics.read(cx);
             (
@@ -2419,30 +2413,6 @@ mod tests {
         assert_eq!(effective_font(40., 200., 60., false), 16.);
         assert_eq!(effective_font(40., 400., 620., true), 40.);
         assert!(effective_font(40., 200., 620., true) < 40.);
-    }
-
-    #[test]
-    fn a_grey_cover_leaves_the_lyrics_white() {
-        assert!(lyric_accent(Hsla {
-            h: 0.2,
-            s: 0.02,
-            l: 0.5,
-            a: 1.,
-        })
-        .is_none());
-    }
-
-    #[test]
-    fn a_cover_hue_is_lifted_into_a_readable_text_colour() {
-        let accent = lyric_accent(Hsla {
-            h: 0.3,
-            s: 0.1,
-            l: 0.2,
-            a: 1.,
-        })
-        .unwrap();
-        assert!(accent.s >= 0.45);
-        assert!(accent.l >= 0.55);
     }
 
     #[test]

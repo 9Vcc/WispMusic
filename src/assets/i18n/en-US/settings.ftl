@@ -476,3 +476,8 @@ settings-desktop-lyrics-vertical = Vertical layout
 settings-desktop-lyrics-vertical-detail = Traditional vertical columns instead of two rows
 settings-desktop-lyrics-stroke = Stroke animation
 settings-desktop-lyrics-stroke-detail = Write each character stroke by stroke, then scatter it at the end of the line
+
+settings-karaoke-cover-color = Word fill follows cover
+settings-karaoke-cover-color-detail = Fill sung words with the current cover's leading colour; greyscale art keeps the theme foreground
+settings-desktop-lyrics-cover-color = Follow cover colours
+settings-desktop-lyrics-cover-color-detail = Tint desktop lyrics and stroke cells with the current cover's leading colour; greyscale art stays white

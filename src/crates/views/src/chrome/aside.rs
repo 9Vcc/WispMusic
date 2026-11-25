@@ -8,7 +8,8 @@ use gpui::prelude::*;
 use gpui::accesskit::{Role, Toggled};
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity,
-    ExternalPaths, FontWeight, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ExternalPaths, FontWeight, Hsla, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels,
     Point, Render, ScrollHandle, ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task,
     UniformListScrollHandle, Window, canvas, div, ease_in_out, px, relative, size, svg,
     uniform_list,
@@ -303,6 +304,10 @@ pub(crate) struct Aside {
     settled: Vec<bool>,
     /// The same for the frame before, which the scroll handle's bounds describe.
     was_settled: Vec<bool>,
+    cover: Option<String>,
+    accent_dark: Option<bool>,
+    accent: Option<Hsla>,
+    accent_task: Option<Task<()>>,
 }
 
 impl Aside {
@@ -439,6 +444,52 @@ impl Aside {
             sheet_layout: None,
             settled: Vec::new(),
             was_settled: Vec::new(),
+            cover: None,
+            accent_dark: None,
+            accent: None,
+            accent_task: None,
+        }
+    }
+
+    /// Samples the current cover when the word-fill accent is wanted, and drops it when the
+    /// switch goes off so the next enable samples afresh.
+    fn sync_accent(&mut self, cx: &mut Context<Self>) {
+        let on = self.settings.read(cx).lyrics_cover_color();
+        let cover = on
+            .then(|| {
+                self.playback
+                    .read(cx)
+                    .shown_track(cx)
+                    .and_then(|track| track.cover)
+            })
+            .flatten();
+        let dark = cx.theme().background.l < 0.5;
+        if self.cover == cover && self.accent_dark == Some(dark) {
+            return;
+        }
+        self.cover = cover.clone();
+        self.accent_dark = Some(dark);
+        match cover {
+            Some(url) => {
+                let sampled = ui::palette(SharedString::from(url.clone()), cx);
+                self.accent_task = Some(cx.spawn(async move |this, cx| {
+                    let palette = sampled.await;
+                    let accent = palette
+                        .primary
+                        .and_then(|colour| crate::shared::cover_color::accent(colour, dark));
+                    this.update(cx, |this, cx| {
+                        if this.cover.as_deref() == Some(url.as_str()) {
+                            this.accent = accent;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }));
+            }
+            None => {
+                self.accent_task = None;
+                self.accent = None;
+            }
         }
     }
 
@@ -1347,12 +1398,16 @@ impl Aside {
         let (verse, lane_size) = verse_sizes(self.titled, scale, &theme);
         let line_height = active_verse_size(verse) * ui::LEADING;
         let phrase_gap = verse_gap(verse);
+        let accent = match self.settings.read(cx).lyrics_cover_color() {
+            true => self.accent.unwrap_or(theme.foreground),
+            false => theme.foreground,
+        };
         let sung = Sung {
             karaoke: karaoke_effects,
             lane: lane_size,
             scripts: romanization_scripts,
             theme,
-            karaoke_tint: theme.foreground,
+            karaoke_tint: accent,
             lift: 1.,
             from: gpui::point(0., 0.5),
             mirrored,
@@ -1694,7 +1749,7 @@ impl Aside {
                     };
                     let sung = Sung {
                         karaoke_tint: mix(
-                            theme.foreground,
+                            accent,
                             tint,
                             primary_karaoke_fade(line, active, position),
                         ),
@@ -2408,6 +2463,7 @@ impl Aside {
 
 impl Render for Aside {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_accent(cx);
         self.scrollbar.read(cx).sync();
         let listing = self.playback.read(cx).shown_queue(cx);
         let sections = listing.sections.clone();

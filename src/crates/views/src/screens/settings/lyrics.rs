@@ -36,6 +36,7 @@ impl SettingsView {
                 .rows([
                     Slot::LyricOffsetDefault,
                     Slot::Karaoke,
+                    Slot::KaraokeCoverColor,
                     Slot::Romanized,
                     Slot::PanelLyricsSize,
                     Slot::FullscreenLyricsSize,
@@ -60,6 +61,7 @@ impl SettingsView {
         groups.push(
             Group::new("settings-group-desktop-lyrics", "icons/monitor.svg").rows([
                 Slot::DesktopLyrics,
+                Slot::DesktopLyricsCoverColor,
                 Slot::DesktopLyricsVertical,
                 Slot::DesktopLyricsStroke,
                 Slot::DesktopLyricsFont,
@@ -92,6 +94,21 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.settings
                         .update(cx, |settings, cx| settings.set_desktop_lyrics(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn desktop_lyrics_cover_color_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.settings.read(cx).desktop_lyrics_cover_color();
+        self.row(
+            t!("settings-desktop-lyrics-cover-color"),
+            Switch::new("desktop-lyrics-cover-color", on)
+                .name(t!("settings-desktop-lyrics-cover-color"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_desktop_lyrics_cover_color(!on, cx)
+                    });
                 }))
                 .into_any_element(),
         )
@@ -549,6 +566,21 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.settings
                         .update(cx, |settings, cx| settings.set_karaoke_lyrics(!on, cx));
+                }))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn karaoke_cover_color_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.settings.read(cx).lyrics_cover_color();
+        self.row(
+            t!("settings-karaoke-cover-color"),
+            Switch::new("karaoke-cover-color", on)
+                .name(t!("settings-karaoke-cover-color"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_lyrics_cover_color(!on, cx)
+                    });
                 }))
                 .into_any_element(),
         )

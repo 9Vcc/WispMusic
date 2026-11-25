@@ -92,6 +92,7 @@ enum Slot {
     Lyrics,
     LyricOffsetDefault,
     Karaoke,
+    KaraokeCoverColor,
     BlurLyrics,
     LyricsBlurAmount,
     FadeLyrics,
@@ -106,6 +107,7 @@ enum Slot {
     PanelLyricsSize,
     FullscreenLyricsSize,
     DesktopLyrics,
+    DesktopLyricsCoverColor,
     DesktopLyricsVertical,
     DesktopLyricsStroke,
     DesktopLyricsFont,
@@ -825,6 +827,10 @@ impl SettingsView {
                 t!("settings-desktop-lyrics"),
                 t!("settings-desktop-lyrics-detail"),
             ),
+            Slot::DesktopLyricsCoverColor => (
+                t!("settings-desktop-lyrics-cover-color"),
+                t!("settings-desktop-lyrics-cover-color-detail"),
+            ),
             Slot::DesktopLyricsVertical => (
                 t!("settings-desktop-lyrics-vertical"),
                 t!("settings-desktop-lyrics-vertical-detail"),
@@ -994,6 +1000,10 @@ impl SettingsView {
                 t!("settings-karaoke-lyrics"),
                 t!("settings-karaoke-lyrics-detail"),
             ),
+            Slot::KaraokeCoverColor => (
+                t!("settings-karaoke-cover-color"),
+                t!("settings-karaoke-cover-color-detail"),
+            ),
             Slot::Romanized => (
                 t!("settings-romanized-lyrics"),
                 t!("settings-romanized-lyrics-detail"),
@@ -1056,6 +1066,7 @@ impl SettingsView {
             Slot::PanelLyricsSize => self.panel_lyrics_size_row(cx),
             Slot::FullscreenLyricsSize => self.fullscreen_lyrics_size_row(cx),
             Slot::DesktopLyrics => self.desktop_lyrics_row(cx),
+            Slot::DesktopLyricsCoverColor => self.desktop_lyrics_cover_color_row(cx),
             Slot::DesktopLyricsVertical => self.desktop_lyrics_vertical_row(cx),
             Slot::DesktopLyricsStroke => self.desktop_lyrics_stroke_row(cx),
             Slot::DesktopLyricsFont => self.desktop_lyrics_font_row(cx),
@@ -1119,6 +1130,7 @@ impl SettingsView {
             Slot::Lyrics => self.lyrics_row(cx),
             Slot::LyricOffsetDefault => self.lyric_offset_default_row(cx),
             Slot::Karaoke => self.karaoke_lyrics_row(cx),
+            Slot::KaraokeCoverColor => self.karaoke_cover_color_row(cx),
             Slot::Romanized => self.romanized_lyrics_row(cx),
             Slot::LyricsForLocal => self.lyrics_for_local_files_row(cx),
             Slot::ScrobbleProvider => self.scrobble_provider_row(cx),
