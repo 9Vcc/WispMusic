@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gpui::prelude::*;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
-    FontWeight, Global, IntoElement, MouseButton, Render, SharedString, Task, TextShadow, Window,
+    FontWeight, Global, IntoElement, MouseButton, MouseMoveEvent, Render, SharedString, Task,
+    TextShadow, Window,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowOptions, black,
     div, point, px, relative, size, white,
 };
@@ -53,9 +54,8 @@ const SWEEP_FRAME: Duration = Duration::from_millis(16);
 const SWEEP_LEAST: Duration = Duration::from_millis(180);
 const SWEEP_STRETCH: f32 = 1.4;
 const SWEPT: f32 = 0.98;
-const LANDING: f32 = 0.2;
 /// How much of a word the leading edge fades over, relative to its text size.
-const SWEEP_EDGE: f32 = 0.22;
+const SWEEP_EDGE: f32 = 0.25;
 
 #[derive(Clone, Copy)]
 struct MainHost(AnyWindowHandle);
@@ -540,6 +540,16 @@ impl DesktopLyric {
         }
     }
 
+    fn set_hovered(&mut self, want: bool, cx: &mut Context<Self>) {
+        if self.hovering == want {
+            return;
+        }
+        self.hovering = want;
+        self.hover_changed = true;
+        self.hover_epoch = self.hover_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
     /// Keeps hover and the move/resize outline honest when the pointer leaves without a leave
     /// message, which happens when the window moves under the cursor during a drag.
     fn poll_hover(&mut self, cx: &mut Context<Self>) {
@@ -552,12 +562,7 @@ impl DesktopLyric {
             clear_interaction();
         }
         let want = inside || (held && interacting());
-        if want != self.hovering {
-            self.hovering = want;
-            self.hover_changed = true;
-            self.hover_epoch = self.hover_epoch.wrapping_add(1);
-            cx.notify();
-        }
+        self.set_hovered(want, cx);
     }
 
     /// Redraws at the karaoke cadence while a line is filling. Position reports arrive twice a
@@ -681,8 +686,7 @@ impl DesktopLyric {
             .items_center()
             .gap(px(8.))
             .px(px(12.))
-            .invisible()
-            .group_hover("desktop-lyrics", |this| this.visible())
+            .when(!self.hovering, |this| this.invisible())
             .child(title)
             .child(transport)
             .child(controls)
@@ -690,14 +694,26 @@ impl DesktopLyric {
     }
 }
 
-/// A tight dark rim that gives the glyphs a clean edge over a bright wallpaper, and a wide
-/// soft one that keeps them readable. The tight one is what masks grayscale antialiasing,
-/// since a transparent window cannot use subpixel text.
-fn shadows() -> [TextShadow; 2] {
-    [
-        TextShadow::new(black().opacity(0.6)).blur(px(2.)),
-        TextShadow::new(black().opacity(0.4)).blur(px(9.)),
-    ]
+/// A dark rim around the glyphs, then a tight and a wide soft shadow. The rim substitutes for
+/// a text stroke: a transparent window cannot use subpixel text, and the rim is what hides
+/// the gray antialiasing steps over a bright wallpaper.
+fn shadows(size: f32) -> Vec<TextShadow> {
+    let edge = (size * 0.04).clamp(1., 2.5);
+    let mut shadows = Vec::with_capacity(10);
+    for (x, y) in [(1., 0.), (-1., 0.), (0., 1.), (0., -1.)] {
+        shadows.push(
+            TextShadow::new(black().opacity(0.55)).offset(px(edge * x), px(edge * y)),
+        );
+    }
+    for (x, y) in [(0.7, 0.7), (-0.7, 0.7), (0.7, -0.7), (-0.7, -0.7)] {
+        shadows.push(
+            TextShadow::new(black().opacity(0.4))
+                .offset(px(edge * x), px(edge * y)),
+        );
+    }
+    shadows.push(TextShadow::new(black().opacity(0.55)).blur(px(2.)));
+    shadows.push(TextShadow::new(black().opacity(0.35)).blur(px(7.)));
+    shadows
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -740,15 +756,11 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
             .whitespace_nowrap()
             .text_size(px(size))
             .line_height(relative(SLOT_RATIO))
-            .text_shadow(shadows())
+            .text_shadow(shadows(size))
             .font_weight(FontWeight::SEMIBOLD);
         let row = fragments.into_iter().fold(row, |row, (text, word)| {
             let (start, end) = word_window(line.start, words, word);
             let share = swept(start, end, at, word + 1 >= words.len());
-            let landing = match share < 1. {
-                true => ((1. - share) / LANDING).min(1.),
-                false => 0.,
-            };
             let cell = div()
                 .relative()
                 .flex_none()
@@ -768,9 +780,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
                         // let the word's clipping box cut it into a visible rectangle.
                         .text_shadow([])
                         .text_color(white())
-                        .when(landing > 0., |this| {
-                            this.fade_sides(px(0.), px(edge * landing))
-                        })
+                        .when(share < 1., |this| this.fade_sides(px(0.), px(edge)))
                         .child(
                             div()
                                 .whitespace_nowrap()
@@ -787,7 +797,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
         .whitespace_nowrap()
         .text_size(px(size))
         .line_height(relative(SLOT_RATIO))
-        .text_shadow(shadows())
+        .text_shadow(shadows(size))
         .text_color(role.color())
         .font_weight(FontWeight::SEMIBOLD)
         .child(line.text.clone())
@@ -873,7 +883,7 @@ fn plain_line(text: &str, role: LineRole, size: f32) -> AnyElement {
         .whitespace_nowrap()
         .text_size(px(size))
         .line_height(relative(SLOT_RATIO))
-        .text_shadow(shadows())
+        .text_shadow(shadows(size))
         .text_color(role.color())
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(text.to_owned()))
@@ -937,7 +947,7 @@ fn placeholder_lyric(font: f32) -> AnyElement {
         .justify_center()
         .text_size(px(font))
         .text_color(white().opacity(0.6))
-        .text_shadow(shadows())
+        .text_shadow(shadows(font))
         .child("♪")
         .into_any_element()
 }
@@ -1192,19 +1202,22 @@ impl Render for DesktopLyric {
 
         div()
             .id("desktop-lyrics")
-            .group("desktop-lyrics")
             .size_full()
             .relative()
             .flex()
             .flex_col()
             .rounded(px(RADIUS))
             .overflow_hidden()
-            .on_hover(cx.listener(|this, over: &bool, _, cx| {
-                if this.hovering != *over {
-                    this.hovering = *over;
-                    this.hover_changed = true;
-                    this.hover_epoch = this.hover_epoch.wrapping_add(1);
-                    cx.notify();
+            // Only a real move inside brings hover back; the pointer leaving is the
+            // poll's call, so a stale hover state cannot fight it and flicker.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                let bounds = window.bounds();
+                let inside = event.position.x >= px(0.)
+                    && event.position.y >= px(0.)
+                    && event.position.x <= bounds.size.width
+                    && event.position.y <= bounds.size.height;
+                if inside {
+                    this.set_hovered(true, cx);
                 }
             }))
             .with_animation(
