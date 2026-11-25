@@ -1110,7 +1110,9 @@ impl Render for MiniPlayer {
             .child(self.bar(cx))
             .when(self.panel, |this| this.child(self.panel(cx)));
         let card = match self.panel {
-            false => card.h(px(BAR)).into_any_element(),
+            // Fill the surface when folded, so a frame GPUI kept around the window can
+            // never show the material below the rounded card.
+            false => card.h_full().into_any_element(),
             true if self.settling => {
                 let solid = gpui::Hsla {
                     a: 1.,
