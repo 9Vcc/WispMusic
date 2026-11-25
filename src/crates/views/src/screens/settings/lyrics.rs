@@ -134,7 +134,7 @@ impl SettingsView {
                 "icons/plus.svg",
                 "settings-desktop-lyrics-font-up",
                 2.,
-                size >= 48.,
+                size >= 64.,
             ));
         self.row(
             t!("settings-desktop-lyrics-font"),

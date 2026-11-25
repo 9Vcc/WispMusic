@@ -1348,7 +1348,7 @@ impl AppSettings {
     }
 
     pub fn desktop_lyrics_font_size(&self) -> f32 {
-        self.values.desktop_lyrics_font_size.clamp(24., 48.)
+        self.values.desktop_lyrics_font_size.clamp(24., 64.)
     }
 
     pub fn parallax_lyrics(&self) -> bool {
@@ -1967,7 +1967,7 @@ impl AppSettings {
     }
 
     pub fn set_desktop_lyrics_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        let size = size.clamp(24., 48.);
+        let size = size.clamp(24., 64.);
         if (self.values.desktop_lyrics_font_size - size).abs() < f32::EPSILON {
             return;
         }

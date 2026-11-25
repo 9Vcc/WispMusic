@@ -4,15 +4,14 @@
 //! and it never takes focus when it opens. The settings toggle is the only source of truth:
 //! the installer watches it and opens or closes this window accordingly.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use gpui::Task;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, Context, Entity, FontWeight, Global, IntoElement,
-    MouseButton, Render, SharedString, TextShadow, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowOptions, black, div, point, px, relative,
-    size, white,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
+    FontWeight, Global, IntoElement, MouseButton, Render, SharedString, Task, TextShadow, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowOptions, black,
+    div, point, px, relative, size, white,
 };
 use i18n::t;
 use music::{Lyrics as MusicLyrics, LyricsLine, LyricsWord};
@@ -22,13 +21,24 @@ use ui::Button;
 use crate::shared::transport::{next, previous, toggle};
 
 const WIDTH: f32 = 1000.;
-const HEIGHT: f32 = 188.;
 /// Room above the taskbar for the window's bottom edge.
 const MARGIN: f32 = 56.;
 const HEADER: f32 = 48.;
+const EDGE: f32 = 16.;
+const RADIUS: f32 = 12.;
 const MIN_FONT: f32 = 24.;
-const MAX_FONT: f32 = 48.;
+const MAX_FONT: f32 = 64.;
 const FONT_STEP: f32 = 2.;
+/// Line slot height and the stage height a font size designs for, from the reference.
+const SLOT_RATIO: f32 = 1.35;
+const DESIGN_RATIO: f32 = 3.4;
+const DESIGN_MIN: f32 = 140.;
+const DESIGN_MAX: f32 = 320.;
+/// The pair slides out over this long after its second line ends.
+const SWAP: Duration = Duration::from_millis(220);
+/// The dark plate that fades in under the lyrics on hover.
+const HOVER_ALPHA: f32 = 0.6;
+const HOVER_FADE: Duration = Duration::from_millis(300);
 /// Repaint cadence while a line fills word by word.
 const SWEEP_FRAME: Duration = Duration::from_millis(22);
 const SWEEP_LEAST: Duration = Duration::from_millis(180);
@@ -89,6 +99,12 @@ fn open(cx: &mut App) {
     let Some(host) = cx.try_global::<MainHost>().copied() else {
         return;
     };
+    let playback = Wisp::global(cx).playback.clone();
+    let lyrics = Wisp::global(cx).lyrics.clone();
+    let settings = Wisp::global(cx).settings.clone();
+    let font = settings.read(cx).desktop_lyrics_font_size();
+    let height = design_height(font);
+
     let frame = host.0.update(cx, |_, window, _| window.bounds()).ok();
     let displays = cx.displays();
     let area = frame
@@ -106,15 +122,11 @@ fn open(cx: &mut App) {
             let available = area.size.width.as_f32();
             let width = WIDTH.min((available - 64.).max(320.));
             let x = area.origin.x.as_f32() + (available - width) / 2.;
-            let y = area.origin.y.as_f32() + area.size.height.as_f32() - HEIGHT - MARGIN;
-            (point(px(x), px(y)), size(px(width), px(HEIGHT)))
+            let y = area.origin.y.as_f32() + area.size.height.as_f32() - height - MARGIN;
+            (point(px(x), px(y)), size(px(width), px(height)))
         }
-        None => (point(px(100.), px(100.)), size(px(WIDTH), px(HEIGHT))),
+        None => (point(px(100.), px(100.)), size(px(WIDTH), px(height))),
     };
-
-    let playback = Wisp::global(cx).playback.clone();
-    let lyrics = Wisp::global(cx).lyrics.clone();
-    let settings = Wisp::global(cx).settings.clone();
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds { origin, size })),
@@ -146,22 +158,27 @@ fn open(cx: &mut App) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn hwnd(window: &Window) -> Option<*mut std::ffi::c_void> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(handle.hwnd.get() as *mut std::ffi::c_void)
+}
+
 /// Hides the DWM frame, which otherwise draws an inactive border and shadow around the
 /// transparent strip.
 #[cfg(target_os = "windows")]
 fn hide_frame(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::Graphics::Dwm::{
         DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
         DwmSetWindowAttribute,
     };
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+    let Some(hwnd) = hwnd(window) else {
         return;
     };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return;
-    };
-    let hwnd = handle.hwnd.get() as *mut std::ffi::c_void;
     let policy = DWMNCRP_DISABLED;
     let border = DWMWA_COLOR_NONE;
     unsafe {
@@ -183,12 +200,105 @@ fn hide_frame(window: &Window) {
 #[cfg(not(target_os = "windows"))]
 fn hide_frame(_window: &Window) {}
 
+/// The window height a font size designs for: two 1.35em slots plus the header.
+fn design_height(font: f32) -> f32 {
+    (font * DESIGN_RATIO).round().clamp(DESIGN_MIN, DESIGN_MAX) + HEADER
+}
+
+/// The size lyrics draw at: the saved size times how far the window has strayed from the
+/// geometry its size designs for. A window made shorter or narrower brings smaller lyrics.
+fn effective_font(setting: f32, width: f32, height: f32) -> f32 {
+    let stage = design_height(setting) - HEADER;
+    let actual = (height - HEADER).max(0.);
+    if stage <= 0. || actual <= 0. || width <= 0. {
+        return setting;
+    }
+    let factor = (actual / stage).min(width / WIDTH);
+    (setting * factor).round().clamp(16., 96.)
+}
+
+/// Resizes the strip for a new font size, keeping its centre where it was.
+fn fit_to_font(window: &mut Window, font: f32, cx: &App) {
+    place_window(window, WIDTH, design_height(font), cx);
+}
+
+fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
+    let displays = cx.displays();
+    let area = displays
+        .iter()
+        .find(|display| display.visible_bounds().contains(&window.bounds().center()))
+        .or_else(|| displays.first())
+        .map(|display| display.visible_bounds());
+    let (width, height) = match area {
+        Some(area) => (
+            width.min((area.size.width.as_f32() - 64.).max(320.)),
+            height.min(area.size.height.as_f32()),
+        ),
+        None => (width, height),
+    };
+    let bounds = window.bounds();
+    if (bounds.size.width.as_f32() - width).abs() < 1.
+        && (bounds.size.height.as_f32() - height).abs() < 1.
+    {
+        return;
+    }
+    let centre = bounds.center();
+    let (mut x, mut y) = (
+        centre.x.as_f32() - width / 2.,
+        centre.y.as_f32() - height / 2.,
+    );
+    if let Some(area) = area {
+        let left = area.origin.x.as_f32();
+        let top = area.origin.y.as_f32();
+        let right = left + area.size.width.as_f32();
+        let bottom = top + area.size.height.as_f32();
+        x = x.clamp(left, (right - width).max(left));
+        y = y.clamp(top, (bottom - height).max(top));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(hwnd) = hwnd(window) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+        };
+        let scale = window.scale_factor();
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                (x * scale).round() as i32,
+                (y * scale).round() as i32,
+                (width * scale).round() as i32,
+                (height * scale).round() as i32,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+        return;
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (x, y);
+    window.resize(size(px(width), px(height)));
+}
+
+#[derive(Clone, Copy)]
+struct Swap {
+    from: usize,
+    started: Instant,
+}
+
 struct DesktopLyric {
     playback: Entity<Playback>,
     lyrics: Entity<Lyrics>,
     settings: Entity<AppSettings>,
     framed: bool,
     sweeping: Option<Task<()>>,
+    /// The pair of lines on stage. It holds still while the second line sings.
+    pair: Option<usize>,
+    swap: Option<Swap>,
+    track: Option<String>,
+    fit_font: Option<f32>,
+    hovering: bool,
+    hover_changed: bool,
+    hover_epoch: u32,
 }
 
 impl DesktopLyric {
@@ -209,6 +319,13 @@ impl DesktopLyric {
             settings,
             framed: false,
             sweeping: None,
+            pair: None,
+            swap: None,
+            track: None,
+            fit_font: None,
+            hovering: false,
+            hover_changed: false,
+            hover_epoch: 0,
         }
     }
 
@@ -257,12 +374,12 @@ impl DesktopLyric {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(white().opacity(0.75))
                             .child(title),
                     ),
             );
-        let controls = div()
+        let transport = div()
             .flex()
             .flex_none()
             .items_center()
@@ -274,7 +391,17 @@ impl DesktopLyric {
             .p(px(2.))
             .child(previous(&self.playback, false, cx).tint(white()))
             .child(toggle(&self.playback, false, false, cx).tint(white()))
-            .child(next(&self.playback, false, cx).tint(white()))
+            .child(next(&self.playback, false, cx).tint(white()));
+        let controls = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(1.))
+            .rounded_full()
+            .border_1()
+            .border_color(white().opacity(0.15))
+            .bg(black().opacity(0.45))
+            .p(px(2.))
             .child(
                 Button::new("desktop-lyrics-font-down")
                     .ghost()
@@ -326,6 +453,7 @@ impl DesktopLyric {
             .invisible()
             .group_hover("desktop-lyrics", |this| this.visible())
             .child(title)
+            .child(transport)
             .child(controls)
             .into_any_element()
     }
@@ -335,8 +463,36 @@ fn shadow() -> TextShadow {
     TextShadow::new(black().opacity(0.7)).blur(px(6.))
 }
 
-fn line_text(line: &LyricsLine, at: Duration, active: bool, size: f32) -> AnyElement {
-    if active
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineRole {
+    Singing,
+    Sung,
+    Preview,
+}
+
+impl LineRole {
+    fn color(self) -> gpui::Hsla {
+        match self {
+            Self::Singing | Self::Sung => white(),
+            Self::Preview => white().opacity(0.45),
+        }
+    }
+
+    /// A line brightens once its start passes and settles to plain white once its last word
+    /// has been sung. The pair's outgoing side keeps its look while it slides away.
+    fn at(line: &LyricsLine, at: Duration) -> Self {
+        match at < line.start {
+            true => Self::Preview,
+            false => match line.sung_end().is_some_and(|end| at >= end) {
+                true => Self::Sung,
+                false => Self::Singing,
+            },
+        }
+    }
+}
+
+fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyElement {
+    if role == LineRole::Singing
         && let Some(words) = line.words.as_deref()
         && let Some(fragments) = word_fragments(&line.text, words)
     {
@@ -346,7 +502,7 @@ fn line_text(line: &LyricsLine, at: Duration, active: bool, size: f32) -> AnyEle
             .items_center()
             .whitespace_nowrap()
             .text_size(px(size))
-            .line_height(relative(1.2))
+            .line_height(relative(SLOT_RATIO))
             .text_shadow([shadow()])
             .font_weight(FontWeight::SEMIBOLD);
         let row = fragments.into_iter().fold(row, |row, (text, word)| {
@@ -391,13 +547,12 @@ fn line_text(line: &LyricsLine, at: Duration, active: bool, size: f32) -> AnyEle
     div()
         .whitespace_nowrap()
         .text_size(px(size))
-        .line_height(relative(1.2))
+        .line_height(relative(SLOT_RATIO))
         .text_shadow([shadow()])
-        .text_color(match active {
-            true => white(),
-            false => white().opacity(0.45),
+        .text_color(role.color())
+        .when(role != LineRole::Preview, |this| {
+            this.font_weight(FontWeight::SEMIBOLD)
         })
-        .when(active, |this| this.font_weight(FontWeight::SEMIBOLD))
         .child(line.text.clone())
         .into_any_element()
 }
@@ -476,18 +631,79 @@ fn progress(start: Duration, end: Duration, at: Duration) -> f32 {
     ((at - start).as_secs_f32() / span).clamp(0., 1.)
 }
 
-fn plain_line(text: &str, active: bool, size: f32) -> AnyElement {
+fn plain_line(text: &str, role: LineRole, size: f32) -> AnyElement {
     div()
         .whitespace_nowrap()
         .text_size(px(size))
-        .line_height(relative(1.2))
+        .line_height(relative(SLOT_RATIO))
         .text_shadow([shadow()])
-        .text_color(match active {
-            true => white(),
-            false => white().opacity(0.45),
+        .text_color(role.color())
+        .when(role != LineRole::Preview, |this| {
+            this.font_weight(FontWeight::SEMIBOLD)
         })
-        .when(active, |this| this.font_weight(FontWeight::SEMIBOLD))
         .child(SharedString::from(text.to_owned()))
+        .into_any_element()
+}
+
+#[derive(Clone, Copy)]
+struct Stage<'a> {
+    lines: &'a [LyricsLine],
+    at: Duration,
+    font: f32,
+    slot: f32,
+}
+
+fn pair_row(stage: &Stage, index: usize, top: f32, opacity: f32, tail: bool) -> AnyElement {
+    let text = stage
+        .lines
+        .get(index)
+        .map(|line| line_text(line, stage.at, LineRole::at(line, stage.at), stage.font))
+        .unwrap_or_else(|| div().into_any_element());
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(top))
+        .h(px(stage.slot))
+        .px(px(EDGE))
+        .flex()
+        .items_center()
+        .when(tail, |this| this.justify_end())
+        .when(!tail, |this| this.justify_start())
+        .overflow_hidden()
+        .opacity(opacity)
+        .child(text)
+        .into_any_element()
+}
+
+fn plain_row(text: String, role: LineRole, font: f32, slot: f32, top: f32, tail: bool) -> AnyElement {
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(top))
+        .h(px(slot))
+        .px(px(EDGE))
+        .flex()
+        .items_center()
+        .when(tail, |this| this.justify_end())
+        .when(!tail, |this| this.justify_start())
+        .overflow_hidden()
+        .child(plain_line(&text, role, font))
+        .into_any_element()
+}
+
+fn placeholder_lyric(font: f32) -> AnyElement {
+    div()
+        .absolute()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(font))
+        .text_color(white().opacity(0.6))
+        .text_shadow([shadow()])
+        .child("♪")
         .into_any_element()
 }
 
@@ -497,7 +713,24 @@ impl Render for DesktopLyric {
             self.framed = true;
             hide_frame(window);
         }
-        let size = self.settings.read(cx).desktop_lyrics_font_size();
+        let setting_font = self.settings.read(cx).desktop_lyrics_font_size();
+        let bounds = window.bounds();
+        let font = effective_font(
+            setting_font,
+            bounds.size.width.as_f32(),
+            bounds.size.height.as_f32(),
+        );
+        let slot = font * SLOT_RATIO;
+        // Changing the saved size resizes the strip once; the effective size then follows
+        // whatever the window measures.
+        if self.fit_font != Some(setting_font) {
+            self.fit_font = Some(setting_font);
+            if (bounds.size.height.as_f32() - design_height(setting_font)).abs() > 1. {
+                cx.defer_in(window, move |_, window, cx| {
+                    fit_to_font(window, setting_font, cx)
+                });
+            }
+        }
         let (track, position, playing) = {
             let playback = self.playback.read(cx);
             (
@@ -506,6 +739,12 @@ impl Render for DesktopLyric {
                 matches!(playback.state(), PlaybackState::Playing),
             )
         };
+        let track_id = track.as_ref().and_then(|track| track.id.clone());
+        if self.track != track_id {
+            self.track = track_id;
+            self.pair = None;
+            self.swap = None;
+        }
         let (lyric, offset) = {
             let lyrics = self.lyrics.read(cx);
             (
@@ -535,7 +774,9 @@ impl Render for DesktopLyric {
             None => SharedString::from("WispMusic"),
         };
 
-        let (current, next_line) = match lyric {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut placeholder = None;
+        match lyric {
             Some(MusicLyrics::Synced { lines }) => {
                 let active = music::lyrics::active(&lines, at);
                 let filling = active
@@ -549,39 +790,135 @@ impl Render for DesktopLyric {
                 {
                     self.pump(cx);
                 }
-                let current = match active {
-                    Some(index) => line_text(&lines[index], at, true, size),
-                    None => plain_line("♪", false, size),
+                if self
+                    .swap
+                    .is_some_and(|swap| swap.started.elapsed() >= SWAP)
+                {
+                    self.swap = None;
+                }
+                match (self.pair, active) {
+                    (Some(pair), Some(active)) if active == pair || active == pair + 1 => {}
+                    (Some(pair), Some(active)) => {
+                        self.swap = Some(Swap {
+                            from: pair,
+                            started: Instant::now(),
+                        });
+                        self.pair = Some(active);
+                    }
+                    (None, Some(active)) => self.pair = Some(active),
+                    (_, None) => {
+                        self.pair = None;
+                        self.swap = None;
+                    }
+                }
+                if self.swap.is_some() {
+                    self.pump(cx);
+                }
+                let stage = Stage {
+                    lines: &lines,
+                    at,
+                    font,
+                    slot,
                 };
-                let next_line = match active {
-                    Some(index) => lines
-                        .get(index + 1)
-                        .map(|line| line_text(line, at, false, size))
-                        .unwrap_or_else(|| plain_line("", false, size)),
-                    None => lines
-                        .first()
-                        .map(|line| line_text(line, at, false, size))
-                        .unwrap_or_else(|| plain_line("", false, size)),
-                };
-                (current, next_line)
+                match self.pair.filter(|pair| *pair < lines.len()) {
+                    Some(pair) => {
+                        if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len()) {
+                            let progress =
+                                (swap.started.elapsed().as_secs_f32() / SWAP.as_secs_f32())
+                                    .clamp(0., 1.);
+                            let eased = 1. - (1. - progress).powi(3);
+                            for offset in 0..2 {
+                                let tail = offset == 1;
+                                let index = swap.from + offset;
+                                rows.push(pair_row(
+                                    &stage,
+                                    index,
+                                    offset as f32 * slot - slot * eased,
+                                    1. - eased,
+                                    tail,
+                                ));
+                                let index = pair + offset;
+                                rows.push(pair_row(
+                                    &stage,
+                                    index,
+                                    offset as f32 * slot + 2. * slot * (1. - eased),
+                                    eased,
+                                    tail,
+                                ));
+                            }
+                        } else {
+                            for offset in 0..2 {
+                                let index = pair + offset;
+                                rows.push(pair_row(
+                                    &stage,
+                                    index,
+                                    offset as f32 * slot,
+                                    1.,
+                                    offset == 1,
+                                ));
+                            }
+                        }
+                    }
+                    None => placeholder = Some(placeholder_lyric(font)),
+                }
             }
             Some(MusicLyrics::Plain { text, .. }) => {
+                self.pair = None;
+                self.swap = None;
                 let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-                let current = lines
-                    .next()
-                    .map(|line| plain_line(line, true, size))
-                    .unwrap_or_else(|| plain_line("", true, size));
-                let next_line = lines
-                    .next()
-                    .map(|line| plain_line(line, false, size))
-                    .unwrap_or_else(|| plain_line("", false, size));
-                (current, next_line)
+                rows.push(plain_row(
+                    lines.next().unwrap_or_default().to_owned(),
+                    LineRole::Singing,
+                    font,
+                    slot,
+                    0.,
+                    false,
+                ));
+                if let Some(line) = lines.next() {
+                    rows.push(plain_row(
+                        line.to_owned(),
+                        LineRole::Preview,
+                        font,
+                        slot,
+                        slot,
+                        true,
+                    ));
+                }
             }
-            _ => (
-                plain_line(&title, true, size),
-                plain_line(&artist, false, size),
-            ),
-        };
+            _ => {
+                self.pair = None;
+                self.swap = None;
+                rows.push(plain_row(
+                    title.to_string(),
+                    LineRole::Singing,
+                    font,
+                    slot,
+                    0.,
+                    false,
+                ));
+                rows.push(plain_row(
+                    artist.to_string(),
+                    LineRole::Preview,
+                    font,
+                    slot,
+                    slot,
+                    true,
+                ));
+            }
+        }
+
+        let hovering = self.hovering;
+        let hover_changed = self.hover_changed;
+        let plate = SharedString::from(format!(
+            "desktop-lyrics-plate-{}-{}",
+            self.hover_epoch,
+            match (hover_changed, hovering) {
+                (false, _) => "idle",
+                (true, true) => "in",
+                (true, false) => "out",
+            }
+        ));
+        let stage_height = slot * 2.;
 
         div()
             .id("desktop-lyrics")
@@ -589,34 +926,50 @@ impl Render for DesktopLyric {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.header(header_title, size, cx))
+            .rounded(px(RADIUS))
+            .overflow_hidden()
+            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                if this.hovering != *over {
+                    this.hovering = *over;
+                    this.hover_changed = true;
+                    this.hover_epoch = this.hover_epoch.wrapping_add(1);
+                    cx.notify();
+                }
+            }))
+            .with_animation(
+                plate,
+                Animation::new(HOVER_FADE).with_easing(ui::ease_out_cubic),
+                move |this, delta| {
+                    if !hover_changed {
+                        return this;
+                    }
+                    let alpha = match hovering {
+                        true => HOVER_ALPHA * delta,
+                        false => HOVER_ALPHA * (1. - delta),
+                    };
+                    this.bg(black().opacity(alpha))
+                },
+            )
+            .child(self.header(header_title, setting_font, cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .flex()
-                    .flex_col()
+                    .items_center()
                     .justify_center()
-                    .gap(px(4.))
+                    .overflow_hidden()
                     .window_control_area(WindowControlArea::Drag)
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-                    .px(px(32.))
                     .child(
                         div()
+                            .relative()
                             .w_full()
+                            .h(px(stage_height))
                             .overflow_hidden()
-                            .flex()
-                            .justify_start()
-                            .child(current),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .overflow_hidden()
-                            .flex()
-                            .justify_end()
-                            .child(next_line),
+                            .children(rows)
+                            .when_some(placeholder, |this, node| this.child(node)),
                     ),
             )
     }
@@ -656,6 +1009,36 @@ mod tests {
             word_window(Duration::from_millis(100), &words, 1),
             (Duration::from_millis(900), Duration::from_millis(1200))
         );
+    }
+
+    #[test]
+    fn a_line_is_preview_then_singing_then_sung() {
+        let line = LyricsLine {
+            start: Duration::from_millis(1000),
+            end: Some(Duration::from_millis(2000)),
+            text: "hold on".to_owned(),
+            romanized: None,
+            words: Some(vec![
+                word("hold", 1000, 1500),
+                word("on", 1600, 2000),
+            ]),
+            secondary: Vec::new(),
+            voice: Default::default(),
+        };
+        assert_eq!(LineRole::at(&line, Duration::from_millis(500)), LineRole::Preview);
+        assert_eq!(LineRole::at(&line, Duration::from_millis(1200)), LineRole::Singing);
+        assert_eq!(LineRole::at(&line, Duration::from_millis(1800)), LineRole::Singing);
+        assert_eq!(LineRole::at(&line, Duration::from_millis(2200)), LineRole::Sung);
+    }
+
+    #[test]
+    fn the_font_follows_the_window_but_not_under_sixteen() {
+        assert_eq!(design_height(40.), 188.);
+        assert_eq!(design_height(64.), 266.);
+        assert_eq!(effective_font(40., 1000., 188.), 40.);
+        assert!(effective_font(40., 1000., 120.) < 40.);
+        assert_eq!(effective_font(40., 500., 188.), 20.);
+        assert_eq!(effective_font(40., 200., 60.), 16.);
     }
 
     #[test]
