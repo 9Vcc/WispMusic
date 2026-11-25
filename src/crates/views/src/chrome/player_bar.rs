@@ -449,7 +449,9 @@ impl PlayerBar {
                 .items_center()
                 .h(theme.text(ui::Text::Body) * ui::LEADING)
                 .gap_1()
-                .child(div().flex_1().min_w_0().child(title))
+                // Let the title take only what it needs, so the heart sits beside it instead
+                // of at the far edge of a stretched row. It still shrinks for long titles.
+                .child(div().min_w_0().max_w_full().child(title))
                 .child(actions),
         };
         let subtitle = match (centered, track) {
