@@ -8204,6 +8204,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "views"
 version = "0.2.4"
 dependencies = [
+ "anyhow",
  "dirs 7.0.0",
  "gpui",
  "gpui_platform",
@@ -8215,6 +8216,7 @@ dependencies = [
  "music",
  "open",
  "raw-window-handle",
+ "reqwest",
  "router",
  "serde_json",
  "state",

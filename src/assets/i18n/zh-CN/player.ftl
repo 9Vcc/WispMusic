@@ -68,6 +68,8 @@ lyrics-writers = 由 { $writers } 创作
 fullscreen-panels = 全屏面板
 # [wisp] 歌词页工具条
 lyric-choose = 选择歌词
+lyric-stroke-enable = 笔画歌词动效
+lyric-stroke-disable = 恢复默认歌词动效
 lyric-offset-back = 歌词后退 0.5s
 lyric-offset-forward = 歌词前进 0.5s
 lyric-offset-reset = 重置偏移
