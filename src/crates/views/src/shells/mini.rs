@@ -602,7 +602,7 @@ impl MiniPlayer {
                             .flex()
                             .flex_none()
                             .items_center()
-                            .child(self.shuffle_button("mini-shuffle", cx))
+                            .child(play_mode(&self.playback, false, cx))
                             .child(
                                 Button::new("mini-expand")
                                     .ghost()
@@ -638,25 +638,6 @@ impl MiniPlayer {
                     ),
             )
             .when(!self.expanded, |this| this.child(self.bar_progress(cx)))
-    }
-
-    fn shuffle_button(&self, id: &'static str, cx: &mut Context<Self>) -> Button {
-        let theme = *cx.theme();
-        let shuffle = self.playback.read(cx).shown_shuffle(cx);
-        let playback = self.playback.clone();
-        Button::new(id)
-            .ghost()
-            .small()
-            .icon("icons/shuffle.svg")
-            .tooltip_above("player-shuffle")
-            .selected(shuffle)
-            .tint(match shuffle {
-                true => theme.primary,
-                false => theme.muted_foreground,
-            })
-            .on_click(move |_, _, cx| {
-                playback.update(cx, |playback, cx| playback.toggle_shuffle(cx))
-            })
     }
 
     fn bar_progress(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -798,8 +779,6 @@ impl MiniPlayer {
             .gap(px(4.))
             .px(px(ROW_PAD))
             .pt(px(2.))
-            .child(self.shuffle_button("mini-shuffle-foot", cx))
-            .child(play_mode(&self.playback, false, cx))
             .child(div().flex_1())
             .child(
                 Button::new("mini-mute")
