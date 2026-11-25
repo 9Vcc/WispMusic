@@ -615,23 +615,27 @@ impl MiniPlayer {
                                     .flex()
                                     .flex_col()
                                     .gap(px(1.))
-                                    .group_hover("mini-info", |style| style.opacity(0.))
+                                    .when(!self.panel, |this| {
+                                        this.group_hover("mini-info", |style| style.opacity(0.))
+                                    })
                                     .child(title)
                                     .child(artist),
                             )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .invisible()
-                                    .group_hover("mini-info", |style| style.visible())
-                                    .child(previous(&self.playback, false, cx))
-                                    .child(toggle(&self.playback, false, false, cx))
-                                    .child(next(&self.playback, false, cx)),
-                            ),
+                            .when(!self.panel, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .invisible()
+                                        .group_hover("mini-info", |style| style.visible())
+                                        .child(previous(&self.playback, false, cx))
+                                        .child(toggle(&self.playback, false, false, cx))
+                                        .child(next(&self.playback, false, cx)),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -815,6 +819,9 @@ impl MiniPlayer {
             .gap(px(4.))
             .px(px(ROW_PAD))
             .pt(px(2.))
+            .child(previous(&self.playback, false, cx))
+            .child(toggle(&self.playback, false, false, cx))
+            .child(next(&self.playback, false, cx))
             .child(div().flex_1())
             .child(
                 Button::new("mini-mute")

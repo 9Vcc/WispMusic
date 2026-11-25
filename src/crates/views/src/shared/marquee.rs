@@ -1,5 +1,5 @@
-//! A marquee for a single line that is too wide for its column: rest, cruise one copy plus
-//! a gap, then repeat from a seamlessly aligned second copy.
+//! A marquee for a single line that is too wide for its column: cruise one copy plus a gap,
+//! then repeat from a seamlessly aligned second copy.
 //!
 //! The caller keeps one [`MarqueeState`] per line and builds the line with a small factory.
 //! The factory is called for four copies: the visible static one, an invisible measure, and
@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, IntoElement, SharedString, canvas, div, px,
+    Animation, AnimationExt as _, AnyElement, Context, IntoElement, SharedString, canvas, div,
+    point, px,
 };
 
-/// One resting line and one cruising line's spacing.
+/// The space between the two copies of a rolling line.
 const GAP: f32 = 32.;
 const SPEED: f32 = 50.;
-const HOLD: Duration = Duration::from_millis(3000);
 /// Widths closer than this are considered unchanged, so paint-time measuring cannot spin.
 const TOLERANCE: f32 = 0.5;
 
@@ -104,10 +104,7 @@ pub(crate) fn marquee<T: 'static>(
     }
 
     let distance = natural + GAP;
-    let scroll = distance / SPEED;
-    let hold = HOLD.as_secs_f32();
-    let total = hold + scroll;
-    let hold_fraction = hold / total;
+    let total = distance / SPEED;
     let row = div()
         .absolute()
         .left(px(0.))
@@ -118,21 +115,14 @@ pub(crate) fn marquee<T: 'static>(
         .child(div().w(px(GAP)))
         .child(div().flex_none().child(content(3)));
     container
-        .child(
-            row.with_animation(
-                SharedString::from(format!(
-                    "{id}-{key}-{}-{}",
-                    natural.round(),
-                    available.round()
-                )),
-                Animation::new(Duration::from_secs_f32(total))
-                    .with_easing(move |t| match t <= hold_fraction {
-                        true => 0.,
-                        false => ((t - hold_fraction) / (1. - hold_fraction)).clamp(0., 1.),
-                    })
-                    .repeat(),
-                move |this, delta| this.left(px(-distance * delta)),
-            ),
-        )
+        .child(row.with_animation(
+            SharedString::from(format!(
+                "{id}-{key}-{}-{}",
+                natural.round(),
+                available.round()
+            )),
+            Animation::new(Duration::from_secs_f32(total)).repeat(),
+            move |this, delta| this.layer_translate(point(px(-distance * delta), px(0.))),
+        ))
         .into_any_element()
 }
