@@ -5,7 +5,7 @@
 //! answers the resize hit tests the removed frame used to serve. Windows 11 tints its acrylic
 //! and covers the frame itself, so it is left alone.
 
-use gpui::{Pixels, Size, Window, WindowVisibility, px, size};
+use gpui::{Pixels, Size, Window, px, size};
 
 /// Whether this is Windows 10 or older, by build number: 22000 is where Windows 11 starts.
 #[cfg(target_os = "windows")]
@@ -48,7 +48,12 @@ pub fn install(window: &Window, resizable: bool) -> Size<Pixels> {
         };
         let scale = window.scale_factor();
         let content = window.viewport_size();
-        let visible = window.visibility() == WindowVisibility::Visible;
+        let laid_out = content.width.as_f32().is_finite()
+            && content.height.as_f32().is_finite()
+            && content.width.as_f32() > 0.
+            && content.height.as_f32() > 0.
+            && content.width.as_f32() < 100_000.
+            && content.height.as_f32() < 100_000.;
         let inset = unsafe {
             let mut outer = RECT::default();
             let mut client = RECT::default();
@@ -73,9 +78,9 @@ pub fn install(window: &Window, resizable: bool) -> Size<Pixels> {
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
             // A popup that was already laid out keeps its old outer size (and the material
-            // shows in the widened frame) until it is sized again. Visible popups have a
-            // usable content size here; hidden ones get theirs when they are first shown.
-            if !resizable && visible {
+            // shows in the widened frame) until it is sized again. A popup created hidden
+            // has no meaningful content size yet and gets one when it is first shown.
+            if !resizable && laid_out {
                 let width = (content.width.as_f32() * scale).round() as i32;
                 let height = (content.height.as_f32() * scale).round() as i32;
                 if width > 0 && height > 0 {
