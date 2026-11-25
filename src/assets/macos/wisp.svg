@@ -1,17 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 1024 1024">
-  <title>WispMusic</title>
-  <defs>
-    <clipPath id="drop">
-      <path d="M512 144C665 245 809 440 809 575A298 298 0 1 1 215 575C215 440 359 245 512 144Z"/>
-    </clipPath>
-  </defs>
-  <rect width="1024" height="1024" rx="232" fill="#0A1A21"/>
-  <circle cx="512" cy="585" r="386" fill="none" stroke="#14313B" stroke-width="4"/>
-  <circle cx="512" cy="585" r="452" fill="none" stroke="#0F2731" stroke-width="4"/>
-  <path d="M512 144C665 245 809 440 809 575A298 298 0 1 1 215 575C215 440 359 245 512 144Z" fill="#ABDBF0"/>
-  <g clip-path="url(#drop)">
-    <path d="M809 520V900H250Z" fill="#6FB7D6"/>
-  </g>
-  <path d="M336 470L424 600L512 470L600 600L688 470" fill="none" stroke="#0A1A21" stroke-width="76" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="720" cy="414" r="14" fill="#0A1A21"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <path d="M40.9600 0 c8.0648 0 12.0971 0 15.1775 1.5695 a14.4000 14.4000 0 0 1 6.2930 6.2930 c1.5695 3.0803 1.5695 7.1127 1.5695 15.1775 L64.0000 40.9600 c0 8.0648 0 12.0971 -1.5695 15.1775 a14.4000 14.4000 0 0 1 -6.2930 6.2930 c-3.0803 1.5695 -7.1127 1.5695 -15.1775 1.5695 L23.0400 64.0000 c-8.0648 0 -12.0971 0 -15.1775 -1.5695 a14.4000 14.4000 0 0 1 -6.2930 -6.2930 c-1.5695 -3.0803 -1.5695 -7.1127 -1.5695 -15.1775 L0 23.0400 c0 -8.0648 0 -12.0971 1.5695 -15.1775 a14.4000 14.4000 0 0 1 6.2930 -6.2930 c3.0803 -1.5695 7.1127 -1.5695 15.1775 -1.5695 Z" fill="white"/>
+  <path d="M13.3333 27.3333V36.6667" stroke="black" stroke-width="2" stroke-linecap="round"/>
+  <path d="M22.6667 20.3333V43.6667" stroke="black" stroke-width="2" stroke-linecap="round"/>
+  <path d="M32.0 13.3333V50.6667" stroke="black" stroke-width="2" stroke-linecap="round"/>
+  <path d="M41.3333 20.3333V43.6667" stroke="black" stroke-width="2" stroke-linecap="round"/>
+  <path d="M50.6667 27.3333V36.6667" stroke="black" stroke-width="2" stroke-linecap="round"/>
 </svg>
