@@ -683,6 +683,9 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
                         .bottom_0()
                         .w(relative(share))
                         .overflow_hidden()
+                        // The shadow lives on the line below. Inheriting it here would
+                        // let the word's clipping box cut it into a visible rectangle.
+                        .text_shadow([])
                         .text_color(white())
                         .when(landing > 0., |this| {
                             this.fade_sides(px(0.), px(edge * landing))
@@ -690,7 +693,6 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32) -> AnyE
                         .child(
                             div()
                                 .whitespace_nowrap()
-                                .text_shadow([shadow()])
                                 .child(SharedString::from(text)),
                         ),
                 ),
