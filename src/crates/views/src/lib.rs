@@ -5,6 +5,7 @@ mod root;
 mod screens;
 mod shared;
 mod shells;
+mod splash;
 
 pub use chrome::ToastStack;
 pub use chrome::tray_menu::{MENU_HEIGHT, MENU_WIDTH, TrayMenuClosed, TrayMenuView};

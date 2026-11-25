@@ -206,7 +206,7 @@ fn main() -> ExitCode {
         actions::register(lingers, cx);
         memory::watch(cx);
 
-        open_window(cx);
+        open_window(cx, true);
         let session = Wisp::global(cx).session.clone();
         session.update(cx, |session, cx| session.restore(cx));
 
@@ -319,7 +319,7 @@ fn show_window(cx: &mut App) {
     // [wisp] 只对主窗口操作：托盘菜单窗口打开时 windows().first() 会拿到它。
     let Some(main) = cx.try_global::<MainWindow>() else {
         dock::show(true);
-        open_window(cx);
+        open_window(cx, false);
         return;
     };
     let handle = main.0.clone();
@@ -328,7 +328,7 @@ fn show_window(cx: &mut App) {
     let activated = handle.update(cx, |_, window, _| window.activate_window());
     if activated.is_err() {
         cx.remove_global::<MainWindow>();
-        open_window(cx);
+        open_window(cx, false);
     }
     cx.activate(true);
 }
@@ -392,7 +392,7 @@ pub(crate) struct MainWindow(pub AnyWindowHandle);
 
 impl Global for MainWindow {}
 
-fn open_window(cx: &mut App) {
+fn open_window(cx: &mut App, splash: bool) {
     let Wisp {
         session,
         library,
@@ -457,7 +457,7 @@ fn open_window(cx: &mut App) {
             #[cfg(windows)]
             window_title::install(window.window_handle(), cx);
             state::remember_window(window, cx);
-            cx.new(|cx| Root::new(session, library, playback, queue, window, cx))
+            cx.new(|cx| Root::new(session, library, playback, queue, splash, window, cx))
         },
     )
     .expect("failed to open window");

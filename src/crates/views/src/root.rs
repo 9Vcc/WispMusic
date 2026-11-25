@@ -36,6 +36,7 @@ use crate::shared::tracks::{LIBRARY_COLUMNS, album_columns};
 use crate::shared::transport::{CoverAway, CoverFade, ShellSwap};
 use crate::shells::Shell;
 use crate::shells::workspace::{Workspace, WorkspaceHeader};
+use crate::splash::Splash;
 use crate::{
     Adaptive, ArtistView, DetailView, EqualizerView, FullscreenView, GenreView, HistoryView,
     HomeView, LibraryView, LoginView, SettingsView, SongView, UserView,
@@ -163,6 +164,8 @@ pub struct Root {
     dialogs: Dialogs,
     /// The toasts, hung above the player bar or the fullscreen dock, whichever shell is up.
     toasts: Entity<ToastStack>,
+    /// The first-launch canvas sequence, gone once it finishes or is skipped.
+    splash: Option<Entity<Splash>>,
     shells: Shells,
     view: RootView,
     /// [wisp] 每日推荐页上一次展示的数据签名；相同就不重建详情，滚动与选中不被打断。
@@ -215,6 +218,7 @@ impl Root {
         library: Entity<Library>,
         playback: Entity<Playback>,
         queue: Entity<Queue>,
+        splash: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -378,6 +382,7 @@ impl Root {
             .detach();
 
         let adaptive = cx.new(|cx| Adaptive::new(playback.clone(), cx));
+        let splash = (splash && !cx.reduce_motion()).then(|| cx.new(Splash::new));
 
         let mut root = Self {
             session,
@@ -435,6 +440,7 @@ impl Root {
             powerbar,
             dialogs: Dialogs::new(cx),
             toasts: cx.new(ToastStack::new),
+            splash,
             background: None,
             font: None,
             #[cfg(target_os = "windows")]
@@ -1605,12 +1611,22 @@ impl Render for Root {
                     window.refresh();
                 }
             })
-            .capture_key_down(|event, window, cx| {
-                if event.keystroke.key == "escape" && ui::cancel_middle_scroll(cx) {
-                    window.refresh();
-                    cx.stop_propagation();
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    if let Some(splash) = this.splash.as_ref() {
+                        if splash
+                            .update(cx, |splash, cx| splash.skip(cx))
+                        {
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
+                    if ui::cancel_middle_scroll(cx) {
+                        window.refresh();
+                        cx.stop_propagation();
+                    }
                 }
-            })
+            }))
             .on_mouse_move(|event, window, cx| {
                 ui::update_middle_scroll(event.position, window, cx);
             })
@@ -1669,6 +1685,10 @@ impl Render for Root {
         let root = root.child(ui::lingers());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let root = root.child(WindowFrame::new());
+        let root = match &self.splash {
+            Some(splash) => root.child(splash.clone()),
+            None => root,
+        };
         root
     }
 }
