@@ -29,6 +29,8 @@ const ERROR_ICON: Pixels = px(14.);
 /// the pointer.
 const MARK: Pixels = px(22.);
 const MARK_FADE: Duration = Duration::from_millis(160);
+/// How strongly the theme's primary colour takes the outline of the provider in use.
+const ACTIVE_EDGE: f32 = 0.55;
 /// How many buttons tall the sign-in choice stands, however few it lists.
 const CHOICES: f32 = 3.;
 /// What the guest row answers to, where a provider row answers to its slug.
@@ -914,8 +916,9 @@ pub(super) enum Offer {
 }
 
 /// One provider as a soft borderless row: its mark, the name over a muted status, and the
-/// `offer` at the end. Only the provider in use (`active`) sits on a fill and shows its `brand`
-/// colour. The others are muted and warm to their
+/// `offer` at the end. Only the provider in use (`active`) sits on a fill, shows its `brand`
+/// mark, and outlines itself with its status in the theme's primary colour. The others are
+/// muted and warm to their
 /// colour and a lighter fill under the pointer. The sign out button keeps a slot of its own on
 /// every row, shown on hover and always on the active row, so nothing moves as it comes and
 /// goes. A sign-in error wraps under the name on a line of its own. Screen readers hear the
@@ -1024,7 +1027,18 @@ impl RenderOnce for ProviderRow {
             .mx_neg_3()
             .px_3()
             .rounded(theme.radius)
+            .relative()
             .bg(fill)
+            .when(active, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.primary.opacity(ACTIVE_EDGE)),
+                )
+            })
             .on_hover(move |hovered, window, cx| {
                 fade.update(cx, |fade, _| fade.set(*hovered));
                 window.refresh();
@@ -1068,7 +1082,10 @@ impl RenderOnce for ProviderRow {
                                     .truncate()
                                     .line_height(relative(LEADING))
                                     .text_size(theme.text(Text::Small))
-                                    .text_color(theme.muted_foreground)
+                                    .text_color(match active {
+                                        true => theme.primary,
+                                        false => theme.muted_foreground,
+                                    })
                                     .child(status)
                             })),
                     )
