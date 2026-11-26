@@ -35,6 +35,8 @@ const ACTIVE_EDGE: f32 = 0.55;
 const CHOICES: f32 = 3.;
 /// What the guest row answers to, where a provider row answers to its slug.
 const GUEST: &str = "guest";
+/// What the offline row answers to.
+const OFFLINE: &str = "offline";
 
 /// What a row does when it is clicked.
 type Press = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -381,8 +383,8 @@ impl SettingsView {
         })
     }
 
-    /// The words the accounts row answers a search with: every provider name, and the guest
-    /// entry when one is shown.
+    /// The words the accounts row answers a search with: every provider name, the guest
+    /// entry when one is shown, and offline.
     pub(super) fn account_words(&self, cx: &App) -> String {
         let mut names: Vec<String> = self
             .providers(cx)
@@ -392,23 +394,63 @@ impl SettingsView {
         if self.guest(cx).is_some() {
             names.push(t!("login-guest-title").to_string());
         }
+        names.push(t!("login-offline-title").to_string());
         names.join(" ")
     }
 
-    /// One row per provider, then the guest row when a provider offers guest mode, with a
-    /// small gap between them so each row's fill stands on its own.
+    /// The offline row: plays the local music folders without a streaming account, and opens
+    /// the music folders page when none is set up yet.
+    pub(super) fn offline_row(
+        &self,
+        active: bool,
+        pending: bool,
+        place: (usize, usize),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let status = active.then(|| t!("settings-provider-current"));
+        let press: Option<Press> = (!active).then(|| -> Press {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                this.chosen = Some(OFFLINE.into());
+                let empty = this.session.read(cx).local_paths().is_empty();
+                this.session.update(cx, |session, cx| session.use_local(cx));
+                if empty {
+                    navigate(Destination::Settings(SettingsPage::MusicFolders), cx);
+                }
+            }))
+        });
+
+        ProviderRow {
+            id: SharedString::from("account-offline"),
+            logo: crate::shared::blend::LOCAL_MARK,
+            brand: cx.theme().foreground,
+            active,
+            name: t!("login-offline-title"),
+            status,
+            offer: Offer::Choice { leave: None },
+            press: press.filter(|_| !pending),
+            error: None,
+            place,
+        }
+        .into_any_element()
+    }
+
+    /// One row per provider, then the guest row when a provider offers guest mode, then
+    /// offline, with a small gap between them so each row's fill stands on its own.
     pub(super) fn accounts_rows(&self, cx: &mut Context<Self>) -> AnyElement {
         let pending = self.session.read(cx).is_pending();
+        let local_only = self.session.read(cx).local_only();
         let providers = self.providers(cx);
+        let provider_count = providers.len();
         let guest = self.guest(cx);
-        let count = providers.len() + usize::from(guest.is_some());
+        let count = provider_count + usize::from(guest.is_some()) + 1;
         let mut rows = Vec::new();
         for (place, account) in providers.into_iter().enumerate() {
             rows.push(self.account_row(account, pending, (place, count), cx));
         }
         if let Some(guest) = guest {
-            rows.push(self.guest_row(guest, pending, (count - 1, count), cx));
+            rows.push(self.guest_row(guest, pending, (provider_count, count), cx));
         }
+        rows.push(self.offline_row(local_only, pending, (count - 1, count), cx));
 
         div()
             .flex()

@@ -135,6 +135,7 @@ toast-library-scanned = { $count ->
    *[other] 音乐库扫描完成，找到 { $count } 首歌曲
 }
 toast-scan-failed = 无法扫描你的音乐文件夹
+toast-scan-issues = 部分文件或文件夹无法读取
 toast-folder-removed = 已移除 { $name }
 toast-folder-missing = { $name } 已不在磁盘上
 toast-history-removed = { $count ->

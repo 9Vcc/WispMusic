@@ -33,6 +33,8 @@ pub enum Target {
     PlaybackSettings,
     /// The Providers tab of settings, where a provider is signed in again.
     ProviderSettings,
+    /// The Music folders page, where a scan that could not read a folder is repaired.
+    MusicFolders,
 }
 
 /// A button on a toast. Pressing it runs the handler, opens the target or the link if there is

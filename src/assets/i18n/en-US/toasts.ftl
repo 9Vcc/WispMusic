@@ -152,6 +152,7 @@ toast-library-scanned = { $count ->
    *[other] Library scanned, { $count } songs found
 }
 toast-scan-failed = Your music folders could not be scanned
+toast-scan-issues = Some files or folders could not be read
 toast-folder-removed = Removed { $name }
 toast-folder-missing = { $name } is no longer on disk
 toast-history-removed = { $count ->

@@ -77,6 +77,7 @@ impl LocalClient {
         let scanned = self.scanned.read().unwrap();
         ids.iter()
             .filter_map(|id| {
+                let id = scanned.current_id(id);
                 scanned
                     .tracks
                     .iter()
@@ -96,7 +97,7 @@ impl LocalClient {
             .collect();
         ids.iter()
             .enumerate()
-            .filter(|(_, id)| known.contains(id.as_str()))
+            .filter(|(_, id)| known.contains(scanned.current_id(id).as_str()))
             .map(|(index, _)| index)
             .collect()
     }
@@ -214,6 +215,18 @@ fn playlist_from(stored: Stored, tracks: &[Track]) -> Playlist {
 
 #[async_trait]
 impl MusicApi for LocalClient {
+    fn local_tracks(&self) -> Vec<Track> {
+        self.scanned.read().unwrap().tracks.clone()
+    }
+
+    fn local_moves(&self) -> Vec<(String, String)> {
+        self.scanned.read().unwrap().moved.clone()
+    }
+
+    fn local_issues(&self) -> Vec<String> {
+        self.scanned.read().unwrap().issues.clone()
+    }
+
     fn share_url(&self, kind: MediaKind, id: &str) -> Option<String> {
         match kind {
             MediaKind::Track => {
@@ -331,20 +344,23 @@ impl MusicApi for LocalClient {
     }
 
     async fn set_track_saved(&self, track_id: &str, saved: bool) -> Result<()> {
-        self.store.set_starred(Starred::Tracks, track_id, saved)
+        let track_id = self.scanned.read().unwrap().current_id(track_id);
+        self.store.set_starred(Starred::Tracks, &track_id, saved)
     }
 
     async fn track_tags(&self, track_id: &str) -> Result<TrackTags> {
-        let path = wire::path_from_track_id(track_id)
+        let track_id = self.scanned.read().unwrap().current_id(track_id);
+        let path = wire::path_from_track_id(&track_id)
             .ok_or_else(|| anyhow!("{track_id} is not a local track id"))?;
         tags::read(path)
     }
 
     async fn set_track_tags(&self, track_id: &str, updated: TrackTags) -> Result<()> {
-        let path = wire::path_from_track_id(track_id)
+        let track_id = self.scanned.read().unwrap().current_id(track_id);
+        let path = wire::path_from_track_id(&track_id)
             .ok_or_else(|| anyhow!("{track_id} is not a local track id"))?;
         let year_changed = tags::read(path)?.year != updated.year;
-        let album_tracks = year_changed.then(|| self.album_track_paths(track_id));
+        let album_tracks = year_changed.then(|| self.album_track_paths(&track_id));
 
         tags::write(path, &updated)?;
         let mut written = vec![path.to_path_buf()];
@@ -362,10 +378,11 @@ impl MusicApi for LocalClient {
 
     async fn track(&self, track_id: &str) -> Result<Track> {
         let scanned = self.scanned.read().unwrap();
+        let track_id = scanned.current_id(track_id);
         scanned
             .tracks
             .iter()
-            .find(|track| track.id.as_deref() == Some(track_id))
+            .find(|track| track.id.as_deref() == Some(track_id.as_str()))
             .cloned()
             .ok_or_else(|| anyhow!("cannot find local track {track_id}"))
     }
@@ -445,11 +462,13 @@ impl MusicApi for LocalClient {
     }
 
     async fn add_track_to_playlist(&self, playlist_id: &str, track_id: &str) -> Result<()> {
-        self.store.add(playlist_id, track_id)
+        let track_id = self.scanned.read().unwrap().current_id(track_id);
+        self.store.add(playlist_id, &track_id)
     }
 
     async fn remove_track_from_playlist(&self, playlist_id: &str, track_id: &str) -> Result<()> {
-        self.store.remove(playlist_id, track_id)
+        let track_id = self.scanned.read().unwrap().current_id(track_id);
+        self.store.remove(playlist_id, &track_id)
     }
 
     /// Counts the moves in the tracks the library still holds, so a stored track whose file has
@@ -874,6 +893,8 @@ mod tests {
             albums: vec![],
             portraits: HashMap::new(),
             artists: vec![],
+            moved: vec![],
+            issues: vec![],
         };
 
         let client = LocalClient::new(scanned, db.clone(), index);
@@ -926,6 +947,8 @@ mod tests {
             albums: vec![],
             portraits: HashMap::new(),
             artists: vec![],
+            moved: vec![],
+            issues: vec![],
         };
         let client = LocalClient::new(scanned, db.clone(), index);
         let id = client.create_playlist("Mix").await.unwrap();
@@ -1002,6 +1025,8 @@ mod tests {
             albums: vec![],
             portraits: HashMap::new(),
             artists: vec![],
+            moved: vec![],
+            issues: vec![],
         };
         let reopened = LocalClient::new(scanned, db, index);
         assert_eq!(

@@ -745,6 +745,7 @@ impl Playback {
                     this.teardown(cx);
                 }
                 let Some(playback) = playback else {
+                    this.refresh_local_metadata(cx);
                     return;
                 };
                 match this.engine.is_some() {
@@ -752,6 +753,7 @@ impl Playback {
                     false => this.start_engine(playback, cx),
                 }
                 this.adopt(cx);
+                this.refresh_local_metadata(cx);
                 if let Some(id) = this.awaiting_start.take() {
                     let track = this
                         .queue
@@ -784,6 +786,7 @@ impl Playback {
                 {
                     this.start_local_engine(playback, cx);
                 }
+                this.refresh_local_metadata(cx);
             }
         })
         .detach();
@@ -2737,6 +2740,46 @@ impl Playback {
             return;
         }
         self.load_from(&track, at, Start::Pick, cx);
+    }
+
+    /// Applies rescanned tags to the track on show. A file that moved reopens at the position
+    /// it had, without restarting the queue around it.
+    fn refresh_local_metadata(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.track.clone() else {
+            return;
+        };
+        let Some(track) = previous
+            .id
+            .as_deref()
+            .and_then(|id| self.session.read(cx).refreshed_local_track(id))
+            .cloned()
+        else {
+            return;
+        };
+        if previous == track {
+            return;
+        }
+        let moved = previous.id != track.id;
+        let at = self.position;
+        let playing = self.intent == Intent::Play
+            && matches!(self.state, PlaybackState::Playing | PlaybackState::Loading);
+        self.preloaded = None;
+        if moved && track.playable {
+            self.track = Some(track.clone());
+            if playing {
+                self.load_from(&track, at, Start::Pick, cx);
+                return;
+            }
+            if let Some(engine) = self.active_engine() {
+                engine.pause();
+            }
+            self.hold(at, cx);
+            self.remember(true, cx);
+            return;
+        }
+        self.track = Some(track);
+        self.remember(true, cx);
+        cx.notify();
     }
 
     /// Has the engine fetch the restored track and hold it paused at `resume_at`, so the first

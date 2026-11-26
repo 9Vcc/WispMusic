@@ -11,6 +11,7 @@ use gpui::{
 };
 use i18n::t;
 use music::{AccountChoices, SignIn, SignInPrompt};
+use router::{Destination, SettingsPage, navigate};
 use state::{ProviderInfo, Session, SessionState};
 use ui::ActiveTheme as _;
 use ui::{
@@ -585,6 +586,24 @@ impl LoginView {
                     this.start(slug.as_ref(), SignIn::Anonymous, cx);
                 })
             })
+    }
+
+    /// Plays only the music folders, without any streaming account. With no folder chosen yet
+    /// it opens the music folders settings so one can be added.
+    fn offline(&self, pending: bool, cx: &mut Context<Self>) -> Button {
+        Button::new("login-offline")
+            .label(t!("login-offline-use"))
+            .icon(crate::shared::blend::LOCAL_MARK)
+            .outline()
+            .w_full()
+            .disabled(pending)
+            .on_click(cx.listener(|this, _, _, cx| {
+                let empty = this.session.read(cx).local_paths().is_empty();
+                this.session.update(cx, |session, cx| session.use_local(cx));
+                if empty {
+                    navigate(Destination::Settings(SettingsPage::MusicFolders), cx);
+                }
+            }))
     }
 
     fn url_prompt(&self, url: String) -> impl IntoElement {
@@ -1324,10 +1343,11 @@ impl Render for LoginView {
                     .when_some(url, |this, url| this.child(self.url_prompt(url))),
             )
             .child(self.rows(&providers, pending, waiting, cx))
+            .child(div().flex_none().child(self.divider(cx)))
             .when_some(guest, |this, slug| {
-                this.child(div().flex_none().child(self.divider(cx)))
-                    .child(div().flex_none().child(self.guest_mode(&slug, pending, cx)))
-            });
+                this.child(div().flex_none().child(self.guest_mode(&slug, pending, cx)))
+            })
+            .child(div().flex_none().child(self.offline(pending, cx)));
 
         let backdrop = Lattice::new(POOLS.map(|(h, s, l, a)| hsla(h, s, l, a)))
             .stage(Hsla {

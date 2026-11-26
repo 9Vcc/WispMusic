@@ -27,6 +27,9 @@ pub struct LocalProvider {
     cache_dir: PathBuf,
     database: Database,
     index: index::Index,
+    /// Whether the next scan should read every file and folder again, while keeping the index
+    /// it already has so moved files can still be matched.
+    thorough: std::sync::atomic::AtomicBool,
 }
 
 impl LocalProvider {
@@ -35,15 +38,27 @@ impl LocalProvider {
             cache_dir,
             database,
             index: index::Index::new(cache),
+            thorough: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     async fn scan_paths(&self, paths: Vec<PathBuf>) -> Result<ProviderSession> {
         let cache_dir = self.cache_dir.clone();
         let index = self.index.clone();
-        let scanned = tokio::task::spawn_blocking(move || scan::scan(&paths, &cache_dir, &index))
-            .await
-            .context("local scan task panicked")?;
+        let thorough = self
+            .thorough
+            .swap(false, std::sync::atomic::Ordering::Relaxed);
+        let scanned =
+            tokio::task::spawn_blocking(move || scan::scan(&paths, &cache_dir, &index, thorough))
+                .await
+                .context("local scan task panicked")?;
+
+        if !scanned.moved.is_empty() {
+            let store = store::Store::new(self.database.clone());
+            if let Err(error) = store.reconcile(&scanned.moved) {
+                log::warn!("local: cannot move track references: {error:#}");
+            }
+        }
 
         let api: Arc<dyn MusicApi> = Arc::new(client::LocalClient::new(
             scanned,
@@ -97,7 +112,8 @@ impl MusicProvider for LocalProvider {
     }
 
     fn forget_scan(&self) {
-        self.index.distrust();
+        self.thorough
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn playback_factory(&self) -> Option<Arc<dyn PlaybackFactory>> {

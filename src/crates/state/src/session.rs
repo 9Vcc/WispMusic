@@ -9,7 +9,7 @@ use i18n::t;
 use music::link::Linked;
 use music::{
     Capabilities, Catalog, CheckinReport, Library, MusicApi, MusicProvider, PlaybackFactory,
-    PromptSink, ProviderSession, Shape, SignIn, SignInFailure, SignInProblem, SignInPrompt,
+    PromptSink, ProviderSession, Shape, SignIn, SignInFailure, SignInProblem, SignInPrompt, Track,
     UserProfile,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -173,10 +173,16 @@ pub struct Session {
     local_folders: Vec<PathBuf>,
     plugins: music::plugins::Catalog,
     local_client: Option<Arc<dyn MusicApi>>,
+    /// The latest local metadata and exact move aliases, applied to already queued songs.
+    local_tracks: HashMap<String, Track>,
+    local_moves: Vec<(String, String)>,
+    local_issues: Vec<String>,
     local_catalog: Option<Arc<CatalogSource>>,
     local_playback: Option<Arc<dyn PlaybackFactory>>,
     local_capabilities: Capabilities,
     local_task: Option<Task<()>>,
+    /// Protects a newer folder selection from a scan that was already finishing when cancelled.
+    local_revision: u64,
     /// Whether a local scan is under way, so the UI can show its progress.
     scanning: bool,
     /// Whether the scan under way is one the user started, so its end is reported. An automatic
@@ -195,6 +201,8 @@ pub struct Session {
     /// Whether the sign-in overlay is up, including the provider list between a provider's
     /// card and the app.
     login_page: bool,
+    /// Whether this run uses only the local music folders, without a streaming session.
+    local_only: bool,
 }
 
 impl EventEmitter<SessionEvent> for Session {}
@@ -210,22 +218,26 @@ impl Session {
     ) -> Self {
         let remembered = settings.read(cx).provider().to_string();
         let local_folders = settings.read(cx).local_folders().to_vec();
+        let local_only = remembered == local_provider.slug();
         // [wisp] 单 provider 场景（网易云）：设置加载时已把旧 slug 改写成 netease（见
         // `Values::settle_provider`），这里只是兜底——设置文件被手改成不认识的 slug 时，
         // 直接选中唯一的 provider，避免用户停在"没有服务"的空登录页。
-        let active = providers
-            .iter()
-            .position(|provider| provider.slug() == remembered)
-            .or_else(|| providers.iter().position(|provider| provider.stored()))
-            .or_else(|| (providers.len() == 1).then_some(0))
-            .or_else(|| {
-                providers.iter().position(|provider| {
-                    provider
-                        .sign_in_options()
-                        .iter()
-                        .any(|option| matches!(option, SignIn::Anonymous))
-                })
-            });
+        let active = match local_only {
+            true => None,
+            false => providers
+                .iter()
+                .position(|provider| provider.slug() == remembered)
+                .or_else(|| providers.iter().position(|provider| provider.stored()))
+                .or_else(|| (providers.len() == 1).then_some(0))
+                .or_else(|| {
+                    providers.iter().position(|provider| {
+                        provider
+                            .sign_in_options()
+                            .iter()
+                            .any(|option| matches!(option, SignIn::Anonymous))
+                    })
+                }),
+        };
         let local_playback = local_provider.playback_factory();
         let mut session = Self {
             state: SessionState::SignedOut,
@@ -256,10 +268,14 @@ impl Session {
             local_folders,
             plugins,
             local_client: None,
+            local_tracks: HashMap::new(),
+            local_moves: Vec::new(),
+            local_issues: Vec::new(),
             local_catalog: None,
             local_playback,
             local_capabilities: Capabilities::NONE,
             local_task: None,
+            local_revision: 0,
             scanning: false,
             scan_asked: false,
             watch: None,
@@ -271,8 +287,12 @@ impl Session {
             checkin_task: None,
             checkin_busy: false,
             login_page: false,
+            local_only,
         };
         session.restore_local(cx);
+        if local_only {
+            session.state = SessionState::SignedIn(session.local_profile());
+        }
         session
     }
 
@@ -381,6 +401,19 @@ impl Session {
         self.local_client.clone()
     }
 
+    /// Updated metadata for an indexed file, following the exact moves the last scan found.
+    pub(crate) fn refreshed_local_track(&self, id: &str) -> Option<&Track> {
+        let mut current = id;
+        for _ in 0..8 {
+            if let Some(track) = self.local_tracks.get(current) {
+                return Some(track);
+            }
+            let (_, next) = self.local_moves.iter().find(|(old, _)| old == current)?;
+            current = next;
+        }
+        None
+    }
+
     /// The client serving a shelf, if that shelf has a provider right now.
     pub fn client_of(&self, shelf: Shelf) -> Option<Arc<dyn MusicApi>> {
         match shelf {
@@ -463,6 +496,9 @@ impl Session {
     /// Whether a browser window matters right now: the current provider signs in through one,
     /// or no account is stored yet and the sign-in screen offers every provider.
     pub fn wants_browser(&self) -> bool {
+        if self.local_only {
+            return false;
+        }
         match self.active {
             Some(index) => self.providers[index].web_sign_in().is_some(),
             None => {
@@ -473,6 +509,9 @@ impl Session {
     }
 
     pub fn forget(&mut self, slug: &str, cx: &mut Context<Self>) {
+        if self.local_only && slug == self.local_slug() {
+            return self.sign_out(cx);
+        }
         let Some(index) = self
             .providers
             .iter()
@@ -501,6 +540,7 @@ impl Session {
         if self.active == Some(index) && matches!(self.state, SessionState::SignedIn(_)) {
             return;
         }
+        self.local_only = false;
         if let Some(cached) = self
             .sessions
             .get(slug)
@@ -519,6 +559,7 @@ impl Session {
     /// Moves to a provider whose session is still warm. Nothing is released, so switching back
     /// and forth costs neither a wasm start-up nor an account round trip.
     fn switch_cached(&mut self, cached: Cached, index: usize, cx: &mut Context<Self>) {
+        self.local_only = false;
         self.task = None;
         self.watch = None;
         self.reconnect = None;
@@ -672,6 +713,59 @@ impl Session {
         self.login_page
     }
 
+    /// Whether Offline was chosen as the music source. Streaming accounts remain stored.
+    pub fn local_only(&self) -> bool {
+        self.local_only
+    }
+
+    /// The shelf the library shows and searches in this run.
+    pub fn primary_shelf(&self) -> Shelf {
+        match self.local_only {
+            true => Shelf::Local,
+            false => Shelf::Streaming,
+        }
+    }
+
+    /// The client for browsing and searching, without exposing a concrete provider.
+    pub fn browsing_client(&self) -> Option<Arc<dyn MusicApi>> {
+        self.client_of(self.primary_shelf())
+    }
+
+    /// The scope that owns the saved play queue, including an offline run.
+    pub(crate) fn playback_slug(&self) -> Option<&'static str> {
+        match self.local_only {
+            true => Some(self.local_slug()),
+            false => self.provider_slug(),
+        }
+    }
+
+    /// Starts an offline run that plays only the local music folders. Stored streaming
+    /// accounts are kept for a later switch back.
+    pub fn use_local(&mut self, cx: &mut Context<Self>) {
+        self.release(cx);
+        self.active = None;
+        self.local_only = true;
+        self.login_page = false;
+        let slug = self.local_slug();
+        self.settings
+            .update(cx, |settings, cx| settings.set_provider(slug, cx));
+        if self.local_client.is_none() {
+            self.restore_local(cx);
+        }
+        self.state = SessionState::SignedIn(self.local_profile());
+        cx.notify();
+        cx.emit(SessionEvent::SignedIn);
+    }
+
+    /// The profile an offline run is signed in as.
+    fn local_profile(&self) -> UserProfile {
+        UserProfile {
+            id: self.local_slug().to_owned(),
+            display_name: t!("login-offline-title").to_string(),
+            avatar: None,
+        }
+    }
+
     /// The sign-in method the open page started with, which its method tabs read.
     pub fn login_method(&self) -> Option<&SignIn> {
         self.login_method.as_ref()
@@ -680,6 +774,9 @@ impl Session {
     /// The host to try when checking whether the network is back. It is the active provider's
     /// own, so the check never touches a service the app is not already using.
     pub fn reach(&self) -> Option<String> {
+        if self.local_only {
+            return None;
+        }
         self.providers.get(self.active?)?.reach()
     }
 
@@ -859,6 +956,13 @@ impl Session {
         if self.is_pending() {
             return;
         }
+        if self.local_only {
+            self.state = SessionState::SignedIn(self.local_profile());
+            self.login_page = false;
+            cx.notify();
+            cx.emit(SessionEvent::SignedIn);
+            return;
+        }
         self.passed.clear();
         let Some(active) = self.active else {
             self.state = SessionState::SignedOut;
@@ -1015,6 +1119,7 @@ impl Session {
         else {
             return;
         };
+        self.local_only = false;
         self.resume = match &self.state {
             SessionState::SignedIn(profile) => self.active.map(|active| (active, profile.clone())),
             _ => None,
@@ -1222,6 +1327,13 @@ impl Session {
     }
 
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        if self.local_only {
+            self.settings
+                .update(cx, |settings, cx| settings.set_provider("", cx));
+            self.local_only = false;
+            self.release(cx);
+            return;
+        }
         if let Some(active) = self.active {
             let slug = self.providers[active].slug();
             self.providers[active].sign_out();
@@ -1244,6 +1356,9 @@ impl Session {
     /// Tries the stored account again once the network is back, for a run that started without
     /// one. Anything but a run held up by the network is left alone.
     pub fn restore_if_offline(&mut self, cx: &mut Context<Self>) {
+        if self.local_only {
+            return;
+        }
         if matches!(self.state, SessionState::Offline(_)) {
             self.restore(cx);
         }
@@ -1282,6 +1397,7 @@ impl Session {
     }
 
     fn signed_in(&mut self, session: ProviderSession, index: usize, cx: &mut Context<Self>) {
+        self.local_only = false;
         let replaced = self
             .resume
             .take()
@@ -1630,6 +1746,8 @@ impl Session {
     /// failure is reported in a toast.
     fn set_local_folders(&mut self, folders: Vec<PathBuf>, asked: bool, cx: &mut Context<Self>) {
         music::progress::cancel();
+        self.local_revision = self.local_revision.wrapping_add(1);
+        let revision = self.local_revision;
         self.scan_asked |= asked;
         if folders.is_empty() {
             self.scanning = false;
@@ -1640,6 +1758,9 @@ impl Session {
                 settings.set_local_folders(Vec::new(), cx)
             });
             self.local_client = None;
+            self.local_tracks.clear();
+            self.local_moves.clear();
+            self.local_issues.clear();
             self.local_catalog = None;
             self.local_capabilities = Capabilities::NONE;
             self.local_task = None;
@@ -1672,6 +1793,9 @@ impl Session {
             .await;
 
             this.update(cx, |this, cx| {
+                if this.local_revision != revision {
+                    return;
+                }
                 this.scanning = false;
                 let asked = std::mem::take(&mut this.scan_asked);
                 match signed_in {
@@ -1680,7 +1804,7 @@ impl Session {
                         this.settings
                             .update(cx, |settings, cx| settings.set_local_folders(chosen, cx));
                         this.local_signed_in(session, cx);
-                        if asked {
+                        if asked && this.local_issues.is_empty() {
                             Scan::global(cx).update(cx, |scan, cx| scan.finished(songs, cx));
                         }
                     }
@@ -1709,6 +1833,23 @@ impl Session {
     }
 
     fn local_signed_in(&mut self, session: ProviderSession, cx: &mut Context<Self>) {
+        self.local_tracks = session
+            .api
+            .local_tracks()
+            .into_iter()
+            .filter_map(|track| Some((track.id.clone()?, track)))
+            .collect();
+        self.local_moves = session.api.local_moves();
+        self.local_issues = session.api.local_issues();
+        if !self.local_issues.is_empty() {
+            Toasts::post(
+                Toast::new(Outcome::Warning, "toast-scan-issues")
+                    .count(self.local_issues.len())
+                    .detail(self.local_issues.join("\n"))
+                    .open("settings-page-music-folders", Target::MusicFolders),
+                cx,
+            );
+        }
         self.local_catalog = Some(Arc::new(CatalogSource::new(session.api.clone())));
         self.local_client = Some(session.api);
         if self.local_playback.is_none() {

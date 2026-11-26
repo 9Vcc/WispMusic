@@ -697,5 +697,6 @@ fn destination(target: Target) -> Destination {
         Target::Playlist(id) => Destination::Playlist(id),
         Target::PlaybackSettings => Destination::Settings(SettingsPage::Playback),
         Target::ProviderSettings => Destination::Settings(SettingsPage::Providers),
+        Target::MusicFolders => Destination::Settings(SettingsPage::MusicFolders),
     }
 }

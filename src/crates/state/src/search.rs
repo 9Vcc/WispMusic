@@ -329,7 +329,7 @@ impl Search {
 
         self.rank(cx);
 
-        let Some(client) = self.session.read(cx).client() else {
+        let Some(client) = self.session.read(cx).browsing_client() else {
             self.loading = false;
             cx.notify();
             return;
@@ -454,7 +454,7 @@ impl Search {
             return;
         }
 
-        let Some(client) = self.session.read(cx).client() else {
+        let Some(client) = self.session.read(cx).browsing_client() else {
             return;
         };
 

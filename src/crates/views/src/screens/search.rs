@@ -308,7 +308,7 @@ impl SearchView {
             self.keywords.clear();
             return;
         }
-        let Some(client) = Wisp::global(cx).session.read(cx).client() else {
+        let Some(client) = Wisp::global(cx).session.read(cx).browsing_client() else {
             log::debug!("search: keywords skipped, no client connected");
             return;
         };

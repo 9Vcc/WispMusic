@@ -115,6 +115,18 @@ pub trait MusicApi: Send + Sync {
         true
     }
 
+    /// The tracks and exact file moves from the last local scan; empty for a streaming source.
+    fn local_tracks(&self) -> Vec<Track> {
+        Vec::new()
+    }
+    fn local_moves(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// Folders and files the last local scan could not read; empty for a streaming source.
+    fn local_issues(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// A cover url this provider handed out, at `size`. It is worked out from the url alone,
     /// so `None` means the provider cannot tell and the caller loads the album instead.
     fn cover_at(&self, _cover: &str, _size: CoverSize) -> Option<String> {

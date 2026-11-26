@@ -72,7 +72,8 @@ impl Queue {
         cx.subscribe(&session, |this, _, event, cx| match event {
             SessionEvent::SignedOut => this.switch_provider(None, cx),
             SessionEvent::SignedIn => this.sync_provider(cx),
-            SessionEvent::Reconnected | SessionEvent::WentOffline | SessionEvent::LocalChanged => {}
+            SessionEvent::LocalChanged => this.refresh_local(cx),
+            SessionEvent::Reconnected | SessionEvent::WentOffline => {}
         })
         .detach();
 
@@ -91,13 +92,25 @@ impl Queue {
     fn edit<T>(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Order<Origin>) -> T) -> T {
         let before = self.order.revision();
         let answer = edit(&mut self.order);
-        let provider = self.session.read(cx).provider_slug().map(str::to_owned);
+        let provider = self.session.read(cx).playback_slug().map(str::to_owned);
         self.order.ensure_provider(provider);
         if self.order.revision() != before {
             self.remember(cx);
             cx.notify();
         }
         answer
+    }
+
+    /// Swaps in the rescanned tags of every local song in the queue, keeping its place.
+    fn refresh_local(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        let session = session.read(cx);
+        let before = self.order.revision();
+        self.order.refresh(|id| session.refreshed_local_track(id));
+        if self.order.revision() != before {
+            self.remember(cx);
+            cx.notify();
+        }
     }
 
     fn remember(&mut self, cx: &mut Context<Self>) {
@@ -123,7 +136,7 @@ impl Queue {
     }
 
     pub(crate) fn sync_provider(&mut self, cx: &mut Context<Self>) {
-        let next = self.session.read(cx).provider_slug().map(str::to_owned);
+        let next = self.session.read(cx).playback_slug().map(str::to_owned);
         self.switch_provider(next, cx);
     }
 

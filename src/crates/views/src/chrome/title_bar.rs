@@ -292,6 +292,7 @@ impl TitleBar {
         let session = Wisp::global(cx).session.clone();
         let infos: Vec<_> = session.read(cx).providers().collect();
         let guest = infos.iter().any(|info| info.active && info.guest);
+        let local_only = session.read(cx).local_only();
         let single = infos.len() == 1;
         let mut services: Vec<MenuItem> = infos
             .into_iter()
@@ -339,6 +340,24 @@ impl TitleBar {
                     .selected(true),
             );
         }
+        let offline_session = session.clone();
+        services.push(
+            MenuItem::new("account-offline", t!("login-offline-title"))
+                .icon(crate::shared::blend::LOCAL_MARK)
+                .selected(local_only)
+                .on_click(move |_, _, cx| {
+                    if offline_session.read(cx).local_only() {
+                        return;
+                    }
+                    let empty = offline_session.read(cx).local_paths().is_empty();
+                    offline_session.update(cx, |session, cx| session.use_local(cx));
+                    if empty {
+                        navigate(Destination::Settings(SettingsPage::MusicFolders), cx);
+                    } else {
+                        navigate(Destination::Home, cx);
+                    }
+                }),
+        );
         let mut checkin_items = Vec::new();
         if session.read(cx).authenticated() && session.read(cx).capabilities().checkin {
             let auto = Wisp::global(cx).settings.read(cx).auto_checkin();

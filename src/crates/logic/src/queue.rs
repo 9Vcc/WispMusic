@@ -692,6 +692,31 @@ impl<O: Clone + PartialEq> Order<O> {
         self.current.as_ref().map(|entry| entry.track.as_ref())
     }
 
+    /// Swaps in a newer copy of each track `fresh` knows, keeping every entry's place, kind and
+    /// origin. Returns whether anything changed.
+    pub fn refresh<'a>(&mut self, fresh: impl Fn(&str) -> Option<&'a Track>) -> bool {
+        let mut changed = false;
+        for entry in self
+            .past
+            .iter_mut()
+            .chain(self.current.iter_mut())
+            .chain(self.upcoming.iter_mut())
+            .chain(self.source.iter_mut())
+        {
+            let Some(track) = entry.track.id.as_deref().and_then(&fresh) else {
+                continue;
+            };
+            if entry.track.as_ref() != track {
+                entry.track = std::sync::Arc::new(track.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        changed
+    }
+
     /// Ends a queue that has run out. Its last song moves to the queue history.
     pub fn finish(&mut self) {
         let Some(last) = self.current.take() else {
@@ -1654,6 +1679,24 @@ mod tests {
             order.rewind().map(|track| track.name.clone()),
             Some("a".to_owned())
         );
+    }
+
+    #[test]
+    fn refreshing_swaps_a_track_where_it_stands() {
+        let mut order = super::Order::new(false);
+        order.start(vec![track("a"), track("b")], 0, None::<()>);
+        assert_eq!(
+            order.next().map(|(track, _)| track.name.clone()),
+            Some("b".to_owned())
+        );
+
+        let mut newer = track("b");
+        newer.name = "B renamed".to_owned();
+        let changed = order.refresh(|id| (id == "b").then_some(&newer));
+
+        assert!(changed);
+        assert_eq!(order.current().map(|track| track.name.as_str()), Some("B renamed"));
+        assert!(order.has_previous());
     }
 
     #[test]

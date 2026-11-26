@@ -112,6 +112,55 @@ impl Store {
         Ok(())
     }
 
+    /// Moves every reference that names a track id to the id its file has after a move, so
+    /// favorites, playlists and history follow the file instead of pointing at a path that is
+    /// gone. A reference already held under the new id wins, since it was made after the move.
+    pub fn reconcile(&self, moved: &[(String, String)]) -> Result<()> {
+        if moved.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction()
+            .context("cannot open a local move transaction")?;
+        for (old, new) in moved {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO favorites (track_id, added_at)
+                     SELECT ?1, added_at FROM favorites WHERE track_id = ?2",
+                    params![new, old],
+                )
+                .context("cannot move a local favorite")?;
+            transaction
+                .execute("DELETE FROM favorites WHERE track_id = ?1", params![old])
+                .context("cannot drop the old local favorite")?;
+            transaction
+                .execute(
+                    "UPDATE OR IGNORE playlist_tracks SET track_id = ?1 WHERE track_id = ?2",
+                    params![new, old],
+                )
+                .context("cannot move a playlist entry")?;
+            transaction
+                .execute(
+                    "DELETE FROM playlist_tracks WHERE track_id = ?1",
+                    params![old],
+                )
+                .context("cannot drop the old playlist entry")?;
+            transaction
+                .execute(
+                    "UPDATE OR IGNORE plays SET track_id = ?1 WHERE track_id = ?2",
+                    params![new, old],
+                )
+                .context("cannot move a play")?;
+            transaction
+                .execute("DELETE FROM plays WHERE track_id = ?1", params![old])
+                .context("cannot drop the old play")?;
+        }
+        transaction
+            .commit()
+            .context("cannot commit local move references")
+    }
+
     pub fn list(&self) -> Result<Vec<Stored>> {
         let connection = self.open()?;
         let mut query = connection

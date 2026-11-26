@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use crate::progress;
@@ -24,6 +25,33 @@ pub struct Scanned {
     pub albums: Vec<Album>,
     pub artists: Vec<SavedArtist>,
     pub portraits: HashMap<String, String>,
+    /// Old track id to new track id for files that moved within the scanned folders, when their
+    /// size and tags identify exactly one departure and one arrival.
+    pub moved: Vec<(String, String)>,
+    /// Folders and files the scan could not read, for a warning after it ends.
+    pub issues: Vec<String>,
+}
+
+impl Scanned {
+    /// The id a track has now, following the moves this scan found. A queue that still names
+    /// the file's old path reads through this to the track on disk.
+    pub fn current_id(&self, id: &str) -> String {
+        let mut current = id.to_owned();
+        for _ in 0..8 {
+            if self
+                .tracks
+                .iter()
+                .any(|track| track.id.as_deref() == Some(current.as_str()))
+            {
+                break;
+            }
+            let Some((_, new)) = self.moved.iter().find(|(old, _)| old == &current) else {
+                break;
+            };
+            current = new.clone();
+        }
+        current
+    }
 }
 
 /// One file the walk turned up. A file in a folder whose time has not moved is taken on trust:
@@ -75,7 +103,7 @@ pub(super) struct Look {
 /// it are never opened. A folder's time moves when an entry is added, removed or renamed, so an
 /// edit in place hides from it: Wisp's own tag editor drops the file it wrote from the index,
 /// and the Rescan button drops every folder, which is what makes it thorough.
-pub fn scan(roots: &[PathBuf], cache_dir: &Path, index: &Index) -> Scanned {
+pub fn scan(roots: &[PathBuf], cache_dir: &Path, index: &Index, thorough: bool) -> Scanned {
     let started = std::time::Instant::now();
     let progress = progress::start();
     let mut scanned = Scanned::default();
@@ -84,10 +112,19 @@ pub fn scan(roots: &[PathBuf], cache_dir: &Path, index: &Index) -> Scanned {
     let mut files = Vec::new();
     let mut folders = Vec::new();
     let mut reached = Vec::new();
+    let mut issues = Vec::new();
     for root in roots {
         if root.is_dir() {
             reached.push(root.clone());
-            walk(root, &remembered, &mut files, &mut folders, &progress);
+            walk(
+                root,
+                &remembered,
+                &mut files,
+                &mut folders,
+                &progress,
+                thorough,
+                &mut issues,
+            );
         }
     }
     let found = files.len();
@@ -99,11 +136,27 @@ pub fn scan(roots: &[PathBuf], cache_dir: &Path, index: &Index) -> Scanned {
         return scanned;
     }
 
-    let readings = read_tags(&files, &remembered, roots, cache_dir, &progress);
+    let read_issues = Mutex::new(Vec::new());
+    let readings = read_tags(
+        &files,
+        &remembered,
+        roots,
+        cache_dir,
+        &progress,
+        &read_issues,
+    );
     let read = started.elapsed();
     if !progress.live() {
         return scanned;
     }
+    scanned.issues = issues;
+    scanned.issues.extend(
+        read_issues
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner())
+            .into_iter()
+            .map(|(_, issue)| issue),
+    );
 
     let looks = look_at_folders(&folders, &remembered, &readings, &progress);
     if !progress.live() {
@@ -115,6 +168,7 @@ pub fn scan(roots: &[PathBuf], cache_dir: &Path, index: &Index) -> Scanned {
     hang_folder_art(&mut readings, &looks, cache_dir);
     let opened = readings.iter().filter(|reading| reading.fresh).count();
     scanned.portraits = name_portraits(&looks, &readings);
+    scanned.moved = moved_files(&remembered, &readings, &reached);
     let parsed: Vec<Tagged> = readings.into_iter().map(|reading| reading.tagged).collect();
     scanned.albums = group_albums(&parsed, &looks);
     scanned.artists = group_artists(&parsed, &scanned.portraits, &scanned.albums);
@@ -136,6 +190,75 @@ pub fn scan(roots: &[PathBuf], cache_dir: &Path, index: &Index) -> Scanned {
     scanned
 }
 
+/// Finds files that moved within the folders still being scanned: a path the index knew is
+/// gone, a path it did not is new, and their size and tags identify exactly one of each. A
+/// copied file leaves both ends present, and two identical files leave the match ambiguous, so
+/// neither counts as a move.
+fn moved_files(
+    remembered: &Remembered,
+    readings: &[Reading],
+    reached: &[PathBuf],
+) -> Vec<(String, String)> {
+    let present: HashSet<&Path> = readings.iter().map(|reading| reading.path.as_path()).collect();
+    let mut gone: HashMap<String, Vec<String>> = HashMap::new();
+    for (path, known) in &remembered.files {
+        if present.contains(path.as_path())
+            || !reached.iter().any(|root| path.starts_with(root))
+            || !known.tagged.track.playable
+        {
+            continue;
+        }
+        let Some(id) = known.tagged.track.id.clone() else {
+            continue;
+        };
+        gone
+            .entry(move_key(&known.tagged.track, known.size))
+            .or_default()
+            .push(id);
+    }
+    if gone.is_empty() {
+        return Vec::new();
+    }
+
+    let mut arrived: HashMap<String, Vec<String>> = HashMap::new();
+    for reading in readings {
+        if remembered.files.contains_key(&reading.path) {
+            continue;
+        }
+        let Some(id) = reading.tagged.track.id.clone() else {
+            continue;
+        };
+        arrived
+            .entry(move_key(&reading.tagged.track, reading.size))
+            .or_default()
+            .push(id);
+    }
+
+    let mut moved: Vec<(String, String)> = gone
+        .into_iter()
+        .filter_map(|(key, olds)| {
+            let arrivals = arrived.remove(&key)?;
+            (olds.len() == 1 && arrivals.len() == 1)
+                .then(|| (olds[0].clone(), arrivals[0].clone()))
+        })
+        .collect();
+    moved.sort();
+    moved
+}
+
+/// What a file's size and tags say about which file it is, for matching a departure with an
+/// arrival. Two files that agree on all of it are indistinguishable, which is why a match is
+/// only taken when one of each is left.
+fn move_key(track: &Track, size: u64) -> String {
+    format!(
+        "{size}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        track.name,
+        track.artists,
+        track.album,
+        track.duration.as_millis()
+    )
+}
+
 /// Reads the tags of every file the index does not already hold. Each one is a file open and a
 /// tag parse, as much waiting on the disk as parsing, which is why it is spread over threads.
 fn read_tags(
@@ -144,9 +267,10 @@ fn read_tags(
     roots: &[PathBuf],
     cache_dir: &Path,
     progress: &progress::Scan,
+    issues: &Mutex<Vec<(PathBuf, String)>>,
 ) -> Vec<Reading> {
     spread(files, progress, |found| {
-        let reading = match found.known {
+        let mut reading = match found.known {
             true => remembered.files.get(&found.path).map(|known| Reading {
                 path: found.path.clone(),
                 mtime: found.mtime,
@@ -162,6 +286,26 @@ fn read_tags(
                 fresh: true,
             }),
         };
+        if reading.is_none() {
+            issues
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push((
+                    found.path.clone(),
+                    format!("cannot read audio file {}", found.path.display()),
+                ));
+            reading = remembered.files.get(&found.path).map(|known| {
+                let mut tagged = known.tagged.clone();
+                tagged.track.playable = false;
+                Reading {
+                    path: found.path.clone(),
+                    mtime: known.mtime,
+                    size: known.size,
+                    tagged,
+                    fresh: false,
+                }
+            });
+        }
         progress.read();
         reading
     })
@@ -483,11 +627,14 @@ fn walk(
     files: &mut Vec<Found>,
     folders: &mut Vec<Folder>,
     progress: &progress::Scan,
+    thorough: bool,
+    issues: &mut Vec<String>,
 ) {
     let Some((mtime, _)) = stat(dir) else {
+        issues.push(format!("cannot read folder {}", dir.display()));
         return;
     };
-    let known = remembered.unchanged(dir, mtime);
+    let known = !thorough && remembered.unchanged(dir, mtime);
     let at = folders.len();
     folders.push(Folder {
         path: dir.to_path_buf(),
@@ -530,11 +677,12 @@ fn walk(
                 if !progress.live() {
                     return;
                 }
-                walk(child, remembered, files, folders, progress);
+                walk(child, remembered, files, folders, progress, thorough, issues);
             }
         }
         false => {
             let Ok(read) = std::fs::read_dir(dir) else {
+                issues.push(format!("cannot read folder {}", dir.display()));
                 return;
             };
             let mut here: Vec<(PathBuf, bool)> = read
@@ -556,7 +704,7 @@ fn walk(
                     return;
                 }
                 if folder {
-                    walk(&path, remembered, files, folders, progress);
+                    walk(&path, remembered, files, folders, progress, thorough, issues);
                 } else if is_audio_file(&path) {
                     let Some((mtime, size)) = stat(&path) else {
                         continue;
@@ -588,8 +736,8 @@ fn is_folder(entry: &std::fs::DirEntry, path: &Path) -> bool {
     }
 }
 
-/// When a path was last written, as whole seconds since the epoch, and how big it is. Seconds
-/// are enough: a file written twice inside one second is rare, and its size moves with it.
+/// When a path was last written, as whole nanoseconds since the epoch, and how big it is.
+/// Nanoseconds keep a file written twice inside one second apart.
 fn stat(path: &Path) -> Option<(i64, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
     let mtime = metadata
@@ -597,7 +745,8 @@ fn stat(path: &Path) -> Option<(i64, u64)> {
         .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()?
-        .as_secs() as i64;
+        .as_nanos()
+        .min(i64::MAX as u128) as i64;
     Some((mtime, metadata.len()))
 }
 
@@ -709,6 +858,24 @@ mod tests {
         fs::write(path, []).unwrap();
     }
 
+    #[test]
+    fn a_moved_id_follows_the_alias_chain_to_the_file_on_disk() {
+        let mut scanned = Scanned::default();
+        scanned.moved = vec![
+            ("local:a".to_owned(), "local:b".to_owned()),
+            ("local:b".to_owned(), "local:c".to_owned()),
+        ];
+        scanned.tracks.push(Track {
+            id: Some("local:c".to_owned()),
+            playable: true,
+            ..Default::default()
+        });
+
+        assert_eq!(scanned.current_id("local:a"), "local:c");
+        assert_eq!(scanned.current_id("local:c"), "local:c");
+        assert_eq!(scanned.current_id("local:elsewhere"), "local:elsewhere");
+    }
+
     /// An empty folder and an index of its own, so one test never sees another's rows.
     fn scratch(name: &str) -> (PathBuf, Index) {
         let dir = std::env::temp_dir().join(name);
@@ -745,7 +912,7 @@ mod tests {
         super::super::tags::tests::flac(&track, &["TITLE=Track"]);
 
         let roots = std::slice::from_ref(&dir);
-        let first = scan(roots, &dir, &index);
+        let first = scan(roots, &dir, &index, false);
         assert_eq!(first.tracks.len(), 1);
         assert!(index.load().files.contains_key(&track));
         assert!(!index.load().files.contains_key(&sidecar));
@@ -764,7 +931,7 @@ mod tests {
         assert!(remembered.files.contains_key(&sidecar));
         assert!(remembered.unchanged(&dir, stat(&dir).unwrap().0));
 
-        let cached = scan(roots, &dir, &index);
+        let cached = scan(roots, &dir, &index, false);
         assert_eq!(cached.tracks.len(), 1);
         assert_eq!(cached.tracks[0].id, first.tracks[0].id);
         let remembered = index.load();
@@ -772,7 +939,7 @@ mod tests {
         assert!(!remembered.files.contains_key(&sidecar));
 
         index.distrust();
-        let rescanned = scan(roots, &dir, &index);
+        let rescanned = scan(roots, &dir, &index, false);
         assert_eq!(rescanned.tracks.len(), 1);
         assert_eq!(rescanned.tracks[0].id, first.tracks[0].id);
         assert!(sidecar.exists());
@@ -784,7 +951,7 @@ mod tests {
         let _scanning = alone();
         let (dir, index) = scratch("wisp-scan-test-ignore");
         touch(&dir.join("notes.txt"));
-        let scanned = scan(std::slice::from_ref(&dir), &dir, &index);
+        let scanned = scan(std::slice::from_ref(&dir), &dir, &index, false);
         assert!(scanned.tracks.is_empty());
         fs::remove_dir_all(&dir).ok();
     }
@@ -793,7 +960,7 @@ mod tests {
     fn empty_root_yields_nothing() {
         let _scanning = alone();
         let (dir, index) = scratch("wisp-scan-test-missing");
-        let scanned = scan(std::slice::from_ref(&dir), &dir, &index);
+        let scanned = scan(std::slice::from_ref(&dir), &dir, &index, false);
         assert!(scanned.tracks.is_empty());
         assert!(scanned.albums.is_empty());
     }
@@ -820,13 +987,17 @@ mod tests {
 
         let mut found = Vec::new();
         let mut folders = Vec::new();
+        let mut issues = Vec::new();
         walk(
             &dir,
             &Remembered::default(),
             &mut found,
             &mut folders,
             &crate::progress::start(),
+            false,
+            &mut issues,
         );
+        assert!(issues.is_empty());
 
         let paths: Vec<PathBuf> = found.into_iter().map(|file| file.path).collect();
         assert_eq!(
@@ -892,7 +1063,7 @@ mod tests {
             fs::write(album.join("cover.jpg"), [0xFF, 0xD8, 9, 9, 9]).unwrap();
         }
 
-        let scanned = scan(std::slice::from_ref(&dir), &cache, &index);
+        let scanned = scan(std::slice::from_ref(&dir), &cache, &index, false);
         (scanned, album, cache)
     }
 
@@ -963,7 +1134,7 @@ mod tests {
             super::super::tags::tests::flac(&album.join(format!("0{number}.flac")), &comments);
         }
 
-        let first = scan(std::slice::from_ref(&dir), &dir, &index);
+        let first = scan(std::slice::from_ref(&dir), &dir, &index, false);
         assert_eq!(first.albums.len(), 1);
         assert_eq!(first.albums[0].release_type, ReleaseType::Ep);
 
@@ -972,7 +1143,7 @@ mod tests {
             .unwrap()
             .execute("UPDATE local_files SET track = '[null, null, null]'", [])
             .unwrap();
-        let second = scan(std::slice::from_ref(&dir), &dir, &index);
+        let second = scan(std::slice::from_ref(&dir), &dir, &index, false);
 
         assert_eq!(second.tracks.len(), 5);
         assert_eq!(second.albums[0].release_type, ReleaseType::Ep);
