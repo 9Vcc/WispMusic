@@ -441,6 +441,8 @@ struct Values {
     desktop_lyrics_stroke: bool,
     /// 桌面歌词颜色是否跟随封面。
     desktop_lyrics_cover_color: bool,
+    /// 桌面歌词是否锁定：锁定后鼠标穿透，拖动和缩放都停下来，悬停时才浮出解锁键。
+    desktop_lyrics_locked: bool,
     /// 歌词页逐字填充是否跟随封面。
     lyrics_cover_color: bool,
     parallax_lyrics: bool,
@@ -716,6 +718,7 @@ impl Default for Values {
             desktop_lyrics_vertical: false,
             desktop_lyrics_stroke: false,
             desktop_lyrics_cover_color: false,
+            desktop_lyrics_locked: false,
             lyrics_cover_color: false,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
@@ -1379,6 +1382,10 @@ impl AppSettings {
         self.values.desktop_lyrics_cover_color
     }
 
+    pub fn desktop_lyrics_locked(&self) -> bool {
+        self.values.desktop_lyrics_locked
+    }
+
     pub fn lyrics_cover_color(&self) -> bool {
         self.values.lyrics_cover_color
     }
@@ -2031,6 +2038,14 @@ impl AppSettings {
             return;
         }
         self.values.desktop_lyrics_cover_color = on;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        if self.values.desktop_lyrics_locked == locked {
+            return;
+        }
+        self.values.desktop_lyrics_locked = locked;
         self.schedule_save(cx);
     }
 

@@ -37,6 +37,9 @@ const STROKE_CACHE_LIMIT: usize = 800;
 /// How much a stroke outline widens, in the glyph box's 1024 units: each filled stroke gets an
 /// outline as thick as this under it, which reads as a bolder brush at any size.
 const STROKE_BOLD: f32 = 24.;
+/// How far the dark rim reaches past the coloured stroke, in the same units. Only the desktop
+/// strip asks for it, so the strokes read over a bright wallpaper the way its text does.
+const STROKE_RIM: f32 = 28.;
 
 const FLY_STAGGER_SPACE_MS: f64 = 300.;
 const FLY_PATH_NATURAL_MS: f64 = 940.;
@@ -255,7 +258,9 @@ impl Hanzi {
 
 struct HanziStroke {
     key: SharedString,
+    rim_key: SharedString,
     svg: Arc<str>,
+    rim: Arc<str>,
 }
 
 static HANZI_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -298,13 +303,19 @@ pub(crate) async fn fetch_hanzi(ch: char) -> Result<Option<Arc<Hanzi>>> {
             if path.is_empty() {
                 continue;
             }
+            let path = path.replace('"', "&quot;").replace('&', "&amp;");
             let svg = format!(
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(0,900) scale(1,-1)"><path d="{}" fill="black" stroke="black" stroke-width="{STROKE_BOLD}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>"#,
-                path.replace('"', "&quot;").replace('&', "&amp;")
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(0,900) scale(1,-1)"><path d="{path}" fill="black" stroke="black" stroke-width="{STROKE_BOLD}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>"#
+            );
+            let rim = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(0,900) scale(1,-1)"><path d="{path}" fill="black" stroke="black" stroke-width="{}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>"#,
+                STROKE_BOLD + STROKE_RIM * 2.
             );
             strokes.push(HanziStroke {
                 key: SharedString::from(format!("hanzi-{ch}-{index}")),
+                rim_key: SharedString::from(format!("hanzi-{ch}-{index}-rim")),
                 svg: Arc::from(svg.as_str()),
+                rim: Arc::from(rim.as_str()),
             });
         }
         if !strokes.is_empty() {
@@ -331,6 +342,8 @@ pub(crate) struct StrokeCell {
     pub(crate) size: Pixels,
     pub(crate) poses: Vec<Pose>,
     pub(crate) color: Hsla,
+    /// A dark rim drawn under every stroke first, so the glyphs read over a bright background.
+    pub(crate) outline: Option<Hsla>,
 }
 
 impl IntoElement for StrokeCell {
@@ -389,33 +402,57 @@ impl Element for StrokeCell {
     ) {
         let factor = window.scale_factor();
         let pivot = bounds.center().scale(factor);
-        for (index, stroke) in self.hanzi.strokes.iter().enumerate() {
-            let pose = self.poses.get(index).copied().unwrap_or(Pose {
-                dx: 0.,
-                dy: 0.,
-                rot: 0.,
-                scale: 1.,
-                alpha: 1.,
-            });
-            if pose.alpha <= 0.002 {
-                continue;
-            }
+        let rest = Pose {
+            dx: 0.,
+            dy: 0.,
+            rot: 0.,
+            scale: 1.,
+            alpha: 1.,
+        };
+        let pose_of = |index: usize| self.poses.get(index).copied().unwrap_or(rest);
+        let turn = |pose: Pose| {
             let offset = point(
                 ScaledPixels(pose.dx * factor),
                 ScaledPixels(pose.dy * factor),
             );
-            let turn = TransformationMatrix::unit()
+            TransformationMatrix::unit()
                 .translate(offset)
                 .translate(pivot)
                 .rotate(radians(pose.rot))
                 .scale(Size::new(pose.scale, pose.scale))
-                .translate(pivot.map(|inset| ScaledPixels(-inset.0)));
+                .translate(pivot.map(|inset| ScaledPixels(-inset.0)))
+        };
+        // The whole rim goes down first: a stroke's rim must never cover a neighbouring
+        // stroke's colour where the two overlap.
+        if let Some(outline) = self.outline {
+            for (index, stroke) in self.hanzi.strokes.iter().enumerate() {
+                let pose = pose_of(index);
+                if pose.alpha <= 0.002 {
+                    continue;
+                }
+                window
+                    .paint_svg(
+                        bounds,
+                        stroke.rim_key.clone(),
+                        Some(stroke.rim.as_bytes()),
+                        turn(pose),
+                        outline.opacity(pose.alpha),
+                        cx,
+                    )
+                    .ok();
+            }
+        }
+        for (index, stroke) in self.hanzi.strokes.iter().enumerate() {
+            let pose = pose_of(index);
+            if pose.alpha <= 0.002 {
+                continue;
+            }
             window
                 .paint_svg(
                     bounds,
                     stroke.key.clone(),
                     Some(stroke.svg.as_bytes()),
-                    turn,
+                    turn(pose),
                     self.color.opacity(pose.alpha),
                     cx,
                 )
@@ -1029,6 +1066,7 @@ impl Render for StrokeLyrics {
                             size: cell,
                             poses,
                             color,
+                            outline: None,
                         }
                         .into_any_element(),
                         None => div()

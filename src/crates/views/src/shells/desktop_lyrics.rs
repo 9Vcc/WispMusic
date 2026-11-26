@@ -52,6 +52,10 @@ const COLUMN_MIN: f32 = 120.;
 const COLUMN_MAX: f32 = 520.;
 /// The smallest the window may be dragged to, in logical pixels.
 const WINDOW_MIN: f32 = 80.;
+/// The corner a locked strip watches for the pointer: it covers the unlock bubble at any
+/// interface size, and its inset matches where the bubble sits.
+const UNLOCK: f32 = 40.;
+const UNLOCK_INSET: f32 = 8.;
 /// The grab zones along the edges, the bigger corners that take precedence, and the inset that
 /// keeps the two apart. A transparent window cannot wear a native sizing frame, so the strip
 /// resizes itself from these.
@@ -399,6 +403,57 @@ fn window_rect(window: &Window) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// Whether the pointer is over the unlock bubble in the locked strip's top right corner.
+#[cfg(target_os = "windows")]
+fn cursor_over_unlock(host: usize) -> bool {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    let mut point = POINT::default();
+    let mut rect = RECT::default();
+    let scale = unsafe { GetDpiForWindow(host as *mut std::ffi::c_void) } as f32 / 96.;
+    let inner = (UNLOCK_INSET * scale).round() as i32;
+    let outer = ((UNLOCK + UNLOCK_INSET) * scale).round() as i32;
+    unsafe {
+        GetCursorPos(&mut point) != 0
+            && GetWindowRect(host as *mut std::ffi::c_void, &mut rect) != 0
+            && point.x >= rect.right - outer
+            && point.x < rect.right - inner
+            && point.y >= rect.top + inner
+            && point.y < rect.top + outer
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cursor_over_unlock(_host: usize) -> bool {
+    false
+}
+
+/// Makes the strip ignore the mouse, so a click falls through to whatever is behind it, or
+/// takes that back while the pointer is on the unlock bubble.
+#[cfg(target_os = "windows")]
+fn set_click_through(window: &Window, on: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_TRANSPARENT,
+    };
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    unsafe {
+        let style = GetWindowLongPtrW(handle, GWL_EXSTYLE);
+        let wanted = match on {
+            true => style | WS_EX_TRANSPARENT as isize,
+            false => style & !(WS_EX_TRANSPARENT as isize),
+        };
+        if style != wanted {
+            SetWindowLongPtrW(handle, GWL_EXSTYLE, wanted);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_click_through(_window: &Window, _on: bool) {}
+
 /// Moves and resizes the window without activating it, which is what keeps the strip out of
 /// the way while it is dragged. The rect is applied by the window loop, never from here, so
 /// the resize callback it provokes finds the app free.
@@ -657,6 +712,10 @@ struct DesktopLyric {
     resize: Option<ResizeDrag>,
     #[cfg(target_os = "windows")]
     resize_task: Option<Task<()>>,
+    #[cfg(target_os = "windows")]
+    over_unlock: bool,
+    #[cfg(target_os = "windows")]
+    click_through: Option<bool>,
     hovering: bool,
     hover_changed: bool,
     hover_epoch: u32,
@@ -741,6 +800,10 @@ impl DesktopLyric {
             resize: None,
             #[cfg(target_os = "windows")]
             resize_task: None,
+            #[cfg(target_os = "windows")]
+            over_unlock: false,
+            #[cfg(target_os = "windows")]
+            click_through: None,
             hovering: false,
             hover_changed: false,
             hover_epoch: 0,
@@ -771,7 +834,17 @@ impl DesktopLyric {
         let Some(host) = self.host else {
             return;
         };
-        let want = cursor_over_window(host) || self.resizing();
+        let inside = cursor_over_window(host);
+        #[cfg(target_os = "windows")]
+        {
+            let locked = self.settings.read(cx).desktop_lyrics_locked();
+            let over = locked && inside && cursor_over_unlock(host);
+            if self.over_unlock != over {
+                self.over_unlock = over;
+                cx.notify();
+            }
+        }
+        let want = inside || self.resizing();
         self.set_hovered(want, cx);
     }
 
@@ -1213,6 +1286,19 @@ impl DesktopLyric {
                     })),
             )
             .child(
+                Button::new("desktop-lyrics-lock")
+                    .ghost()
+                    .small()
+                    .icon("icons/lock.svg")
+                    .tint(white())
+                    .tooltip_above("desktop-lyrics-lock")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_desktop_lyrics_locked(true, cx)
+                        });
+                    })),
+            )
+            .child(
                 Button::new("desktop-lyrics-close")
                     .ghost()
                     .small()
@@ -1223,6 +1309,39 @@ impl DesktopLyric {
                         this.settings
                             .update(cx, |settings, cx| settings.set_desktop_lyrics(false, cx));
                     })),
+            )
+            .into_any_element()
+    }
+
+    /// The bubble a locked strip floats while the pointer is over it: the way back to moving
+    /// and resizing it.
+    fn unlock(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .top(px(UNLOCK_INSET))
+            .right(px(UNLOCK_INSET))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(white().opacity(0.15))
+                    .bg(black().opacity(0.45))
+                    .p(px(2.))
+                    .child(
+                        Button::new("desktop-lyrics-unlock")
+                            .ghost()
+                            .small()
+                            .icon("icons/lock-open.svg")
+                            .tint(white())
+                            .tooltip("desktop-lyrics-unlock")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.update(cx, |settings, cx| {
+                                    settings.set_desktop_lyrics_locked(false, cx)
+                                });
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -1905,14 +2024,32 @@ fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Ve
     (Vec::new(), 0.)
 }
 
+/// How one line of stroke glyphs is drawn: the cell it gets and the pass's colours. The flat
+/// shadow pass draws the same shapes darker underneath, and the coloured pass above it carries
+/// a dark rim so the strokes read over a bright wallpaper.
+#[derive(Clone, Copy)]
+struct StrokeStyle {
+    cell: f32,
+    gap: f32,
+    color: gpui::Hsla,
+    /// Give a character without stroke data its dark rim, as the lyric text wears one.
+    rim: bool,
+    outline: Option<gpui::Hsla>,
+}
+
 fn stroke_cell(
     item: &StrokeChar,
-    cell: f32,
-    color: gpui::Hsla,
-    rim: bool,
+    style: StrokeStyle,
     out_at: Option<Instant>,
     now: Instant,
 ) -> AnyElement {
+    let StrokeStyle {
+        cell,
+        color,
+        rim,
+        outline,
+        ..
+    } = style;
     let (poses, alpha) = stroke_poses(item, out_at, now);
     let content = match item.data.as_ref() {
         Some(hanzi) => StrokeCell {
@@ -1920,6 +2057,7 @@ fn stroke_cell(
             size: px(cell),
             poses,
             color: color.opacity(alpha),
+            outline: outline.map(|outline| outline.opacity(alpha)),
         }
         .into_any_element(),
         None => {
@@ -1947,32 +2085,26 @@ fn stroke_cell(
 
 fn stroke_cells(
     line: &StrokeLine,
-    cell: f32,
-    gap: f32,
-    color: gpui::Hsla,
-    rim: bool,
+    style: StrokeStyle,
     out_at: Option<Instant>,
     now: Instant,
 ) -> AnyElement {
-    let mut row = div().flex().items_center().gap(px(gap));
+    let mut row = div().flex().items_center().gap(px(style.gap));
     for item in &line.chars {
-        row = row.child(stroke_cell(item, cell, color, rim, out_at, now));
+        row = row.child(stroke_cell(item, style, out_at, now));
     }
     row.into_any_element()
 }
 
 fn stroke_column(
     line: &StrokeLine,
-    cell: f32,
-    gap: f32,
-    color: gpui::Hsla,
-    rim: bool,
+    style: StrokeStyle,
     out_at: Option<Instant>,
     now: Instant,
 ) -> AnyElement {
-    let mut column = div().flex().flex_col().items_center().gap(px(gap));
+    let mut column = div().flex().flex_col().items_center().gap(px(style.gap));
     for item in &line.chars {
-        column = column.child(stroke_cell(item, cell, color, rim, out_at, now));
+        column = column.child(stroke_cell(item, style, out_at, now));
     }
     column.into_any_element()
 }
@@ -2018,19 +2150,25 @@ fn stroke_view(
             .max(12.);
         let gap = (cell * 0.14).max(4.);
         let line_gap = (cell * 0.5).max(12.);
+        let flat = StrokeStyle {
+            cell,
+            gap,
+            color: black().opacity(0.55),
+            rim: false,
+            outline: None,
+        };
+        let lit = StrokeStyle {
+            cell,
+            gap,
+            color,
+            rim: true,
+            outline: Some(black().opacity(0.55)),
+        };
         let mut scene = div().size_full().flex().items_stretch();
         for offset in 0..2 {
             let line = &pair.lines[offset];
-            let shadow = stroke_column(
-                line,
-                cell,
-                gap,
-                black().opacity(0.55),
-                false,
-                pair.out_at,
-                now,
-            );
-            let cells = stroke_column(line, cell, gap, color, true, pair.out_at, now);
+            let shadow = stroke_column(line, flat, pair.out_at, now);
+            let cells = stroke_column(line, lit, pair.out_at, now);
             let cells = {
                 let shadowed = stroke_shadow(shadow, cell);
                 // Keep the shadow behind the coloured column without changing its layout.
@@ -2068,19 +2206,25 @@ fn stroke_view(
         .min(width * 0.92 / max_chars as f32)
         .max(12.);
     let gap = (cell * 0.14).max(4.);
+    let flat = StrokeStyle {
+        cell,
+        gap,
+        color: black().opacity(0.55),
+        rim: false,
+        outline: None,
+    };
+    let lit = StrokeStyle {
+        cell,
+        gap,
+        color,
+        rim: true,
+        outline: Some(black().opacity(0.55)),
+    };
     let mut scene = div().size_full().flex().flex_col();
     for offset in 0..2 {
         let line = &pair.lines[offset];
-        let shadow = stroke_cells(
-            line,
-            cell,
-            gap,
-            black().opacity(0.55),
-            false,
-            pair.out_at,
-            now,
-        );
-        let cells = stroke_cells(line, cell, gap, color, true, pair.out_at, now);
+        let shadow = stroke_cells(line, flat, pair.out_at, now);
+        let cells = stroke_cells(line, lit, pair.out_at, now);
         let cells = {
             let shadowed = stroke_shadow(shadow, cell);
             let mut layered = div().relative().child(shadowed);
@@ -2143,6 +2287,17 @@ impl Render for DesktopLyric {
         if !stroke_mode {
             self.stroke = None;
             self.stroke_pending = None;
+        }
+        let locked = self.settings.read(cx).desktop_lyrics_locked();
+        // A locked strip lets the mouse through to whatever is behind it, except while the
+        // pointer is on the unlock bubble, where a click has to reach the button.
+        #[cfg(target_os = "windows")]
+        {
+            let through = locked && !self.over_unlock;
+            if self.click_through != Some(through) {
+                self.click_through = Some(through);
+                set_click_through(window, through);
+            }
         }
         let bounds = window.bounds();
         let shape_changed = self.fit != Some((setting_font, vertical));
@@ -2525,7 +2680,11 @@ impl Render for DesktopLyric {
             .font(typeface::lyrics())
             .overflow_hidden()
             .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                if !locked {
+                    window.start_window_move();
+                }
+            })
             .child(match showing_stroke {
                 true => stroke_view(
                     self.stroke.as_ref().expect("checked above"),
@@ -2549,7 +2708,11 @@ impl Render for DesktopLyric {
             .font(typeface::lyrics())
             .overflow_hidden()
             .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                if !locked {
+                    window.start_window_move();
+                }
+            })
             .child(match showing_stroke {
                 true => stroke_view(
                     self.stroke.as_ref().expect("checked above"),
@@ -2608,12 +2771,13 @@ impl Render for DesktopLyric {
             )
             .when(vertical, |this| {
                 this.child(vertical_stage_element)
-                    .child(self.vertical_header(cx))
+                    .when(!locked, |this| this.child(self.vertical_header(cx)))
             })
             .when(!vertical, |this| {
-                this.child(self.header(header_title, cx))
+                this.when(!locked, |this| this.child(self.header(header_title, cx)))
                     .child(horizontal_stage)
             })
+            .when(locked && self.hovering, |this| this.child(self.unlock(cx)))
             .when(moving() || self.resizing(), |this| {
                 this.child(
                     div()
@@ -2626,7 +2790,9 @@ impl Render for DesktopLyric {
                         .border_color(white().opacity(0.4)),
                 )
             })
-            .children(ResizeDir::ALL.map(|dir| self.resize_zone(dir, cx)))
+            .when(!locked, |this| {
+                this.children(ResizeDir::ALL.map(|dir| self.resize_zone(dir, cx)))
+            })
     }
 }
 
