@@ -45,19 +45,24 @@ impl LocalProvider {
     async fn scan_paths(&self, paths: Vec<PathBuf>) -> Result<ProviderSession> {
         let cache_dir = self.cache_dir.clone();
         let index = self.index.clone();
+        let roots = paths.clone();
         let thorough = self
             .thorough
             .swap(false, std::sync::atomic::Ordering::Relaxed);
-        let scanned =
+        let mut scanned =
             tokio::task::spawn_blocking(move || scan::scan(&paths, &cache_dir, &index, thorough))
                 .await
                 .context("local scan task panicked")?;
 
-        if !scanned.moved.is_empty() {
-            let store = store::Store::new(self.database.clone());
-            if let Err(error) = store.reconcile(&scanned.moved) {
-                log::warn!("local: cannot move track references: {error:#}");
-            }
+        let store = store::Store::new(self.database.clone());
+        if !scanned.moved.is_empty()
+            && let Err(error) = store.reconcile(&scanned.moved)
+        {
+            log::warn!("local: cannot move track references: {error:#}");
+        }
+        match store.missing_tracks(&scanned.tracks, &roots) {
+            Ok(missing) => scanned.issues.extend(missing),
+            Err(error) => log::warn!("local: cannot check stored references: {error:#}"),
         }
 
         let api: Arc<dyn MusicApi> = Arc::new(client::LocalClient::new(

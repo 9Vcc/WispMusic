@@ -345,7 +345,10 @@ impl MusicApi for LocalClient {
 
     async fn set_track_saved(&self, track_id: &str, saved: bool) -> Result<()> {
         let track_id = self.scanned.read().unwrap().current_id(track_id);
-        self.store.set_starred(Starred::Tracks, &track_id, saved)
+        match saved {
+            true => self.store.set_starred(Starred::Tracks, &track_id, true),
+            false => self.store.unstar(Starred::Tracks, &[track_id]),
+        }
     }
 
     async fn track_tags(&self, track_id: &str) -> Result<TrackTags> {
@@ -468,7 +471,7 @@ impl MusicApi for LocalClient {
 
     async fn remove_track_from_playlist(&self, playlist_id: &str, track_id: &str) -> Result<()> {
         let track_id = self.scanned.read().unwrap().current_id(track_id);
-        self.store.remove(playlist_id, &track_id)
+        self.store.remove(playlist_id, &[track_id])
     }
 
     /// Counts the moves in the tracks the library still holds, so a stored track whose file has

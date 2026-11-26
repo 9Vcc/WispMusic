@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use storage::Database;
 
-use crate::LOCAL_PLAYLIST_PREFIX;
+use crate::{LOCAL_PLAYLIST_PREFIX, Track};
 
 pub struct Stored {
     pub id: String,
@@ -92,6 +93,39 @@ impl Store {
             .context("cannot read most played local tracks")
     }
 
+    /// Reports references to files that are gone, but only inside the folders still being
+    /// scanned: one in a removed folder stays stored for when that folder comes back.
+    pub fn missing_tracks(&self, tracks: &[Track], roots: &[PathBuf]) -> Result<Vec<String>> {
+        let ids: HashSet<&str> = tracks
+            .iter()
+            .filter_map(|track| track.id.as_deref())
+            .collect();
+        let connection = self.open()?;
+        let mut query = connection
+            .prepare(
+                "SELECT track_id FROM favorites
+                 UNION SELECT track_id FROM playlist_tracks",
+            )
+            .context("cannot read local references")?;
+        let rows = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("cannot read local references")?;
+        let mut missing = Vec::new();
+        for id in rows {
+            let id = id?;
+            if !ids.contains(id.as_str())
+                && let Some(path) = super::wire::path_from_track_id(&id)
+                && roots.iter().any(|root| path.starts_with(root))
+            {
+                missing.push(format!(
+                    "cannot find music file referenced by a playlist or favorite: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(missing)
+    }
+
     pub fn set_starred(&self, kind: Starred, id: &str, saved: bool) -> Result<()> {
         let connection = self.open()?;
         match saved {
@@ -110,6 +144,28 @@ impl Store {
         }
         .context("cannot update a local favorite")?;
         Ok(())
+    }
+
+    /// Removes a favorite under each of its ids in one transaction, for a caller undoing a
+    /// favorited file through the aliases it may have had.
+    pub fn unstar(&self, kind: Starred, ids: &[String]) -> Result<()> {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction()
+            .context("cannot remove a local favorite")?;
+        {
+            let mut remove = transaction.prepare(&format!(
+                "DELETE FROM {} WHERE {} = ?",
+                kind.table(),
+                kind.column()
+            ))?;
+            for id in ids {
+                remove.execute([id])?;
+            }
+        }
+        transaction
+            .commit()
+            .context("cannot remove a local favorite")
     }
 
     /// Moves every reference that names a track id to the id its file has after a move, so
@@ -314,15 +370,22 @@ impl Store {
             .context("cannot add tracks to a local playlist")
     }
 
-    pub fn remove(&self, id: &str, track_id: &str) -> Result<()> {
-        let connection = self.open()?;
-        connection
-            .execute(
-                "DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
-                params![id, track_id],
-            )
+    pub fn remove(&self, id: &str, track_ids: &[String]) -> Result<()> {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction()
             .context("cannot remove a track from a local playlist")?;
-        touch(&connection, id)
+        {
+            let mut remove = transaction
+                .prepare("DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?")?;
+            for track_id in track_ids {
+                remove.execute(params![id, track_id])?;
+            }
+        }
+        touch(&transaction, id)?;
+        transaction
+            .commit()
+            .context("cannot remove a track from a local playlist")
     }
 
     /// Writes `track_ids` as the playlist's whole order, in one write. They have to be the
