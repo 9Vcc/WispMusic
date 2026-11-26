@@ -69,6 +69,9 @@ library-local-unconfigured = Configure your local library
 
 # app menu
 app-refresh = Refresh
+app-dev-badge = dev
+app-dev-build = Development build
+app-dev-build-branch = Development build of { $branch }
 app-sign-out = Sign Out
 app-quit = Quit
 app-settings = Settings…

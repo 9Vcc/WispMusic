@@ -9,7 +9,7 @@ use gpui::{
 };
 use ui::TrafficLightControls;
 use ui::WindowControls;
-use ui::{ActiveTheme as _, Button, MenuItem, Picker, Popovers, Spin};
+use ui::{ActiveTheme as _, Badge, Button, MenuItem, Picker, Popovers, Spin};
 
 use crate::chrome::SidebarRight;
 use i18n::t;
@@ -21,6 +21,12 @@ use state::{AppSettings, Wisp};
 const SYSTEM_ZOOMS: bool = cfg!(target_os = "windows");
 /// The rule between the current screen's controls and the account and sidebar segment.
 const SEGMENT_RULE: Pixels = px(1.);
+/// The branch a debug build was compiled from, as `build.rs` found it, or `None` when it found none.
+/// An empty `WISP_BRANCH` set for the build reaches rustc as it is, so it counts as none.
+const BRANCH: Option<&str> = match option_env!("WISP_BRANCH") {
+    Some(branch) if !branch.is_empty() => Some(branch),
+    _ => None,
+};
 
 /// Tells whether the page a refresh reloaded is still waiting for its data.
 pub(crate) type Busy = Box<dyn Fn(&App) -> bool>;
@@ -560,6 +566,7 @@ impl Render for TitleBar {
                     .gap_1()
                     .items_center()
                     .when(navigation, |this| this.child(self.history(window, cx)))
+                    .when(cfg!(debug_assertions), |this| this.child(dev_badge()))
                     .child(div().flex_1())
                     .map(|this| match (navigation, content) {
                         (true, Some(content)) => this.child(content).child(Self::segment_rule(cx)),
@@ -649,6 +656,33 @@ fn window_controls(leading: bool, traffic_light: bool) -> AnyElement {
         true => TrafficLightControls::new(leading).into_any_element(),
         false => WindowControls::new(leading).into_any_element(),
     }
+}
+
+/// The tag a debug build carries in its title bar, so it is never mistaken for a release. It names
+/// the branch the build came from, or says "dev" when the build saw no branch. A long branch is cut
+/// off at the badge's edge, which gives way before the bar's other controls do.
+fn dev_badge() -> impl IntoElement {
+    let (label, text) = match BRANCH {
+        Some(branch) => (
+            t!("app-dev-build-branch", branch = branch),
+            SharedString::new_static(branch),
+        ),
+        None => (t!("app-dev-build"), t!("app-dev-badge")),
+    };
+    div()
+        .id("dev-badge")
+        .role(Role::Label)
+        .aria_value(label)
+        .min_w_0()
+        .ml_1()
+        .child(
+            Badge::text(text)
+                .justify_start()
+                .overflow_hidden()
+                .flex_shrink(1.)
+                .min_w_0()
+                .whitespace_nowrap(),
+        )
 }
 
 /// Runs the title bar's double-click action. macOS performs the action set in System Settings;

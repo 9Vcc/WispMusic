@@ -57,6 +57,9 @@ library-local-unconfigured = 配置本地音乐库
 
 # app menu
 app-refresh = 刷新
+app-dev-badge = dev
+app-dev-build = 开发版
+app-dev-build-branch = { $branch } 分支的开发版
 app-sign-out = 退出登录
 app-quit = 退出
 app-settings = 设置…
