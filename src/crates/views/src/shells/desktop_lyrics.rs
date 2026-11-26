@@ -454,6 +454,94 @@ fn set_click_through(window: &Window, on: bool) {
 #[cfg(not(target_os = "windows"))]
 fn set_click_through(_window: &Window, _on: bool) {}
 
+/// Where forwarded mouse moves go while the strip is locked, and the hook that forwards them.
+/// A click-through window gets no input of its own, so moves are posted in from a global hook
+/// instead, the way Electron forwards them for EchoMusic: hover keeps working while clicks
+/// fall through.
+#[cfg(target_os = "windows")]
+static MOVE_TARGET: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+#[cfg(target_os = "windows")]
+static MOVE_HOOK: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn forward_mouse_move(code: i32, wparam: usize, lparam: isize) -> isize {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetClientRect, MSLLHOOKSTRUCT, PostMessageW, WM_MOUSEMOVE,
+    };
+    if code >= 0
+        && wparam as u32 == WM_MOUSEMOVE
+        && let Some(handle) = MOVE_TARGET.lock().ok().and_then(|target| *target)
+    {
+        let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+        let mut point = info.pt;
+        let mut rect = RECT::default();
+        unsafe {
+            if ScreenToClient(handle as *mut std::ffi::c_void, &mut point) != 0
+                && GetClientRect(handle as *mut std::ffi::c_void, &mut rect) != 0
+                && point.x >= 0
+                && point.y >= 0
+                && point.x < rect.right
+                && point.y < rect.bottom
+            {
+                let packed = ((point.y as u32 & 0xffff) << 16) | (point.x as u32 & 0xffff);
+                PostMessageW(
+                    handle as *mut std::ffi::c_void,
+                    WM_MOUSEMOVE,
+                    0,
+                    packed as isize,
+                );
+            }
+        }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+#[cfg(target_os = "windows")]
+fn start_move_forwarding(window: &Window) {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_MOUSE_LL};
+    let Some(handle) = hwnd(window) else {
+        return;
+    };
+    let Ok(mut hook) = MOVE_HOOK.lock() else {
+        return;
+    };
+    if hook.is_some() {
+        return;
+    }
+    if let Ok(mut target) = MOVE_TARGET.lock() {
+        *target = Some(handle as usize);
+    }
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        let installed = SetWindowsHookExW(WH_MOUSE_LL, Some(forward_mouse_move), module, 0);
+        if installed.is_null() {
+            log::warn!("desktop-lyrics: cannot forward mouse moves to the locked strip");
+            if let Ok(mut target) = MOVE_TARGET.lock() {
+                *target = None;
+            }
+        } else {
+            *hook = Some(installed as isize);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_move_forwarding() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx;
+    let Ok(mut hook) = MOVE_HOOK.lock() else {
+        return;
+    };
+    if let Some(installed) = hook.take() {
+        unsafe { UnhookWindowsHookEx(installed as *mut std::ffi::c_void) };
+    }
+    if let Ok(mut target) = MOVE_TARGET.lock() {
+        *target = None;
+    }
+}
+
 /// Moves and resizes the window without activating it, which is what keeps the strip out of
 /// the way while it is dragged. The rect is applied by the window loop, never from here, so
 /// the resize callback it provokes finds the app free.
@@ -715,7 +803,11 @@ struct DesktopLyric {
     #[cfg(target_os = "windows")]
     over_unlock: bool,
     #[cfg(target_os = "windows")]
+    unlock_hot: bool,
+    #[cfg(target_os = "windows")]
     click_through: Option<bool>,
+    #[cfg(target_os = "windows")]
+    forwarding: bool,
     hovering: bool,
     hover_changed: bool,
     hover_epoch: u32,
@@ -803,7 +895,11 @@ impl DesktopLyric {
             #[cfg(target_os = "windows")]
             over_unlock: false,
             #[cfg(target_os = "windows")]
+            unlock_hot: false,
+            #[cfg(target_os = "windows")]
             click_through: None,
+            #[cfg(target_os = "windows")]
+            forwarding: false,
             hovering: false,
             hover_changed: false,
             hover_epoch: 0,
@@ -818,9 +914,25 @@ impl DesktopLyric {
         }
     }
 
+    /// The unlock button being hovered is what turns click-through off for a moment, so a
+    /// click can land on it; leaving the strip or unlocking puts it back.
+    #[cfg(target_os = "windows")]
+    fn set_unlock_hot(&mut self, hot: bool, cx: &mut Context<Self>) {
+        if self.unlock_hot != hot {
+            self.unlock_hot = hot;
+            cx.notify();
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn set_unlock_hot(&mut self, _hot: bool, _cx: &mut Context<Self>) {}
+
     fn set_hovered(&mut self, want: bool, cx: &mut Context<Self>) {
         if self.hovering == want {
             return;
+        }
+        if !want {
+            self.set_unlock_hot(false, cx);
         }
         self.hovering = want;
         self.hover_changed = true;
@@ -1336,6 +1448,9 @@ impl DesktopLyric {
                             .icon("icons/lock-open.svg")
                             .tint(white())
                             .tooltip("desktop-lyrics-unlock")
+                            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                                this.set_unlock_hot(*over, cx)
+                            }))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.settings.update(cx, |settings, cx| {
                                     settings.set_desktop_lyrics_locked(false, cx)
@@ -2274,6 +2389,15 @@ fn interlude_dots(font: f32, accent: Hsla, phase: f32) -> AnyElement {
         .into_any_element()
 }
 
+#[cfg(target_os = "windows")]
+impl Drop for DesktopLyric {
+    fn drop(&mut self) {
+        if self.forwarding {
+            stop_move_forwarding();
+        }
+    }
+}
+
 impl Render for DesktopLyric {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.framed {
@@ -2284,16 +2408,26 @@ impl Render for DesktopLyric {
         let setting_font = self.settings.read(cx).desktop_lyrics_font_size();
         let vertical = self.settings.read(cx).desktop_lyrics_vertical();
         let stroke_mode = self.settings.read(cx).desktop_lyrics_stroke();
+        // The stroke effect keeps its own size, so it can be tuned apart from the text.
+        let stroke_scale = self.settings.read(cx).desktop_lyrics_stroke_scale();
         if !stroke_mode {
             self.stroke = None;
             self.stroke_pending = None;
         }
         let locked = self.settings.read(cx).desktop_lyrics_locked();
         // A locked strip lets the mouse through to whatever is behind it, except while the
-        // pointer is on the unlock bubble, where a click has to reach the button.
+        // pointer is on the unlock bubble, where a click has to reach the button. Its moves
+        // are forwarded in so hovering still works, as Electron does for EchoMusic.
         #[cfg(target_os = "windows")]
         {
-            let through = locked && !self.over_unlock;
+            if self.forwarding != locked {
+                self.forwarding = locked;
+                match locked {
+                    true => start_move_forwarding(window),
+                    false => stop_move_forwarding(),
+                }
+            }
+            let through = locked && !(self.unlock_hot || self.over_unlock);
             if self.click_through != Some(through) {
                 self.click_through = Some(through);
                 set_click_through(window, through);
@@ -2688,7 +2822,7 @@ impl Render for DesktopLyric {
             .child(match showing_stroke {
                 true => stroke_view(
                     self.stroke.as_ref().expect("checked above"),
-                    font,
+                    font * stroke_scale,
                     bounds.size.width.as_f32(),
                     bounds.size.height.as_f32(),
                     true,
@@ -2716,7 +2850,7 @@ impl Render for DesktopLyric {
             .child(match showing_stroke {
                 true => stroke_view(
                     self.stroke.as_ref().expect("checked above"),
-                    font,
+                    font * stroke_scale,
                     bounds.size.width.as_f32(),
                     (bounds.size.height.as_f32() - HEADER).max(0.),
                     false,
@@ -2758,7 +2892,9 @@ impl Render for DesktopLyric {
                 plate,
                 Animation::new(HOVER_FADE).with_easing(ui::ease_out_cubic),
                 move |this, delta| {
-                    if !hover_changed && !plate_down {
+                    // A locked strip only floats its unlock button; it does not put the dark
+                    // plate under the lyrics as an unlocked one does on hover.
+                    if locked || (!hover_changed && !plate_down) {
                         return this;
                     }
                     let alpha = match (plate_down, hovering) {

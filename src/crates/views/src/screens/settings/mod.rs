@@ -110,6 +110,7 @@ enum Slot {
     DesktopLyricsCoverColor,
     DesktopLyricsVertical,
     DesktopLyricsStroke,
+    DesktopLyricsStrokeScale,
     DesktopLyricsFont,
     LyricsSources,
     LyricsPriority,
@@ -349,12 +350,12 @@ impl SettingsView {
         cx.observe(&outputs, |this, _, cx| this.remeasure(cx))
             .detach();
         cx.observe(&session, |this, _, cx| {
-                if this.page == SettingsPage::Network && !this.unblock_available(cx) {
-                    navigate(Destination::Settings(SettingsPage::Playback), cx);
-                }
-                this.remeasure(cx);
-            })
-            .detach();
+            if this.page == SettingsPage::Network && !this.unblock_available(cx) {
+                navigate(Destination::Settings(SettingsPage::Playback), cx);
+            }
+            this.remeasure(cx);
+        })
+        .detach();
         let plugins = Wisp::global(cx).plugins.clone();
         cx.observe(&plugins, |this, _, cx| this.remeasure(cx))
             .detach();
@@ -844,6 +845,10 @@ impl SettingsView {
                 t!("settings-desktop-lyrics-stroke"),
                 t!("settings-desktop-lyrics-stroke-detail"),
             ),
+            Slot::DesktopLyricsStrokeScale => (
+                t!("settings-desktop-lyrics-stroke-scale"),
+                t!("settings-desktop-lyrics-stroke-scale-detail"),
+            ),
             Slot::DesktopLyricsFont => (
                 t!("settings-desktop-lyrics-font"),
                 t!("settings-desktop-lyrics-font-detail"),
@@ -1030,10 +1035,7 @@ impl SettingsView {
                 t!("settings-update-channel-detail"),
             ),
             Slot::Log => (t!("settings-log"), t!("settings-log-detail")),
-            Slot::Upstream => (
-                t!("settings-upstream"),
-                t!("settings-upstream-detail"),
-            ),
+            Slot::Upstream => (t!("settings-upstream"), t!("settings-upstream-detail")),
         };
         Some(meta)
     }
@@ -1075,6 +1077,7 @@ impl SettingsView {
             Slot::DesktopLyricsCoverColor => self.desktop_lyrics_cover_color_row(cx),
             Slot::DesktopLyricsVertical => self.desktop_lyrics_vertical_row(cx),
             Slot::DesktopLyricsStroke => self.desktop_lyrics_stroke_row(cx),
+            Slot::DesktopLyricsStrokeScale => self.desktop_lyrics_stroke_scale_row(cx),
             Slot::DesktopLyricsFont => self.desktop_lyrics_font_row(cx),
             Slot::BlurLyrics => self.blur_lyrics_row(cx),
             Slot::LyricsBlurAmount => self.lyrics_blur_amount_row(cx),
@@ -1539,10 +1542,8 @@ impl Render for SettingsView {
         // a dialog takes the key focus, since escape only reaches the page from inside it
         let theme_delete = self.theme_delete_modal(cx);
         let plugin_install = self.plugin_install_modal(cx);
-        let dialog = taken
-            || sign_in_for.is_some()
-            || theme_delete.is_some()
-            || plugin_install.is_some();
+        let dialog =
+            taken || sign_in_for.is_some() || theme_delete.is_some() || plugin_install.is_some();
         match (dialog, self.grabbed) {
             (true, false) => {
                 window.focus(&self.focus, cx);

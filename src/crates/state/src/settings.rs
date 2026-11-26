@@ -296,6 +296,9 @@ pub const LYRIC_OFFSET_NUDGE_MS: i32 = 500;
 /// [wisp] 桌面歌词字号的边界：窗口大小决定字号，拖动窗口只会落在这个区间里。
 pub const DESKTOP_LYRICS_FONT_MIN: f32 = 20.;
 pub const DESKTOP_LYRICS_FONT_MAX: f32 = 96.;
+/// [wisp] 桌面歌词笔画动效的字号倍率边界。
+pub const DESKTOP_LYRICS_STROKE_SCALE_MIN: f32 = 0.5;
+pub const DESKTOP_LYRICS_STROKE_SCALE_MAX: f32 = 2.;
 /// How many chosen search results the history keeps, across every provider.
 const PICKS: usize = 40;
 const DEFAULT_SIDEBAR_WIDTH: f32 = 195.;
@@ -443,6 +446,8 @@ struct Values {
     desktop_lyrics_cover_color: bool,
     /// 桌面歌词是否锁定：锁定后鼠标穿透，拖动和缩放都停下来，悬停时才浮出解锁键。
     desktop_lyrics_locked: bool,
+    /// 桌面歌词笔画动效的字号倍率，1.0 与普通歌词同尺寸。
+    desktop_lyrics_stroke_scale: f32,
     /// 歌词页逐字填充是否跟随封面。
     lyrics_cover_color: bool,
     parallax_lyrics: bool,
@@ -719,6 +724,7 @@ impl Default for Values {
             desktop_lyrics_stroke: false,
             desktop_lyrics_cover_color: false,
             desktop_lyrics_locked: false,
+            desktop_lyrics_stroke_scale: 1.,
             lyrics_cover_color: false,
             parallax_lyrics: false,
             lyrics_motion_preset: LyricMotionPreset::Wisp,
@@ -1386,6 +1392,12 @@ impl AppSettings {
         self.values.desktop_lyrics_locked
     }
 
+    pub fn desktop_lyrics_stroke_scale(&self) -> f32 {
+        self.values
+            .desktop_lyrics_stroke_scale
+            .clamp(DESKTOP_LYRICS_STROKE_SCALE_MIN, DESKTOP_LYRICS_STROKE_SCALE_MAX)
+    }
+
     pub fn lyrics_cover_color(&self) -> bool {
         self.values.lyrics_cover_color
     }
@@ -2046,6 +2058,18 @@ impl AppSettings {
             return;
         }
         self.values.desktop_lyrics_locked = locked;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_desktop_lyrics_stroke_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
+        let scale = (scale.clamp(DESKTOP_LYRICS_STROKE_SCALE_MIN, DESKTOP_LYRICS_STROKE_SCALE_MAX)
+            * 100.)
+            .round()
+            / 100.;
+        if (self.values.desktop_lyrics_stroke_scale - scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.values.desktop_lyrics_stroke_scale = scale;
         self.schedule_save(cx);
     }
 

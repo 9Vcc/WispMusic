@@ -77,7 +77,8 @@ pub use scrobble::Scrobbling;
 pub use search::{AlbumHit, ArtistHit, Hit, Kind, PlaylistHit, Search};
 pub use session::{Failure, ProviderInfo, Session, SessionEvent, SessionState};
 pub use settings::{
-    AppSettings, DESKTOP_LYRICS_FONT_MAX, DESKTOP_LYRICS_FONT_MIN, FilterValue,
+    AppSettings, DESKTOP_LYRICS_FONT_MAX, DESKTOP_LYRICS_FONT_MIN,
+    DESKTOP_LYRICS_STROKE_SCALE_MAX, DESKTOP_LYRICS_STROKE_SCALE_MIN, FilterValue,
     FullscreenControlsAutohide, LYRIC_OFFSET_MAX_MS, LYRIC_OFFSET_NUDGE_MS, LYRICS_SOURCES,
     LyricMotionPreset, PREAMP_MAX, PREAMP_MIN, PageWidth, PlayerBarLayout, Reloaded,
     RomanizationScripts, SYSTEM_FONT, SideTab, ThemeFamily, ThemeOffer, ThemeVariant,

@@ -64,6 +64,7 @@ impl SettingsView {
                 Slot::DesktopLyricsCoverColor,
                 Slot::DesktopLyricsVertical,
                 Slot::DesktopLyricsStroke,
+                Slot::DesktopLyricsStrokeScale,
                 Slot::DesktopLyricsFont,
             ]),
         );
@@ -141,6 +142,64 @@ impl SettingsView {
                     });
                 }))
                 .into_any_element(),
+        )
+    }
+
+    pub(super) fn desktop_lyrics_stroke_scale_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let scale = self.settings.read(cx).desktop_lyrics_stroke_scale();
+        let adjust = |suffix: &'static str,
+                      icon: &'static str,
+                      key: &'static str,
+                      delta: f32,
+                      disabled: bool| {
+            Button::new(SharedString::from(format!(
+                "desktop-lyrics-stroke-scale-{suffix}"
+            )))
+            .ghost()
+            .small()
+            .icon(icon)
+            .tooltip(key)
+            .tint(theme.muted_foreground)
+            .disabled(disabled)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let scale = this.settings.read(cx).desktop_lyrics_stroke_scale();
+                this.settings.update(cx, |settings, cx| {
+                    settings.set_desktop_lyrics_stroke_scale(scale + delta, cx)
+                });
+            }))
+        };
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(adjust(
+                "down",
+                "icons/minus.svg",
+                "settings-desktop-lyrics-stroke-scale-down",
+                -0.1,
+                scale <= state::DESKTOP_LYRICS_STROKE_SCALE_MIN,
+            ))
+            .child(
+                div()
+                    .min_w(px(40.))
+                    .text_center()
+                    .font_features(tabular())
+                    .child(SharedString::from(format!(
+                        "{}%",
+                        (scale * 100.).round() as i32
+                    ))),
+            )
+            .child(adjust(
+                "up",
+                "icons/plus.svg",
+                "settings-desktop-lyrics-stroke-scale-up",
+                0.1,
+                scale >= state::DESKTOP_LYRICS_STROKE_SCALE_MAX,
+            ));
+        self.row(
+            t!("settings-desktop-lyrics-stroke-scale"),
+            controls.into_any_element(),
         )
     }
 
