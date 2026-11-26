@@ -1,6 +1,6 @@
 mod aside;
+pub(crate) mod legacy_frame;
 mod lyrics_effects;
-pub(crate) mod stroke_lyrics;
 mod notice;
 mod output_picker;
 mod player_bar;
@@ -8,24 +8,24 @@ mod sidebar_left;
 mod sidebar_motion;
 mod sidebar_right;
 mod speed;
+pub(crate) mod stroke_lyrics;
 mod swipe_cue;
 mod theme_invite;
 mod timeline;
-pub mod tray_menu;
-pub(crate) mod legacy_frame;
 mod title_bar;
 mod toasts;
 mod toolbar;
 pub(crate) mod tools;
+pub mod tray_menu;
 
-pub use legacy_frame::install as install_legacy_client_area;
-pub(crate) use speed::SpeedButton;
 pub(crate) use aside::{Aside, VerseLook, verse, verse_gap, verse_sizes};
+pub use legacy_frame::install as install_legacy_client_area;
 pub(crate) use notice::AppNotice;
 pub(crate) use output_picker::OutputPicker;
 pub(crate) use player_bar::PlayerBar;
 pub(crate) use sidebar_left::SidebarLeft;
 pub(crate) use sidebar_right::SidebarRight;
+pub(crate) use speed::SpeedButton;
 pub(crate) use swipe_cue::SwipeCue;
 pub(crate) use theme_invite::ThemeInvite;
 pub(crate) use timeline::Timeline;
@@ -60,11 +60,7 @@ pub(crate) fn window_radius(settings: &AppSettings, cx: &App, window: &Window) -
 
 /// [wisp] 标题 id 带行号：同一个分区键可以在队列里出现两次（Context→Queued→Context），
 /// 只按 key 生成的 id 会让 debug 构建在绘制时撞上 GPUI 的 a11y 重复节点断言。
-pub(crate) fn section_label(
-    key: &'static str,
-    index: usize,
-    cx: &App,
-) -> gpui::Stateful<Div> {
+pub(crate) fn section_label(key: &'static str, index: usize, cx: &App) -> gpui::Stateful<Div> {
     div()
         .id(SharedString::from(format!("queue-section-{key}-{index}")))
         .role(Role::Heading)

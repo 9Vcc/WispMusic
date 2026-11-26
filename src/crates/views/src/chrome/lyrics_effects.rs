@@ -22,10 +22,16 @@ mod tests {
     #[test]
     fn parallax_is_centered_and_bounded() {
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(100.)));
-        assert_eq!(parallax_offset(bounds.center(), bounds, true), Point::default());
+        assert_eq!(
+            parallax_offset(bounds.center(), bounds, true),
+            Point::default()
+        );
         let corner = parallax_offset(point(px(200.), px(100.)), bounds, true);
         assert!((corner.x.as_f32() + 6.).abs() < 0.001);
         assert!((corner.y.as_f32() + 4.).abs() < 0.001);
-        assert_eq!(parallax_offset(point(px(200.), px(100.)), bounds, false), Point::default());
+        assert_eq!(
+            parallax_offset(point(px(200.), px(100.)), bounds, false),
+            Point::default()
+        );
     }
 }

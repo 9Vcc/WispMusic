@@ -635,34 +635,34 @@ impl SidebarLeft {
         let origin = Origin::from(&pin);
         // [wisp] 固定歌曲是一条具体曲目：From<&Pin> 把它映射成 Radio，
         // 播放时会走电台抓取一首不相干的歌；这里单独按 id 从曲库取回原曲。
-        let pinned_song = (pin.kind == PinKind::Song)
-            .then(|| {
-                Wisp::global(cx)
-                    .library
-                    .read(cx)
-                    .state(Shelf::of(&pin.id))
-                    .tracks()
-                    .iter()
-                    .find(|track| track.id.as_deref() == Some(pin.id.as_str()))
-                    .cloned()
-                    // [wisp] 曲库没有缓存这首歌时也要播原曲：从固定条目本身构造。
-                    // 之前回退 toggle_origin 会被 From<&Pin> 映射成电台，放不相干的歌。
-                    .unwrap_or_else(|| music::Track {
-                        id: Some(pin.id.clone()),
-                        name: pin.title.clone(),
-                        playable: true,
-                        cover: pin.cover.clone(),
-                        ..Default::default()
-                    })
-            });
-        let playing = match pinned_song.as_ref() {
-            Some(_) => self
-                .playback
+        let pinned_song = (pin.kind == PinKind::Song).then(|| {
+            Wisp::global(cx)
+                .library
                 .read(cx)
-                .track()
-                .and_then(|track| track.id.as_deref())
-                == Some(pin.id.as_str())
-                && self.playback.read(cx).control().unwrap_or(false),
+                .state(Shelf::of(&pin.id))
+                .tracks()
+                .iter()
+                .find(|track| track.id.as_deref() == Some(pin.id.as_str()))
+                .cloned()
+                // [wisp] 曲库没有缓存这首歌时也要播原曲：从固定条目本身构造。
+                // 之前回退 toggle_origin 会被 From<&Pin> 映射成电台，放不相干的歌。
+                .unwrap_or_else(|| music::Track {
+                    id: Some(pin.id.clone()),
+                    name: pin.title.clone(),
+                    playable: true,
+                    cover: pin.cover.clone(),
+                    ..Default::default()
+                })
+        });
+        let playing = match pinned_song.as_ref() {
+            Some(_) => {
+                self.playback
+                    .read(cx)
+                    .track()
+                    .and_then(|track| track.id.as_deref())
+                    == Some(pin.id.as_str())
+                    && self.playback.read(cx).control().unwrap_or(false)
+            }
             None => self.playback.read(cx).engaged(&origin, cx),
         };
         let warmed = origin.clone();
@@ -670,11 +670,11 @@ impl SidebarLeft {
         let key = format!("{}-{}", pin.kind.key(), pin.id);
         let card = Card::new(SharedString::from(format!("pinned-{key}")), pin.label())
             .aria_description(i18n::lookup(pin.kind.key(), None))
-            .cover(pin.cover.clone().or_else(|| {
-                pinned_song
-                    .as_ref()
-                    .and_then(|track| track.cover.clone())
-            }))
+            .cover(
+                pin.cover
+                    .clone()
+                    .or_else(|| pinned_song.as_ref().and_then(|track| track.cover.clone())),
+            )
             .fallback(pin.kind.icon())
             .when(pin.kind.round(), Card::circle)
             .when(pin.kind == PinKind::Liked, Card::accent)

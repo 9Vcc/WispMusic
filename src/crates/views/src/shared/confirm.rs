@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, Global, Render, SharedString, Window, div};
 use i18n::t;
-use state::{Io, Outcome, Wisp, Toasts, equalizer_profile_label};
+use state::{Io, Outcome, Toasts, Wisp, equalizer_profile_label};
 use ui::{Button, Dismiss, FORM_CONTEXT, Modal, Submit};
 
 #[derive(Clone)]
@@ -33,7 +33,11 @@ impl Kind {
                 t!("equalizer-delete-confirm", name = &name)
             }
             Self::PluginRollback(ref name, ref version) => {
-                t!("settings-plugin-rollback-confirm", name = name, version = version)
+                t!(
+                    "settings-plugin-rollback-confirm",
+                    name = name,
+                    version = version
+                )
             }
             Self::PluginUninstall(ref name) => {
                 t!("settings-plugin-uninstall-confirm", name = name)

@@ -9,7 +9,7 @@ use music::equalizer::{Curve, MAX_FILTERS, PREAMP_RANGE, Preamp, Preset, TONE_RA
 use music::output::{DeviceOption, OutputId, Port};
 use router::Destination;
 use state::{
-    AppSettings, Equalizer, Outputs, RuleDevice, Signal, Wisp, Sound, equalizer_profile_label,
+    AppSettings, Equalizer, Outputs, RuleDevice, Signal, Sound, Wisp, equalizer_profile_label,
 };
 use ui::{
     ActiveTheme as _, Button, Dismiss, FORM_CONTEXT, Field, Form, Input, Lazy, MenuItem, Modal,

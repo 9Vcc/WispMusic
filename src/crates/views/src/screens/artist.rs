@@ -19,8 +19,8 @@ use ui::ActiveTheme as _;
 use ui::Listing as _;
 use ui::{
     Artwork, Button, Card, Deck, MIN_CONTENT, Modal, Mode, Pending, Picker, Pin, PinKind, Popovers,
-    Popup, Scrollbar, Scroller, TableDelegate, TableEvent, TableState, effects, scrolled,
-    snapped, spoken, table,
+    Popup, Scrollbar, Scroller, TableDelegate, TableEvent, TableState, effects, scrolled, snapped,
+    spoken, table,
 };
 
 use crate::chrome::tools;
@@ -169,11 +169,7 @@ impl ArtistView {
         let sorting = settings.read(cx).sorting(SECTION);
         let mode = settings.read(cx).view_or(SECTION, Mode::List);
         let columns = crate::shared::tracks::artist_columns(
-            Wisp::global(cx)
-                .session
-                .read(cx)
-                .capabilities()
-                .playcounts,
+            Wisp::global(cx).session.read(cx).capabilities().playcounts,
         );
         let scroll = scrollbar.read(cx).scroll().clone();
         let table = cx.new(|cx| {

@@ -49,8 +49,8 @@ pub fn install(window: &Window, resizable: bool) -> Size<Pixels> {
         use windows_sys::Win32::Foundation::RECT;
         use windows_sys::Win32::UI::Shell::SetWindowSubclass;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetClientRect, GetWindowRect, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+            GetClientRect, GetWindowRect, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SetWindowPos,
         };
         let scale = window.scale_factor();
         let content = window.viewport_size();
@@ -72,7 +72,12 @@ pub fn install(window: &Window, resizable: bool) -> Size<Pixels> {
             )
         };
         unsafe {
-            SetWindowSubclass(handle, Some(client_area), LEGACY_CLIENT_SUBCLASS, resizable as usize);
+            SetWindowSubclass(
+                handle,
+                Some(client_area),
+                LEGACY_CLIENT_SUBCLASS,
+                resizable as usize,
+            );
             // The frame was already measured without the subclass, so lay it out again.
             SetWindowPos(
                 handle,

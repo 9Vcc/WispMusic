@@ -80,14 +80,8 @@ impl SettingsView {
                                         cx,
                                     ),
                                     Err(error) => {
-                                        log::warn!(
-                                            "plugins: cannot toggle {slug}: {error:#}"
-                                        );
-                                        Toasts::show(
-                                            Outcome::Failed,
-                                            "toast-plugin-failed",
-                                            cx,
-                                        );
+                                        log::warn!("plugins: cannot toggle {slug}: {error:#}");
+                                        Toasts::show(Outcome::Failed, "toast-plugin-failed", cx);
                                     }
                                 }
                                 cx.notify();
@@ -143,29 +137,30 @@ impl SettingsView {
                         }),
                     );
                 }
-                actions.child(
-                    Button::new(SharedString::from(format!(
-                        "plugin-uninstall-{}",
-                        plugin.slug
-                    )))
-                    .ghost()
-                    .icon("icons/trash-2.svg")
-                    .size(theme.metrics.control_small)
-                    .px_0()
-                    .tooltip("settings-plugin-uninstall")
-                    .tint(theme.muted_foreground)
-                    .on_click({
-                        let plugins = Wisp::global(cx).plugins.clone();
-                        let slug = plugin.slug.clone();
-                        let name = SharedString::from(name);
-                        move |_, _, cx| {
-                            let plugins = plugins.clone();
-                            let slug = slug.clone();
-                            let name = name.clone();
-                            Confirm::ask(
-                                Kind::PluginUninstall(name),
-                                move |cx| {
-                                    plugins.update(cx, |plugins, cx| {
+                actions
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "plugin-uninstall-{}",
+                            plugin.slug
+                        )))
+                        .ghost()
+                        .icon("icons/trash-2.svg")
+                        .size(theme.metrics.control_small)
+                        .px_0()
+                        .tooltip("settings-plugin-uninstall")
+                        .tint(theme.muted_foreground)
+                        .on_click({
+                            let plugins = Wisp::global(cx).plugins.clone();
+                            let slug = plugin.slug.clone();
+                            let name = SharedString::from(name);
+                            move |_, _, cx| {
+                                let plugins = plugins.clone();
+                                let slug = slug.clone();
+                                let name = name.clone();
+                                Confirm::ask(
+                                    Kind::PluginUninstall(name),
+                                    move |cx| {
+                                        plugins.update(cx, |plugins, cx| {
                                         match plugins.uninstall(&slug, cx) {
                                             Ok(()) => Toasts::show(
                                                 Outcome::Done,
@@ -185,13 +180,13 @@ impl SettingsView {
                                         }
                                         cx.notify();
                                     });
-                                },
-                                cx,
-                            );
-                        }
-                    }),
-                )
-                .into_any_element()
+                                    },
+                                    cx,
+                                );
+                            }
+                        }),
+                    )
+                    .into_any_element()
             };
             rows.push(
                 div()
@@ -310,9 +305,11 @@ impl SettingsView {
                     .border_dashed()
                     .border_color(theme.border)
                     .bg(theme.secondary)
-                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                        this.land_plugin(paths, cx)
-                    }))
+                    .on_drop(
+                        cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                            this.land_plugin(paths, cx)
+                        }),
+                    )
                     .child(
                         Button::new("plugin-install-pick")
                             .icon("icons/plus.svg")

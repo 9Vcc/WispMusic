@@ -39,10 +39,7 @@ impl SidebarRight {
         // Private FM has no finite playlist to show. Hide its queue as soon as FM starts,
         // even if the panel was already open on it.
         cx.observe(&playback_for_fm, |this, _, cx| {
-            if this.open
-                && this.tab == SideTab::Queue
-                && this.playback.read(cx).fm_session()
-            {
+            if this.open && this.tab == SideTab::Queue && this.playback.read(cx).fm_session() {
                 this.close(cx);
             }
         })
@@ -144,8 +141,9 @@ impl SidebarRight {
     }
 
     fn remember(&self, cx: &mut Context<Self>) {
-        self.settings
-            .update(cx, |settings, cx| settings.set_sidebar_right_open(self.open, cx));
+        self.settings.update(cx, |settings, cx| {
+            settings.set_sidebar_right_open(self.open, cx)
+        });
     }
 
     fn persist(&self, cx: &mut Context<Self>) {
@@ -194,8 +192,7 @@ impl Render for SidebarRight {
                     .clone()
                     .cached(StyleRefinement::default().size_full())
                     .into_any_element(),
-            )
-            ;
+            );
         panel
             .with_animation(
                 gpui::SharedString::from(format!("sidebar-right-{open}")),

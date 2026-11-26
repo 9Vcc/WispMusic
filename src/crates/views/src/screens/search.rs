@@ -959,7 +959,9 @@ impl SearchView {
         let card = Card::new("best", title)
             .art(theme.metrics.cover * 0.45)
             .cover(cover(hit))
-            .when(matches!(hit, Hit::Song(track) if track.paid), |card| card.paid())
+            .when(matches!(hit, Hit::Song(track) if track.paid), |card| {
+                card.paid()
+            })
             .when(matches!(hit, Hit::Song(track) if !track.playable), |card| {
                 card.opacity(0.55)
             })

@@ -1,7 +1,7 @@
 use gpui::{App, ElementId, PathPromptOptions};
 use i18n::t;
 use music::Playlist;
-use state::{Outcome, Wisp, Toasts};
+use state::{Outcome, Toasts, Wisp};
 use ui::{Button, Vacancy};
 
 /// The extension an exported playlist is saved with, read as UTF-8 by every player.

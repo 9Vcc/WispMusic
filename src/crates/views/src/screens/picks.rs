@@ -17,9 +17,7 @@ use gpui::{
 use i18n::t;
 use music::Track;
 use state::{Home, Io, Playback, Queue, QueuePosition, Session, Wisp};
-use ui::{
-    ActiveTheme as _, Artwork, Button, Scrollbar, Scroller, SpinningArtwork, growing, mix,
-};
+use ui::{ActiveTheme as _, Artwork, Button, Scrollbar, Scroller, SpinningArtwork, growing, mix};
 
 /// 每日推荐还没有曲子时的空态：刷新入口就在这一页上。
 pub(crate) struct DailyEmpty {
@@ -596,11 +594,7 @@ impl RadioView {
             self.cover_key = Some(key);
             return;
         }
-        if !previous.is_empty()
-            && head_changed
-            && previous.len() > 1
-            && target.len() > 1
-        {
+        if !previous.is_empty() && head_changed && previous.len() > 1 && target.len() > 1 {
             self.covers_extra = target.last().cloned();
             self.covers_from = previous;
             self.cover_seq = self.cover_seq.wrapping_add(1);
@@ -953,8 +947,7 @@ impl RadioView {
     ) -> AnyElement {
         let theme = *cx.theme();
         let frosted = theme.transparent && ui::blurring(cx);
-        let height =
-            HEADER_H + HEADER_TOP - (HEADER_H + HEADER_TOP - HEADER_COLLAPSED) * progress;
+        let height = HEADER_H + HEADER_TOP - (HEADER_H + HEADER_TOP - HEADER_COLLAPSED) * progress;
         let header = self.header(progress, cx);
         div()
             .relative()

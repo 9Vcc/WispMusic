@@ -23,7 +23,10 @@ fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets the output")).join("themes.rs");
     fs::write(&out, source).expect("cannot write the theme registry");
     println!("cargo:rerun-if-changed=build.rs");
-    emit_updater(root.parent().expect("the assets root sits under the project"));
+    emit_updater(
+        root.parent()
+            .expect("the assets root sits under the project"),
+    );
 }
 
 /// The CNB update manifest URLs, compiled into the binary. The signing key is the Tauri
@@ -47,8 +50,8 @@ pub const NIGHTLY_ENDPOINT: &str = {:?};
 ",
         endpoint, nightly
     );
-    let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets the output"))
-        .join("updater_pub.rs");
+    let out =
+        PathBuf::from(env::var("OUT_DIR").expect("cargo sets the output")).join("updater_pub.rs");
     fs::write(out, source).expect("cannot write the updater endpoint");
 }
 

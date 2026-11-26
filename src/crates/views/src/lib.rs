@@ -9,18 +9,11 @@ mod shells;
 mod splash;
 
 pub use chrome::ToastStack;
-pub use chrome::tray_menu::{MENU_HEIGHT, MENU_WIDTH, TrayMenuClosed, TrayMenuView};
+pub use chrome::install_legacy_client_area;
 #[cfg(target_os = "macos")]
 pub use chrome::traffic_lights;
+pub use chrome::tray_menu::{MENU_HEIGHT, MENU_WIDTH, TrayMenuClosed, TrayMenuView};
 pub use root::Root;
-pub use chrome::install_legacy_client_area;
-pub use shells::desktop_lyrics::install as install_desktop_lyrics;
-/// Shows or closes the mini player from outside the interface, for the tray and the
-/// second-instance hand-off, which both work on the main window instead.
-pub use shells::mini::{dismiss as dismiss_mini, reveal as reveal_mini};
-/// Whether the typeface picker is probing a family right now, which is the only reason a panic
-/// is expected in this process. The panic hook reads it to stay quiet about those.
-pub use shared::typeface::probing as probing_typefaces;
 use screens::artist::ArtistView;
 use screens::detail::DetailView;
 use screens::equalizer::EqualizerView;
@@ -33,4 +26,11 @@ pub use screens::settings::SettingsView;
 use screens::song::SongView;
 use screens::user::UserView;
 use shared::adaptive::Adaptive;
+/// Whether the typeface picker is probing a family right now, which is the only reason a panic
+/// is expected in this process. The panic hook reads it to stay quiet about those.
+pub use shared::typeface::probing as probing_typefaces;
+pub use shells::desktop_lyrics::install as install_desktop_lyrics;
 use shells::fullscreen::FullscreenView;
+/// Shows or closes the mini player from outside the interface, for the tray and the
+/// second-instance hand-off, which both work on the main window instead.
+pub use shells::mini::{dismiss as dismiss_mini, reveal as reveal_mini};

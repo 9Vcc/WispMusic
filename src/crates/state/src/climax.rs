@@ -38,7 +38,8 @@ impl Climax {
         io: Io,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&playback, |this, _, cx| this.follow(cx)).detach();
+        cx.observe(&playback, |this, _, cx| this.follow(cx))
+            .detach();
         cx.observe(&session, |this, _, cx| this.follow(cx)).detach();
         let mut climax = Self {
             playback,

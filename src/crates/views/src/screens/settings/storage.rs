@@ -65,9 +65,9 @@ impl SettingsView {
                         .small()
                         .outline()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let old = this.playback.update(cx, |playback, cx| {
-                                playback.set_cache_dir(None, cx)
-                            });
+                            let old = this
+                                .playback
+                                .update(cx, |playback, cx| playback.set_cache_dir(None, cx));
                             if let Some(old) = old {
                                 Toasts::about(
                                     Outcome::Info,

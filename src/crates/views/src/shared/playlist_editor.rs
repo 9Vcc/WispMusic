@@ -5,7 +5,7 @@ use gpui::{
 };
 use i18n::t;
 use music::Playlist;
-use state::{Addition, CoverEdit, Leaving, Outcome, Shelf, Wisp, Toasts, cover_problem};
+use state::{Addition, CoverEdit, Leaving, Outcome, Shelf, Toasts, Wisp, cover_problem};
 use ui::{ActiveTheme as _, Artwork, Button, Modal, PinKind, TabBar};
 use ui::{Dismiss, FORM_CONTEXT, Field, Form, Input, Submit};
 

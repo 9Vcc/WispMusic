@@ -78,12 +78,9 @@ impl SettingsView {
             Some(CheckFeedback::Failed) => t!("settings-check-updates-failed"),
             None => t!("settings-check-updates-now-detail"),
         };
-        Row::new(
-            t!("settings-check-updates-now"),
-            button.into_any_element(),
-        )
-        .detail(detail)
-        .into_any_element()
+        Row::new(t!("settings-check-updates-now"), button.into_any_element())
+            .detail(detail)
+            .into_any_element()
     }
 
     pub(super) fn channel_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -174,7 +171,6 @@ impl SettingsView {
             .text_size(theme.text(Text::Small))
             .child(t!("settings-notice"))
     }
-
 }
 
 /// Notepad on Windows refuses a file that Wisp still writes to, so the button opens a copy.

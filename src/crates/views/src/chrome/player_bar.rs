@@ -702,9 +702,7 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
-                        .when(lyrics, |this| {
-                            this.child(self.desktop_lyrics_button(cx))
-                        })
+                        .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
                         .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
@@ -747,9 +745,7 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
-                        .when(lyrics, |this| {
-                            this.child(self.desktop_lyrics_button(cx))
-                        })
+                        .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
                         .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
@@ -765,9 +761,7 @@ impl Render for PlayerBar {
                 .child(buttons)
                 .child(play_mode(&self.playback, false, cx))
                 .child(self.sound(cx))
-                .when(lyrics, |this| {
-                    this.child(self.desktop_lyrics_button(cx))
-                })
+                .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
                 .child(self.mini_button())
                 .child(self.fullscreen_button(cx)),
             // The two sides share what the middle leaves them evenly, so the transport and the
@@ -822,9 +816,7 @@ impl Render for PlayerBar {
                             .child(buttons)
                             .child(play_mode(&self.playback, false, cx))
                             .child(self.sound(cx))
-                            .when(lyrics, |this| {
-                                this.child(self.desktop_lyrics_button(cx))
-                            })
+                            .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
                             .child(self.mini_button())
                             .child(self.fullscreen_button(cx)),
                     )

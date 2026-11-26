@@ -227,10 +227,7 @@ impl Plugins {
                                 installed += 1;
                                 known.retain(|(known, _)| known != &slug);
                                 known.push((slug, version));
-                                log::info!(
-                                    "plugins: installed {}",
-                                    package.display()
-                                );
+                                log::info!("plugins: installed {}", package.display());
                             }
                             Err(error) => {
                                 failed += 1;

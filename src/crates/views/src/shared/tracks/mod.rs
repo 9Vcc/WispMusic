@@ -16,9 +16,7 @@ use gpui::{
 };
 use music::{Arrival, Track};
 use router::Destination;
-use state::{
-    Detail, History, Library, LibraryPart, Origin, Playback, Reorder, Shelf, Wisp,
-};
+use state::{Detail, History, Library, LibraryPart, Origin, Playback, Reorder, Shelf, Wisp};
 use ui::{
     Button, Cell, ColumnSpec, Menu, Pending, Pin, ROW_GROUP, RowMoves, Scrollbar, TableSource,
     TableState,

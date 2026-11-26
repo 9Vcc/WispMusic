@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, SharedString, Task};
+use logic::station::{FM_AHEAD, RADIO_LOOKAHEAD, Station, dry_after, ran_dry, runs_low, unheard};
 use music::Repeat;
 use music::speed::SpeedControl;
 use music::vault::Vault;
@@ -12,7 +13,6 @@ use music::{
     Analyzer, Meter, MusicApi, PlaybackConfig, PlaybackEvent as BackendEvent, PlaybackEvents,
     PlaybackFactory, Player, Quality, Spectrum, Track, TrackSignal, Transcode,
 };
-use logic::station::{dry_after, ran_dry, runs_low, unheard, Station, FM_AHEAD, RADIO_LOOKAHEAD};
 use ui::{Pin, PinKind};
 
 /// Why the provider will play nothing more this session. Every later load fails the same way
@@ -240,7 +240,10 @@ impl LiveClock {
         };
         let elapsed = now.saturating_duration_since(since).as_secs_f64();
         let blend = (elapsed / self.settle).clamp(0., 1.);
-        shifted(self.base, elapsed * f64::from(self.speed) + self.correction * blend)
+        shifted(
+            self.base,
+            elapsed * f64::from(self.speed) + self.correction * blend,
+        )
     }
 }
 
@@ -736,8 +739,7 @@ impl Playback {
                         session.provider_slug().map(str::to_owned),
                     )
                 };
-                this.queue
-                    .update(cx, |queue, cx| queue.sync_provider(cx));
+                this.queue.update(cx, |queue, cx| queue.sync_provider(cx));
                 let switched = this.stream_slug.is_some() && this.stream_slug != slug;
                 if switched {
                     this.teardown(cx);
@@ -2049,13 +2051,11 @@ impl Playback {
             _ if self.sleep == Some(Sleep::EndOfTrack) => None,
             Repeat::One => None,
             // the end of the queue wraps to its first song, which `advance` rewinds to
-            Repeat::All if queue.ahead() == 0 => {
-                queue
-                    .past()
-                    .chain(queue.current())
-                    .find(|track| track.playable)
-                    .cloned()
-            }
+            Repeat::All if queue.ahead() == 0 => queue
+                .past()
+                .chain(queue.current())
+                .find(|track| track.playable)
+                .cloned(),
             _ => queue.upcoming().next().cloned(),
         };
         let Some(next) = next else {
@@ -2259,12 +2259,10 @@ impl Playback {
                     Ok((tracks, next)) => {
                         this.dry = dry_after(this.dry, tracks.len());
                         this.station_empty_at = tracks.is_empty().then(Instant::now);
-                        this.station =
-                            next.filter(|_| !ran_dry(this.dry))
-                                .map(|next| Station {
-                                    origin: origin.clone(),
-                                    next,
-                                });
+                        this.station = next.filter(|_| !ran_dry(this.dry)).map(|next| Station {
+                            origin: origin.clone(),
+                            next,
+                        });
                         let idle = this.track.is_none() && !this.queue.read(cx).has_next();
                         if tracks.is_empty() {
                             // Never feed an empty batch back through the queue: it would
@@ -3239,11 +3237,7 @@ impl Playback {
     }
 
     /// Runs `work` off the main thread and keeps the usage it answers.
-    fn measured(
-        &mut self,
-        cx: &mut Context<Self>,
-        work: impl FnOnce() -> u64 + Send + 'static,
-    ) {
+    fn measured(&mut self, cx: &mut Context<Self>, work: impl FnOnce() -> u64 + Send + 'static) {
         self.measuring = Some(cx.spawn(async move |this, cx| {
             let usage = cx.background_executor().spawn(async move { work() }).await;
             this.update(cx, |this, cx| {
@@ -3514,11 +3508,7 @@ impl Playback {
         };
         let (engine, events) = playback.start(config);
 
-        self.stream_slug = self
-            .session
-            .read(cx)
-            .provider_slug()
-            .map(str::to_owned);
+        self.stream_slug = self.session.read(cx).provider_slug().map(str::to_owned);
         self.listen(events, false, cx);
         self.engine = Some(engine);
         self.refused = None;

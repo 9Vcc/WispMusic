@@ -220,12 +220,7 @@ impl Render for GenreView {
 impl GenreView {
     /// The footer under a paged genre: it asks for the next page as soon as it scrolls into
     /// view, and the button stays as the manual retry when that page fails.
-    fn more_footer(
-        &self,
-        more: bool,
-        loading: bool,
-        failed: bool,
-    ) -> AnyElement {
+    fn more_footer(&self, more: bool, loading: bool, failed: bool) -> AnyElement {
         let detail = self.detail.clone();
         let auto = detail.clone();
         let label = match (loading, failed) {

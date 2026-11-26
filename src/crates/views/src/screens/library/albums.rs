@@ -6,9 +6,7 @@ use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis, RangeAxis, Unit};
 use gpui::{AnyElement, App, Entity, SharedString, TextAlign};
 use i18n::t;
 use music::Album;
-use state::{
-    Library, LibraryPart, LibraryState, Origin, Playback, Shelf,
-};
+use state::{Library, LibraryPart, LibraryState, Origin, Playback, Shelf};
 use ui::rank::{HANDY, NICE, SPARE, USEFUL};
 use ui::{Cell, ColumnSpec, Menu, Pin, Sort, TableSource, Width};
 

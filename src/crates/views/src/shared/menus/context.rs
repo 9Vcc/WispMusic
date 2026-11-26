@@ -6,8 +6,8 @@ use i18n::t;
 use music::{Album, GenreItem, MediaKind, Playlist, SavedArtist, Track};
 use router::{Destination, navigate};
 use state::{
-    Addition, Detail, History, Io, Library, Origin, Outcome, Playback, QueuePlacement, Shelf, Wisp,
-    Toasts,
+    Addition, Detail, History, Io, Library, Origin, Outcome, Playback, QueuePlacement, Shelf,
+    Toasts, Wisp,
 };
 use ui::{
     ActiveTheme as _, Button, Menu, MenuItem, MenuSearch, Pin, PinKind, Scrollbar, SubmenuState,
@@ -734,12 +734,7 @@ fn heart_tile(saved: bool) -> Tile {
 
 /// The tiles of a track menu. Several tracks are favorited unless every one of them is already,
 /// in which case they are all taken out, and the library tile works the same way.
-fn track_tiles(
-    tracks: &[Track],
-    shelf: Shelf,
-    pin: Option<Pin>,
-    cx: &App,
-) -> Vec<Tile> {
+fn track_tiles(tracks: &[Track], shelf: Shelf, pin: Option<Pin>, cx: &App) -> Vec<Tile> {
     let wisp = Wisp::global(cx);
     let library = wisp.library.clone();
     let editable = wisp.session.read(cx).shape_of(shelf).editable();
@@ -816,14 +811,13 @@ fn album_tiles(album: &Album, cx: &App) -> Vec<Tile> {
     let library = wisp.library.clone();
     let state = library.read(cx);
     let saved = state.saved_album(&album.id);
-    let heart = heart_tile(saved)
-        .when(!state.pending_album(&album.id), |tile| {
-            let album = album.clone();
-            tile.on_click(move |_, cx| {
-                let library = Wisp::global(cx).library.clone();
-                library.update(cx, |library, cx| library.toggle_album(album.clone(), cx));
-            })
-        });
+    let heart = heart_tile(saved).when(!state.pending_album(&album.id), |tile| {
+        let album = album.clone();
+        tile.on_click(move |_, cx| {
+            let library = Wisp::global(cx).library.clone();
+            library.update(cx, |library, cx| library.toggle_album(album.clone(), cx));
+        })
+    });
 
     let editable = wisp
         .session

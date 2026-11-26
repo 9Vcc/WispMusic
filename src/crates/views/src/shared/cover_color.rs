@@ -27,16 +27,18 @@ mod tests {
 
     #[test]
     fn a_grey_cover_names_no_accent() {
-        assert!(accent(
-            Hsla {
-                h: 0.2,
-                s: 0.02,
-                l: 0.5,
-                a: 1.,
-            },
-            true
-        )
-        .is_none());
+        assert!(
+            accent(
+                Hsla {
+                    h: 0.2,
+                    s: 0.02,
+                    l: 0.5,
+                    a: 1.,
+                },
+                true
+            )
+            .is_none()
+        );
     }
 
     #[test]

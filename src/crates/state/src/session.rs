@@ -572,7 +572,8 @@ impl Session {
             .map(|provider| provider.slug())
             .collect();
         let present: HashSet<&str> = providers.iter().map(|provider| provider.slug()).collect();
-        self.sessions.retain(|slug, _| present.contains(slug.as_str()));
+        self.sessions
+            .retain(|slug, _| present.contains(slug.as_str()));
         self.warming.retain(|slug| present.contains(slug.as_str()));
         let guest_added = providers.iter().position(|provider| {
             !previous.contains(&provider.slug())
@@ -1462,7 +1463,10 @@ impl Session {
     fn reconnected(&mut self, session: ProviderSession, cx: &mut Context<Self>) {
         self.attempt = 0;
         self.catalog = Some(Arc::new(CatalogSource::new(session.api.clone())));
-        if let Some(slug) = self.active.and_then(|active| self.providers.get(active)).map(|p| p.slug())
+        if let Some(slug) = self
+            .active
+            .and_then(|active| self.providers.get(active))
+            .map(|p| p.slug())
         {
             self.sessions.insert(
                 slug.to_owned(),

@@ -456,10 +456,9 @@ impl GenreDetails {
         let io = self.io.clone();
         self.more_task = Some(cx.spawn(async move |this, cx| {
             let page_id = id.clone();
-            let loaded = join(io.spawn(async move {
-                catalog.genre_page(&page_id, next, GENRE_PAGE).await
-            }))
-            .await;
+            let loaded =
+                join(io.spawn(async move { catalog.genre_page(&page_id, next, GENRE_PAGE).await }))
+                    .await;
             this.update(cx, |this, cx| {
                 if this.id.as_deref() != Some(id.as_str()) || this.synthetic {
                     return;
@@ -479,7 +478,10 @@ impl GenreDetails {
     fn append(&mut self, page: GenreDetail, cx: &mut Context<Self>) {
         let mut sections = (*self.sections).clone();
         for mut incoming in page.sections {
-            match sections.iter_mut().find(|section| section.title == incoming.title) {
+            match sections
+                .iter_mut()
+                .find(|section| section.title == incoming.title)
+            {
                 Some(existing) => existing.items.append(&mut incoming.items),
                 None => sections.push(incoming),
             }

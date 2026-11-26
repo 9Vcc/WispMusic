@@ -103,7 +103,12 @@ impl SettingsView {
             .unwrap_or_else(|| t!("settings-output-idle"));
         let rate_widths = rates
             .iter()
-            .map(|rate| t!("settings-sample-rate-value", khz = f64::from(*rate) / 1_000.))
+            .map(|rate| {
+                t!(
+                    "settings-sample-rate-value",
+                    khz = f64::from(*rate) / 1_000.
+                )
+            })
             .chain(std::iter::once(t!("settings-output-idle")));
         let rate = ui::spoken_steady("sample-rate-value", rate, rate_widths);
         let stepper = current

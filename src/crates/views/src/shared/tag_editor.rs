@@ -3,7 +3,7 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, Global, Render, SharedString, Window, div};
 use i18n::t;
 use music::{Track, TrackTags};
-use state::{Io, Wisp, TagState, Tags};
+use state::{Io, TagState, Tags, Wisp};
 use ui::{
     ActiveTheme as _, Button, Dismiss, FORM_CONTEXT, Form, Input, Modal, NextField, Submit, TabBar,
     Text,

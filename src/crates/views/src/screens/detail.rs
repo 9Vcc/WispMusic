@@ -11,8 +11,8 @@ use i18n::t;
 use music::{Album, Arrival, Playlist, ReleaseType, Track};
 use router::{Destination, navigate};
 use state::{
-    AppSettings, Collection, Detail, LibraryEvent, Origin, Outcome, Playback, Reorder, Shelf, Wisp,
-    Toasts,
+    AppSettings, Collection, Detail, LibraryEvent, Origin, Outcome, Playback, Reorder, Shelf,
+    Toasts, Wisp,
 };
 use ui::{
     ActiveTheme as _, Button, InlineLink, InlineLinks, Menu, Picker, Popovers, Popup, SortAxis,

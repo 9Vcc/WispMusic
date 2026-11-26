@@ -309,9 +309,7 @@ impl TitleBar {
                                 if active {
                                     return;
                                 }
-                                session.update(cx, |session, cx| {
-                                    session.switch(slug.as_ref(), cx)
-                                });
+                                session.update(cx, |session, cx| session.switch(slug.as_ref(), cx));
                                 navigate(Destination::Home, cx);
                             }),
                     );
@@ -322,18 +320,15 @@ impl TitleBar {
                     false => t!("account-login-provider", provider = info.name.as_str()),
                 };
                 Some(
-                    MenuItem::new(
-                        SharedString::from(format!("account-login-{slug}")),
-                        label,
-                    )
-                    .icon(crate::shared::provider_logo(slug.as_ref(), cx))
-                    .on_click(move |_, _, cx| {
-                        let method = method.clone();
-                        let slug = slug.clone();
-                        session.update(cx, |session, cx| {
-                            session.sign_in(slug.as_ref(), method, cx)
-                        });
-                    }),
+                    MenuItem::new(SharedString::from(format!("account-login-{slug}")), label)
+                        .icon(crate::shared::provider_logo(slug.as_ref(), cx))
+                        .on_click(move |_, _, cx| {
+                            let method = method.clone();
+                            let slug = slug.clone();
+                            session.update(cx, |session, cx| {
+                                session.sign_in(slug.as_ref(), method, cx)
+                            });
+                        }),
                 )
             })
             .collect();

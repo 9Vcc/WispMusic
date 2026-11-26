@@ -3842,11 +3842,7 @@ impl Library {
                             if let Some(total) = total {
                                 held.expected.insert(part, total);
                             }
-                            extend(
-                                &mut held.state,
-                                wrap(Ok(items)),
-                                held.shape.is_catalog(),
-                            );
+                            extend(&mut held.state, wrap(Ok(items)), held.shape.is_catalog());
                             cx.notify();
                             None
                         });

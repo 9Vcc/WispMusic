@@ -14,8 +14,8 @@ use music::GenreItem;
 use router::{Destination, navigate};
 use state::{Home, Network, Origin, Playback, Wisp};
 use ui::{
-    ActiveTheme as _, Button, GLASS_BLUR, Lazy, Mode, Perch, Popup, Scrollbar, Scroller,
-    Springs, Sprung, Tipped, blurring, growing, mix,
+    ActiveTheme as _, Button, GLASS_BLUR, Lazy, Mode, Perch, Popup, Scrollbar, Scroller, Springs,
+    Sprung, Tipped, blurring, growing, mix,
 };
 
 use crate::shared::cells;
@@ -93,8 +93,8 @@ fn play_button(
         "daily-play" => Box::new(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             let playback = this.playback.clone();
-            let origin = Origin::playlist("daily-recommend".to_owned())
-                .named("每日推荐".to_owned());
+            let origin =
+                Origin::playlist("daily-recommend".to_owned()).named("每日推荐".to_owned());
             if playback.read(cx).engaged(&origin, cx) {
                 playback.update(cx, |playback, cx| playback.toggle_play(cx));
                 return;
@@ -165,7 +165,11 @@ impl HomeView {
         let session = Wisp::global(cx).session.clone();
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
 
-        let shelves = cx.new(|_| Shelves::new("home-shelf", me, playback.clone()).spaced(px(20.)).home());
+        let shelves = cx.new(|_| {
+            Shelves::new("home-shelf", me, playback.clone())
+                .spaced(px(20.))
+                .home()
+        });
         cx.observe(&shelves, |_, _, cx| cx.notify()).detach();
 
         let current_playback = playback_status(&playback, cx);
@@ -310,21 +314,16 @@ impl HomeView {
         // the re-render that carries the new slot; a spring the view keeps across frames
         // cannot lose the slide to a re-render at all.
         let thumb = active.map(|slot| {
-            let slide = window.use_keyed_state(
-                "home-provider-slide",
+            let slide = window.use_keyed_state("home-provider-slide", cx, |_, _| {
+                RefCell::new(Sprung::at(slot as f32))
+            });
+            let at = slide.read(cx).borrow_mut().follow(
+                slot as f32,
+                Springs::RESPONSIVE,
+                SWITCH_REST,
+                window,
                 cx,
-                |_, _| RefCell::new(Sprung::at(slot as f32)),
             );
-            let at = slide
-                .read(cx)
-                .borrow_mut()
-                .follow(
-                    slot as f32,
-                    Springs::RESPONSIVE,
-                    SWITCH_REST,
-                    window,
-                    cx,
-                );
             div()
                 .absolute()
                 .top(px(SWITCH_PAD))
@@ -363,8 +362,7 @@ impl HomeView {
                             // below redraws once with the new target and the spring carries
                             // the thumb there. A switch that is refused changes nothing, and
                             // the thumb stays put.
-                            session
-                                .update(cx, |session, cx| session.switch(slug.as_ref(), cx));
+                            session.update(cx, |session, cx| session.switch(slug.as_ref(), cx));
                             cx.notify();
                         })),
                 )
@@ -445,9 +443,7 @@ impl HomeView {
                 // 半透明的色块，桌面上的图标会直接穿在文字后面。
                 .when(frosted, |this| this.backdrop_blur(ui::GLASS_BLUR))
                 .cursor_pointer()
-                .on_click(cx.listener(|_, _, _, cx| {
-                    navigate(Destination::DailyRecommend, cx)
-                }))
+                .on_click(cx.listener(|_, _, _, cx| navigate(Destination::DailyRecommend, cx)))
                 .on_hover(cx.listener(|this, over: &bool, _, cx| {
                     this.hovered_card = over.then_some("daily");
                     cx.notify();
@@ -526,9 +522,7 @@ impl HomeView {
                 .bg(resting)
                 .when(frosted, |this| this.backdrop_blur(ui::GLASS_BLUR))
                 .cursor_pointer()
-                .on_click(cx.listener(|_, _, _, cx| {
-                    navigate(Destination::Radio, cx)
-                }))
+                .on_click(cx.listener(|_, _, _, cx| navigate(Destination::Radio, cx)))
                 .on_hover(cx.listener(|this, over: &bool, _, cx| {
                     this.hovered_card = over.then_some("fm");
                     cx.notify();

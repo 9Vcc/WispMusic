@@ -1,11 +1,9 @@
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{
-    Context, IntoElement, MouseButton, Render, Window, WindowControlArea, canvas, div, px,
-};
+use gpui::{Context, IntoElement, MouseButton, Render, Window, WindowControlArea, canvas, div, px};
 
-use crate::brand::{FADE_END, FADE_START, TOTAL, MarkPalette, paint_mark};
+use crate::brand::{FADE_END, FADE_START, MarkPalette, TOTAL, paint_mark};
 use ui::ActiveTheme as _;
 
 /// How early the hidden UI starts building before the cross-fade, so its first layout is not a

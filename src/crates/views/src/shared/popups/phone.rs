@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Entity, IntoElement, RenderOnce, SharedString, Window, div, px, prelude::*};
+use gpui::{App, Entity, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px};
 use i18n::t;
 use ui::{ActiveTheme as _, Button, Field, Form, Input, Modal, Text};
 
@@ -65,7 +65,10 @@ impl PhonePrompt {
     }
 
     /// 点「发送验证码」时通知调用方（由它把手机号交给 provider）。
-    pub(crate) fn on_send(mut self, handler: impl Fn(&(), &mut Window, &mut App) + 'static) -> Self {
+    pub(crate) fn on_send(
+        mut self,
+        handler: impl Fn(&(), &mut Window, &mut App) + 'static,
+    ) -> Self {
         self.send = Some(Rc::new(handler));
         self
     }

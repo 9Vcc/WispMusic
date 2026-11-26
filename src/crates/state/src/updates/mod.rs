@@ -359,8 +359,7 @@ fn platform_key() -> Option<&'static str> {
 /// The Tauri updater's minisign public key, the same one the archived Tauri clients trust. It
 /// is the base64 text of the `.pub` file, so a GPUI build can verify the very signatures that
 /// update a Tauri install to this one.
-const TAURI_PUBLIC_KEY: &str =
-    "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxOUQ4M0Y3REU3QzE3MEMKUldRTUYzemU5NE9kSWZ2ekcrNHpBRysxZFpuU0FVL2w0NlNCZm1ucnpIUTJYMlNQUXliejlZUDYK";
+const TAURI_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxOUQ4M0Y3REU3QzE3MEMKUldRTUYzemU5NE9kSWZ2ekcrNHpBRysxZFpuU0FVL2w0NlNCZm1ucnpIUTJYMlNQUXliejlZUDYK";
 
 fn public_key() -> Option<&'static minisign_verify::PublicKey> {
     static KEY: std::sync::OnceLock<Option<minisign_verify::PublicKey>> =
@@ -371,10 +370,7 @@ fn public_key() -> Option<&'static minisign_verify::PublicKey> {
             .decode(TAURI_PUBLIC_KEY)
             .ok()?;
         let text = std::str::from_utf8(&text).ok()?;
-        let key_line = text
-            .lines()
-            .find(|line| line.starts_with("RWQ"))?
-            .trim();
+        let key_line = text.lines().find(|line| line.starts_with("RWQ"))?.trim();
         minisign_verify::PublicKey::from_base64(key_line).ok()
     })
     .as_ref()
@@ -387,7 +383,9 @@ fn decode_signature(value: &str) -> Option<String> {
     if value.starts_with("untrusted comment") {
         return Some(value.to_owned());
     }
-    let raw = base64::engine::general_purpose::STANDARD.decode(value).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .ok()?;
     let raw = String::from_utf8(raw).ok()?;
     raw.starts_with("untrusted comment").then_some(raw)
 }
@@ -551,7 +549,10 @@ mod tests {
         }"#;
         let manifest: ManifestJson = serde_json::from_str(json).expect("a manifest");
         assert_eq!(manifest.version, "0.2.1");
-        let platform = manifest.platforms.get("windows-x86_64").expect("a platform");
+        let platform = manifest
+            .platforms
+            .get("windows-x86_64")
+            .expect("a platform");
         assert_eq!(platform.sha256, "ABC123");
         assert!(platform.url.ends_with("-setup.exe"));
     }

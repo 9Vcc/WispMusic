@@ -6,8 +6,8 @@ use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
     AnimationExt as _, AnyElement, App, ClipboardItem, Context, Entity, FontWeight, Hsla,
-    IntoElement, Pixels, Point, Render, SharedString, Task, Window, div, hsla, point, px,
-    relative, rgb, svg,
+    IntoElement, Pixels, Point, Render, SharedString, Task, Window, div, hsla, point, px, relative,
+    rgb, svg,
 };
 use i18n::t;
 use music::{AccountChoices, SignIn, SignInPrompt};
@@ -671,7 +671,12 @@ impl LoginView {
     }
 
     /// [wisp] 酷狗登录页：EchoMusic 式的一张卡，内容随底部方式切换，不列出其他服务。
-    fn provider_page(&mut self, slug: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn provider_page(
+        &mut self,
+        slug: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let _ = window;
         let theme = *cx.theme();
@@ -847,17 +852,12 @@ impl LoginView {
     ) -> AnyElement {
         let theme = *cx.theme();
         let count = methods.len().max(1) as f32;
-        let seg_w = (LOGIN_METHOD_TRACK_W
-            - 2. * LOGIN_METHOD_PAD
-            - (count - 1.) * LOGIN_METHOD_GAP)
-            / count;
+        let seg_w =
+            (LOGIN_METHOD_TRACK_W - 2. * LOGIN_METHOD_PAD - (count - 1.) * LOGIN_METHOD_GAP)
+                / count;
         let from_left = LOGIN_METHOD_PAD + from as f32 * (seg_w + LOGIN_METHOD_GAP);
         let to_left = LOGIN_METHOD_PAD + active as f32 * (seg_w + LOGIN_METHOD_GAP);
-        let accent = provider_method_accent(
-            slug,
-            methods.get(active).unwrap_or(&SignIn::Qr),
-            cx,
-        );
+        let accent = provider_method_accent(slug, methods.get(active).unwrap_or(&SignIn::Qr), cx);
         let bar = div()
             .absolute()
             .top(px(LOGIN_METHOD_PAD))
@@ -870,7 +870,10 @@ impl LoginView {
             .border_color(accent.opacity(0.42));
         let indicator = if ui::motion::animates(cx) && from != active {
             bar.with_animation(
-                SharedString::from(format!("login-method-slide-{slug}-{}", self.login_slide_seq)),
+                SharedString::from(format!(
+                    "login-method-slide-{slug}-{}",
+                    self.login_slide_seq
+                )),
                 ui::motion::Motion::Base.animation(),
                 move |bar, t| bar.left(px(from_left + (to_left - from_left) * t)),
             )
@@ -909,15 +912,11 @@ impl LoginView {
         let theme = *cx.theme();
         let selected = index == active;
         let (label, icon) = match method {
-            SignIn::Qr if slug == "kugou" => (
-                t!("login-kugou-method-kugou"),
-                "icons/login-qrcode.svg",
-            ),
+            SignIn::Qr if slug == "kugou" => {
+                (t!("login-kugou-method-kugou"), "icons/login-qrcode.svg")
+            }
             SignIn::Qr => (t!("login-sign-in-qr"), "icons/login-qrcode.svg"),
-            SignIn::Phone => (
-                t!("login-kugou-method-phone"),
-                "icons/login-phone.svg",
-            ),
+            SignIn::Phone => (t!("login-kugou-method-phone"), "icons/login-phone.svg"),
             SignIn::Qq => (t!("login-kugou-method-qq"), "icons/brand-qq.svg"),
             _ => (t!("login-kugou-method-wechat"), "icons/brand-wechat.svg"),
         };
@@ -995,9 +994,8 @@ impl LoginView {
         self.reset_phone(cx);
         self.reset_password(cx);
         let slug = slug.to_owned();
-        self.session.update(cx, |session, cx| {
-            session.switch_sign_in(&slug, method, cx)
-        });
+        self.session
+            .update(cx, |session, cx| session.switch_sign_in(&slug, method, cx));
     }
 
     fn provider_content(
@@ -1111,7 +1109,9 @@ impl LoginView {
             (false, SignIn::WeChat, _) => t!("login-kugou-qr-wechat").to_string().into(),
             (false, _, "kugou") => t!("login-kugou-qr-kugou").to_string().into(),
             (false, _, "netease") => t!("login-qr-scan").to_string().into(),
-            _ => t!("login-provider-qr-scan", provider = name).to_string().into(),
+            _ => t!("login-provider-qr-scan", provider = name)
+                .to_string()
+                .into(),
         }
     }
 
@@ -1496,4 +1496,3 @@ fn offered(method: &SignIn) -> bool {
             | SignIn::WeChat
     )
 }
-

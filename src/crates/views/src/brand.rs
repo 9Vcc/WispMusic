@@ -139,10 +139,7 @@ fn draw_arc(
     let mut points = Vec::with_capacity(steps + 1);
     for step in 0..=steps {
         let angle = (from_deg + (to_deg - from_deg) * step as f32 / steps as f32).to_radians();
-        points.push(at(
-            512. + 340. * angle.cos(),
-            512. + 340. * angle.sin(),
-        ));
+        points.push(at(512. + 340. * angle.cos(), 512. + 340. * angle.sin()));
     }
     stroke(window, &points, px(7. * scale), color);
     dot(window, points[0], px(3.5 * scale), color);
@@ -257,7 +254,12 @@ fn draw_pip(
     let angle = angle_deg.to_radians();
     let x = 512. + 340. * angle.cos();
     let y = 512. + 340. * angle.sin();
-    dot(window, at(x, y), px(24. * radius_scale * scale), faded(tint, alpha));
+    dot(
+        window,
+        at(x, y),
+        px(24. * radius_scale * scale),
+        faded(tint, alpha),
+    );
 }
 
 pub(crate) fn paint_mark(
@@ -289,14 +291,7 @@ pub(crate) fn paint_mark(
     let p = phase(t, 0.18, 1.95);
     let pip_deg = RING_FROM + (PIP_ANGLE - RING_FROM) * p;
     if p > 0.001 {
-        draw_arc(
-            window,
-            &at,
-            scale,
-            RING_FROM,
-            pip_deg,
-            palette.ring,
-        );
+        draw_arc(window, &at, scale, RING_FROM, pip_deg, palette.ring);
     }
     let rest = phase(t, 1.95, 2.40);
     if rest > 0.001 {
