@@ -139,7 +139,11 @@ fn open(cx: &mut App) {
     let settings = Wisp::global(cx).settings.clone();
     let font = settings.read(cx).desktop_lyrics_font_size();
     let vertical = settings.read(cx).desktop_lyrics_vertical();
-    let height = design_height(font, vertical);
+    let saved = settings.read(cx).desktop_lyrics_size(vertical);
+    let (target_width, target_height) = match saved {
+        Some((width, height)) => (width, height),
+        None => (design_width(font, vertical), design_height(font, vertical)),
+    };
 
     let frame = host.0.update(cx, |_, window, _| window.bounds()).ok();
     let displays = cx.displays();
@@ -156,8 +160,8 @@ fn open(cx: &mut App) {
     let (origin, size) = match area {
         Some(area) => {
             let available = area.size.width.as_f32();
-            let width = design_width(font, vertical).min((available - 64.).max(320.));
-            let height = height.min(area.size.height.as_f32());
+            let width = target_width.min((available - 64.).max(320.));
+            let height = target_height.min(area.size.height.as_f32());
             let x = area.origin.x.as_f32() + (available - width) / 2.;
             let y = (area.origin.y.as_f32() + area.size.height.as_f32() - height - MARGIN)
                 .max(area.origin.y.as_f32());
@@ -165,9 +169,17 @@ fn open(cx: &mut App) {
         }
         None => (
             point(px(100.), px(100.)),
-            size(px(design_width(font, vertical)), px(height)),
+            size(px(target_width), px(target_height)),
         ),
     };
+    if saved.is_some() {
+        // The strip reopens at the size it was left at, so that size is what the saved font
+        // size describes from then on.
+        let font = window_font(size.width.as_f32(), size.height.as_f32(), vertical);
+        settings.update(cx, |settings, cx| {
+            settings.set_desktop_lyrics_font_size(font, cx)
+        });
+    }
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds { origin, size })),
@@ -634,20 +646,30 @@ fn window_font(width: f32, height: f32, vertical: bool) -> f32 {
 }
 
 /// Resizes the strip for a new font size, keeping its width in the horizontal layout and its
-/// height in the vertical one. Turning the strip re-fits both axes; the axis the lyrics do not
-/// read stays as the user dragged it.
-fn fit_to_shape(window: &mut Window, font: f32, vertical: bool, turned: bool, cx: &App) {
+/// height in the vertical one. Turning the strip brings back the size that direction was last
+/// left at, or designs both axes when it has none.
+fn fit_to_shape(
+    window: &mut Window,
+    font: f32,
+    vertical: bool,
+    turned: bool,
+    saved: Option<(f32, f32)>,
+    cx: &App,
+) -> (f32, f32) {
     let bounds = window.bounds();
-    let (width, height) = match (vertical, turned) {
-        (true, true) => (design_width(font, true), VERTICAL_HEIGHT),
-        (true, false) => (design_width(font, true), bounds.size.height.as_f32()),
-        (false, true) => (WIDTH, design_height(font, false)),
-        (false, false) => (bounds.size.width.as_f32(), design_height(font, false)),
+    let (width, height) = match (turned, saved) {
+        (true, Some(size)) => size,
+        (true, None) => (design_width(font, vertical), design_height(font, vertical)),
+        (false, _) => match vertical {
+            true => (design_width(font, true), bounds.size.height.as_f32()),
+            false => (bounds.size.width.as_f32(), design_height(font, false)),
+        },
     };
-    place_window(window, width, height, cx);
+    place_window(window, width, height, cx)
 }
 
-fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
+/// Places the strip, answering the size it settled on after the display clamped it.
+fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) -> (f32, f32) {
     let displays = cx.displays();
     let area = displays
         .iter()
@@ -665,7 +687,7 @@ fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
     if (bounds.size.width.as_f32() - width).abs() < 1.
         && (bounds.size.height.as_f32() - height).abs() < 1.
     {
-        return;
+        return (width, height);
     }
     let centre = bounds.center();
     let (mut x, mut y) = (
@@ -698,6 +720,7 @@ fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
         let _ = (x, y);
         window.resize(size(px(width), px(height)));
     }
+    (width, height)
 }
 
 #[derive(Clone, Copy)]
@@ -1084,15 +1107,14 @@ impl DesktopLyric {
             post_window_rect(window, final_rect);
         }
         let scale = window.scale_factor();
+        let width = final_rect.2 as f32 / scale;
+        let height = final_rect.3 as f32 / scale;
         let vertical = self.settings.read(cx).desktop_lyrics_vertical();
-        let font = window_font(
-            final_rect.2 as f32 / scale,
-            final_rect.3 as f32 / scale,
-            vertical,
-        );
+        let font = window_font(width, height, vertical);
         self.fit = Some((font, vertical));
         self.settings.update(cx, |settings, cx| {
-            settings.set_desktop_lyrics_font_size(font, cx)
+            settings.set_desktop_lyrics_font_size(font, cx);
+            settings.set_desktop_lyrics_size(vertical, width, height, cx);
         });
         cx.notify();
     }
@@ -2475,6 +2497,11 @@ impl Render for DesktopLyric {
             }
         }
         let bounds = window.bounds();
+        // The window opened at its remembered size, so the first frame only records the shape
+        // instead of fitting the strip again.
+        if self.fit.is_none() {
+            self.fit = Some((setting_font, vertical));
+        }
         let shape_changed = self.fit != Some((setting_font, vertical));
         // The window is the size control: its height, horizontal, or width, vertical, decides
         // the lyric size directly. A changed saved size or direction re-fits the window once,
@@ -2501,11 +2528,20 @@ impl Render for DesktopLyric {
         if shape_changed {
             let turned = self.fit.is_some_and(|(_, saved)| saved != vertical);
             self.fit = Some((setting_font, vertical));
-            cx.defer_in(window, move |_, window, cx| {
+            let saved = self.settings.read(cx).desktop_lyrics_size(vertical);
+            let settings = self.settings.clone();
+            cx.defer_in(window, move |this, window, cx| {
                 // The strip takes its new rect from the window loop, which reports the new
                 // size back through the bounds callback; a resize straight from here would
                 // re-enter the app from that very callback.
-                fit_to_shape(window, setting_font, vertical, turned, cx);
+                let (width, height) =
+                    fit_to_shape(window, setting_font, vertical, turned, saved, cx);
+                let font = window_font(width, height, vertical);
+                this.fit = Some((font, vertical));
+                settings.update(cx, |settings, cx| {
+                    settings.set_desktop_lyrics_size(vertical, width, height, cx);
+                    settings.set_desktop_lyrics_font_size(font, cx);
+                });
             });
         }
         let (track, position, playing) = {

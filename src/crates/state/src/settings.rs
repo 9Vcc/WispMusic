@@ -821,6 +821,9 @@ struct StateValues {
     sidebar_pin_reversed: bool,
     resume: Option<Resume>,
     window: Option<Frame>,
+    /// [wisp] 桌面歌词在横排、竖排下各自最后一次的窗口尺寸（宽、高，逻辑像素）。
+    desktop_lyrics_wide: Option<[f32; 2]>,
+    desktop_lyrics_tall: Option<[f32; 2]>,
     system_theme: String,
     /// The variant last chosen in each theme family, by family id.
     theme_variants: HashMap<String, String>,
@@ -866,6 +869,8 @@ impl Default for StateValues {
             sidebar_pin_reversed: false,
             resume: None,
             window: None,
+            desktop_lyrics_wide: None,
+            desktop_lyrics_tall: None,
             system_theme: ThemeKind::Dark.id().to_owned(),
             theme_variants: HashMap::new(),
             picks: Vec::new(),
@@ -1392,10 +1397,43 @@ impl AppSettings {
         self.values.desktop_lyrics_locked
     }
 
+    /// The size the desktop strip was last left at in this orientation, if it has one.
+    pub fn desktop_lyrics_size(&self, vertical: bool) -> Option<(f32, f32)> {
+        let [width, height] = match vertical {
+            true => self.state.desktop_lyrics_tall,
+            false => self.state.desktop_lyrics_wide,
+        }?;
+        (width.is_finite() && height.is_finite() && width > 0. && height > 0.)
+            .then_some((width, height))
+    }
+
+    /// Remembers the strip's size for this orientation, so turning it back brings the size up.
+    pub fn set_desktop_lyrics_size(
+        &mut self,
+        vertical: bool,
+        width: f32,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) {
+        if !width.is_finite() || !height.is_finite() || width <= 0. || height <= 0. {
+            return;
+        }
+        let slot = match vertical {
+            true => &mut self.state.desktop_lyrics_tall,
+            false => &mut self.state.desktop_lyrics_wide,
+        };
+        if *slot == Some([width, height]) {
+            return;
+        }
+        *slot = Some([width, height]);
+        self.schedule_state_save(cx);
+    }
+
     pub fn desktop_lyrics_stroke_scale(&self) -> f32 {
-        self.values
-            .desktop_lyrics_stroke_scale
-            .clamp(DESKTOP_LYRICS_STROKE_SCALE_MIN, DESKTOP_LYRICS_STROKE_SCALE_MAX)
+        self.values.desktop_lyrics_stroke_scale.clamp(
+            DESKTOP_LYRICS_STROKE_SCALE_MIN,
+            DESKTOP_LYRICS_STROKE_SCALE_MAX,
+        )
     }
 
     pub fn lyrics_cover_color(&self) -> bool {
@@ -2062,8 +2100,10 @@ impl AppSettings {
     }
 
     pub fn set_desktop_lyrics_stroke_scale(&mut self, scale: f32, cx: &mut Context<Self>) {
-        let scale = (scale.clamp(DESKTOP_LYRICS_STROKE_SCALE_MIN, DESKTOP_LYRICS_STROKE_SCALE_MAX)
-            * 100.)
+        let scale = (scale.clamp(
+            DESKTOP_LYRICS_STROKE_SCALE_MIN,
+            DESKTOP_LYRICS_STROKE_SCALE_MAX,
+        ) * 100.)
             .round()
             / 100.;
         if (self.values.desktop_lyrics_stroke_scale - scale).abs() < f32::EPSILON {
