@@ -805,6 +805,17 @@ impl Sprung {
         *self = Self::at(position);
     }
 
+    /// How fast the spring moves now, in units a second.
+    pub fn velocity(&self) -> f32 {
+        self.state.velocity
+    }
+
+    /// Sets how fast the spring moves, in units a second, keeping where it stands and its clock,
+    /// so a motion turned mid-flight carries on without a stalled frame.
+    pub fn set_velocity(&mut self, velocity: f32) {
+        self.state.velocity = velocity;
+    }
+
     /// Moves where the spring stands by `delta`, keeping its velocity.
     pub fn shift(&mut self, delta: f32) {
         self.state.position += delta;
