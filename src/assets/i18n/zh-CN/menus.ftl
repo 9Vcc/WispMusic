@@ -34,6 +34,7 @@ menu-play-tracks-last = { $count ->
    *[other] 最后播放 { $count } 首歌曲
 }
 menu-song-radio = 前往歌曲电台
+menu-start-radio = 开启电台
 menu-go-to-album = 前往专辑
 menu-go-to-artist = 前往歌手
 menu-view-details = 查看详情

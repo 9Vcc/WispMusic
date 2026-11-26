@@ -5,13 +5,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, SharedString, Task};
-use logic::station::{FM_AHEAD, RADIO_LOOKAHEAD, Station, dry_after, ran_dry, runs_low, unheard};
+use logic::station::{
+    self, FM_AHEAD, RADIO_LOOKAHEAD, Station, dry_after, ran_dry, runs_low, unheard,
+};
 use music::Repeat;
 use music::speed::SpeedControl;
 use music::vault::Vault;
 use music::{
     Analyzer, Meter, MusicApi, PlaybackConfig, PlaybackEvent as BackendEvent, PlaybackEvents,
-    PlaybackFactory, Player, Quality, Spectrum, Track, TrackSignal, Transcode,
+    PlaybackFactory, Player, Quality, RadioSeed, Spectrum, Track, TrackSignal, Transcode,
 };
 use ui::{Pin, PinKind};
 
@@ -395,7 +397,11 @@ pub enum Whence {
     Album,
     Playlist,
     Artist,
+    /// The radio of a track, whose id the origin carries.
     Radio,
+    /// The radio of a whole album, playlist or artist, whose id the origin carries.
+    #[serde(rename = "collection-radio")]
+    CollectionRadio(RadioSeed),
     Saved,
     Local,
 }
@@ -442,6 +448,10 @@ impl Origin {
         Self::of(Whence::Radio, id)
     }
 
+    pub fn collection_radio(seed: RadioSeed, id: impl Into<String>) -> Self {
+        Self::of(Whence::CollectionRadio(seed), id)
+    }
+
     pub fn saved() -> Self {
         Self::of(Whence::Saved, String::new())
     }
@@ -476,9 +486,38 @@ impl Origin {
                 tracks.retain(|track| track.playable);
                 return Ok((tracks, next));
             }
+            Whence::CollectionRadio(seed) => {
+                if !stations {
+                    anyhow::bail!("the provider seeds no radio")
+                }
+                let (mut tracks, next) =
+                    station::collection_radio(client, seed, &self.id, None).await?;
+                tracks.retain(|track| track.playable);
+                return Ok((tracks, next));
+            }
             Whence::Local => anyhow::bail!("local collections are supplied by the library"),
         };
         Ok((tracks, None))
+    }
+
+    /// The stretch of the station this origin names, from its start or from the continuation
+    /// `from`. Only a radio is a station, and a collection's radio is blended from the track
+    /// radios of its songs.
+    pub(crate) async fn station(
+        &self,
+        client: &dyn MusicApi,
+        stations: bool,
+        from: Option<&str>,
+    ) -> Result<(Vec<Track>, Option<String>)> {
+        match self.whence {
+            Whence::CollectionRadio(seed) => {
+                if !stations {
+                    anyhow::bail!("the provider seeds no radio")
+                }
+                station::collection_radio(client, seed, &self.id, from).await
+            }
+            _ => client.track_radio(&self.id, from).await,
+        }
     }
 
     fn of(whence: Whence, id: impl Into<String>) -> Self {
@@ -2186,6 +2225,8 @@ impl Playback {
             .as_ref()
             .map(|station| station.origin.clone())
             .unwrap_or_else(|| Origin::radio(String::new()));
+        let stations = self.stations(&origin.id, cx);
+        let station_origin = origin.clone();
         let Some(client) = self.client_for(&origin.id, cx) else {
             return;
         };
@@ -2196,7 +2237,6 @@ impl Playback {
             true => self.queue.read(cx).ahead_ids(),
             false => self.queue.read(cx).ids(),
         };
-        let seed = origin.id.clone();
         let token = station.as_ref().map(|station| station.next.clone());
         let remain = self.queue.read(cx).ahead().min(FM_REMAIN - 1) as u32;
         let fm_seed = self.fm_seed.clone();
@@ -2248,7 +2288,9 @@ impl Playback {
                     }
                     false => {
                         let token = token.unwrap_or_default();
-                        client.track_radio(&seed, Some(&token)).await?
+                        station_origin
+                            .station(&*client, stations, Some(&token))
+                            .await?
                     }
                 };
                 unheard(&mut tracks, &heard);

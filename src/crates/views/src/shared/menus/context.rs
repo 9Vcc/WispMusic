@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, ClipboardItem, Entity, Pixels, SharedString, Window, div, px};
 use i18n::t;
-use music::{Album, GenreItem, MediaKind, Playlist, SavedArtist, Track};
+use music::{Album, GenreItem, MediaKind, Playlist, RadioSeed, SavedArtist, Track};
 use router::{Destination, navigate};
 use state::{
     Addition, Detail, History, Io, Library, Origin, Outcome, Playback, QueuePlacement, Shelf,
@@ -397,7 +397,7 @@ impl ItemMenu {
             (false, true) => {
                 let track = track.clone();
                 Some(
-                    MenuItem::new("song-radio", t!("menu-song-radio"))
+                    MenuItem::new("song-radio", t!("menu-start-radio"))
                         .icon("icons/radio.svg")
                         .on_click(move |_, _, cx| {
                             let playback = Wisp::global(cx).playback.clone();
@@ -406,7 +406,7 @@ impl ItemMenu {
                 )
             }
             (false, false) => Some(
-                MenuItem::new("song-radio", t!("menu-song-radio"))
+                MenuItem::new("song-radio", t!("menu-start-radio"))
                     .icon("icons/radio.svg")
                     .disabled(),
             ),
@@ -878,7 +878,16 @@ pub(crate) fn album_menu(
                 cx,
             ),
             vec![add_to_playlist],
-            collection_queue_items(from, playback, cx),
+            radio_item(
+                RadioSeed::Album,
+                &album_id,
+                album.name.clone(),
+                &playback,
+                cx,
+            )
+            .into_iter()
+            .chain(collection_queue_items(from, playback, cx))
+            .collect(),
             vec![copy_link_item(
                 "copy-album-link",
                 MediaKind::Album,
@@ -950,6 +959,13 @@ pub(crate) fn artist_menu(
                     }),
             ]
             .into_iter()
+            .chain(radio_item(
+                RadioSeed::Artist,
+                &artist_id,
+                artist.name.clone(),
+                &playback,
+                cx,
+            ))
             .chain(collection_queue_items(queued_from, playback, cx))
             .collect(),
             vec![copy_link_item(
@@ -1001,6 +1017,8 @@ fn playlist_tiles(playlist: &Playlist, cx: &App) -> Vec<Tile> {
 /// queue, the owner's edits and the link.
 pub(crate) fn playlist_menu(playlist: Playlist, playback: Entity<Playback>, cx: &App) -> Menu {
     let from = Origin::playlist(playlist.id.clone()).named(playlist.name.clone());
+    let radio_id = playlist.id.clone();
+    let radio_name = playlist.name.clone();
     let copied = playlist.id.clone();
     let id = playlist.id.clone();
     let public = playlist.public;
@@ -1090,7 +1108,16 @@ pub(crate) fn playlist_menu(playlist: Playlist, playback: Entity<Playback>, cx: 
         item_shell("playlist-context-menu", tiles),
         vec![
             open_item(Destination::Playlist(id.into()), "menu-go-to-playlist", cx),
-            collection_queue_items(from, playback, cx),
+            radio_item(
+                RadioSeed::Playlist,
+                &radio_id,
+                radio_name,
+                &playback,
+                cx,
+            )
+            .into_iter()
+            .chain(collection_queue_items(from, playback, cx))
+            .collect(),
             actions,
             match imported {
                 true => Vec::new(),
@@ -1196,6 +1223,34 @@ fn open_key(kind: PinKind) -> &'static str {
 }
 
 /// The three queue placements share both their labels and their loading path.
+/// Starts the radio of the `seed` collection `id`, which goes on with songs like it. `None`
+/// where the provider holding it seeds no radio at all.
+fn radio_item(
+    seed: RadioSeed,
+    id: &str,
+    name: impl Into<SharedString>,
+    playback: &Entity<Playback>,
+    cx: &App,
+) -> Option<MenuItem> {
+    let stations = Wisp::global(cx)
+        .session
+        .read(cx)
+        .capabilities_of(Shelf::of(id))
+        .radio;
+    if !stations {
+        return None;
+    }
+    let origin = Origin::collection_radio(seed, id).named(name);
+    let playback = playback.clone();
+    Some(
+        MenuItem::new("start-radio", t!("menu-start-radio"))
+            .icon("icons/radio.svg")
+            .on_click(move |_, _, cx| {
+                playback.update(cx, |playback, cx| playback.play_origin(origin.clone(), cx));
+            }),
+    )
+}
+
 fn collection_queue_items(origin: Origin, playback: Entity<Playback>, cx: &App) -> Vec<MenuItem> {
     let ordered_queue = playback.read(cx).can_order_queue();
     [
@@ -1237,12 +1292,18 @@ fn collection_queue_items(origin: Origin, playback: Entity<Playback>, cx: &App) 
 
 fn transport_items(pin: &Pin, playback: Entity<Playback>, cx: &App) -> Vec<MenuItem> {
     let played = Origin::from(pin);
+    let seed = match pin.kind {
+        PinKind::Album => Some(RadioSeed::Album),
+        PinKind::Playlist => Some(RadioSeed::Playlist),
+        PinKind::Artist => Some(RadioSeed::Artist),
+        PinKind::Song | PinKind::Liked => None,
+    };
     let mut items = match pin.kind {
         PinKind::Song | PinKind::Artist => {
             let playing = playback.clone();
             let origin = played.clone();
             let (label, icon) = match pin.kind {
-                PinKind::Song => ("menu-song-radio", "icons/radio.svg"),
+                PinKind::Song => ("menu-start-radio", "icons/radio.svg"),
                 _ => ("menu-play-artist", "icons/play.svg"),
             };
             vec![
@@ -1256,6 +1317,9 @@ fn transport_items(pin: &Pin, playback: Entity<Playback>, cx: &App) -> Vec<MenuI
         _ => Vec::new(),
     };
     if pin.kind != PinKind::Song {
+        items.extend(seed.and_then(|seed| {
+            radio_item(seed, &pin.id, pin.title.clone(), &playback, cx)
+        }));
         items.extend(collection_queue_items(played, playback, cx));
     }
     items

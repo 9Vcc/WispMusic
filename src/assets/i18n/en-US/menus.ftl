@@ -83,6 +83,7 @@ menu-play-tracks-last = { $count ->
    *[other] Play { $count } tracks last
 }
 menu-song-radio = Go to song radio
+menu-start-radio = Start radio
 menu-go-to-album = Go to album
 menu-go-to-artist = Go to artist
 menu-go-to-playlist = Go to playlist

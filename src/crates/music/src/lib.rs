@@ -882,6 +882,15 @@ pub enum Shape {
     Catalog(Catalog),
 }
 
+/// A collection a radio can be started from, the way a track seeds one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RadioSeed {
+    Album,
+    Playlist,
+    Artist,
+}
+
 impl Shape {
     pub fn is_catalog(self) -> bool {
         matches!(self, Self::Catalog(_))
