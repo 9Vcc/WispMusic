@@ -1,7 +1,9 @@
 use gpui::prelude::*;
-use gpui::{AnimationExt as _, Context, Entity, Pixels, Render, StyleRefinement, Window, div, px};
+use gpui::{
+    AnimationExt as _, App, Context, Entity, Pixels, Render, StyleRefinement, Window, div, px,
+};
 use state::{AppSettings, Playback, Queue, SideTab, Wisp};
-use ui::{ActiveTheme as _, MIN_CONTENT, Panel, Room, Side};
+use ui::{ActiveTheme as _, Entrance, MIN_CONTENT, Panel, Room, Side, entering, veiled};
 
 use crate::chrome::Aside;
 use crate::chrome::sidebar_motion::SidebarMotion;
@@ -22,6 +24,9 @@ pub(crate) struct SidebarRight {
     open: bool,
     motion: SidebarMotion,
     tab: SideTab,
+    /// The entrance of the tab the open sidebar just switched to, the one a page makes as the
+    /// listener moves to it, while it plays.
+    entrance: Option<Entrance>,
 }
 
 impl SidebarRight {
@@ -49,6 +54,9 @@ impl SidebarRight {
                 return;
             }
             this.tab = SideTab::Queue;
+            if this.open {
+                this.enter(cx);
+            }
             this.aside
                 .update(cx, |aside, cx| aside.show(SideTab::Queue, cx));
             settings.update(cx, |settings, cx| {
@@ -66,6 +74,7 @@ impl SidebarRight {
             open,
             motion: SidebarMotion::settled(open),
             tab,
+            entrance: None,
         }
     }
 
@@ -127,6 +136,10 @@ impl SidebarRight {
                 .update(cx, |settings, cx| settings.set_sidebar_right_tab(tab, cx));
         }
         self.aside.update(cx, |aside, cx| aside.show(tab, cx));
+        // A sidebar that opens on the tab slides out with it instead.
+        if self.open && self.tab != tab {
+            self.enter(cx);
+        }
         self.tab = tab;
         self.open = true;
         self.remember(cx);
@@ -152,6 +165,25 @@ impl SidebarRight {
             settings.set_sidebar_right_width(width, cx)
         });
     }
+
+    /// Starts the entrance over the tab just switched to, unless the listener reduces motion.
+    fn enter(&mut self, cx: &App) {
+        self.entrance = (!cx.reduce_motion()).then(Entrance::start);
+    }
+
+    /// How much of the tab just switched to is still hidden, from 1 as the switch starts to 0
+    /// once its entrance ends. It asks for another frame while the entrance runs.
+    fn hidden(&mut self, window: &mut Window, cx: &App) -> f32 {
+        let Some(entrance) = self.entrance else {
+            return 0.;
+        };
+        if cx.reduce_motion() || !entrance.running() {
+            self.entrance = None;
+            return 0.;
+        }
+        window.request_animation_frame();
+        entrance.hidden()
+    }
 }
 
 impl Render for SidebarRight {
@@ -173,6 +205,20 @@ impl Render for SidebarRight {
         }
 
         let theme = *cx.theme();
+        // The tab switched to enters the way a page does: a scrim of the sidebar's own colour
+        // fades off it, so the queue and lyrics stay cached. A see-through window has no such
+        // colour, so there the tab carries the fade itself and is drawn uncached while it runs,
+        // since a cached view replays the opacity it was first painted with.
+        let hidden = self.hidden(window, cx);
+        let dissolving = theme.transparent && hidden > 0.;
+        let tab = match dissolving {
+            true => self.aside.clone().into_any_element(),
+            false => self
+                .aside
+                .clone()
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element(),
+        };
 
         let panel = Panel::new("sidebar-right", Side::Right, animated_width)
             .w(animated_width)
@@ -188,10 +234,31 @@ impl Render for SidebarRight {
             .when(!theme.transparent, |this| this.bg(theme.background))
             .border_color(theme.border)
             .child(
-                self.aside
-                    .clone()
-                    .cached(StyleRefinement::default().size_full())
-                    .into_any_element(),
+                div()
+                    .relative()
+                    .size_full()
+                    .min_h_0()
+                    .when(hidden > 0., |this| this.overflow_hidden())
+                    .child(
+                        div()
+                            .size_full()
+                            // At rest the tab is drawn bare, outside any layer, so whatever
+                            // frosts in it keeps its backdrop.
+                            .when(hidden > 0., |this| match theme.transparent {
+                                true => entering(this, hidden),
+                                false => veiled(this, hidden),
+                            })
+                            .child(tab),
+                    )
+                    .when(hidden > 0. && !theme.transparent, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .bg(theme.background)
+                                .opacity(hidden),
+                        )
+                    }),
             );
         panel
             .with_animation(
