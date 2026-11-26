@@ -39,6 +39,8 @@ pub enum Request {
     Queue(QueueCommand),
     /// Commands serving provider manipulation
     Provider(ProviderCommand),
+    /// Commands serving the listener's playlists. Stands for `wisp playlist ...`
+    Playlists(PlaylistCommand),
     /// A search on the current provider. Stands for `wisp search <query>`
     Search(SearchQuery),
     /// What plays, sent again every time it changes, until the command line hangs up. Stands
@@ -57,6 +59,31 @@ impl Request {
     pub fn streams(&self) -> bool {
         matches!(self, Self::Watch(_))
     }
+}
+
+/// Commands serving playlist management
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlaylistCommand {
+    /// Lists the playlists in the library. Stands for `wisp playlist list`
+    List,
+    /// Creates a playlist, optionally filled with track ids. Stands for
+    /// `wisp playlist create <name>`
+    Create {
+        name: String,
+        tracks: Vec<String>,
+        local: bool,
+    },
+    /// Renames a playlist. Stands for `wisp playlist rename <id> <name>`
+    Rename { id: String, name: String },
+    /// Sets whether a playlist is public. Stands for `wisp playlist public <id> on|off`
+    Visibility { id: String, public: bool },
+    /// Adds track ids to a playlist. Stands for `wisp playlist add <id> <track>...`
+    AddTracks { id: String, tracks: Vec<String> },
+    /// Drops track ids from a playlist. Stands for `wisp playlist remove <id> <track>...`
+    RemoveTracks { id: String, tracks: Vec<String> },
+    /// Deletes a playlist. Stands for `wisp playlist delete <id>`
+    Delete { id: String },
 }
 
 /// How `wisp watch` follows what plays.
@@ -139,9 +166,20 @@ pub enum QueueCommand {
     Add(Vec<Item>),
     /// Queues items right after the current track. Stands for `wisp play-next <items>`
     PlayNext(Vec<Item>),
+    /// Queues items at a 1-based position in the upcoming queue: 1 plays next. Stands for
+    /// `wisp add --at N <items>`
+    At { items: Vec<Item>, position: usize },
     /// Plays items at once, right after the current track so the rest of the queue follows
     /// them. Stands for `wisp play <items>`
     Play(Vec<Item>),
+    /// Removes the upcoming queue row with this occurrence id. Stands for
+    /// `wisp queue remove <uid>`
+    Remove { uid: String },
+    /// Moves an upcoming row to a gap in the upcoming queue. Stands for
+    /// `wisp queue move <uid> <gap>`
+    Move { uid: String, gap: usize },
+    /// Drops everything queued after the current track. Stands for `wisp queue clear`
+    ClearUpcoming,
 }
 
 /// Something to queue: a link of the current provider, or a file the running Wisp reads.

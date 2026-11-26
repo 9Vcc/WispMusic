@@ -236,6 +236,11 @@ impl Queue {
         self.report_removal(taken, cx);
     }
 
+    /// Drops everything queued after the current track, keeping the history and suggestions.
+    pub fn clear_upcoming(&mut self, cx: &mut Context<Self>) {
+        self.edit(cx, |order| order.clear_upcoming());
+    }
+
     fn report_removal(&mut self, taken: Taken, cx: &mut Context<Self>) {
         let live = self
             .removed

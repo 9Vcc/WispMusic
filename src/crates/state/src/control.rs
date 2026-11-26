@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cli::commands::{
-    self, Item, Kind, Level, PlaybackCommand, ProviderCommand, QueueCommand, Request, SearchQuery,
-    Switch, Time, Watch,
+    self, Item, Kind, Level, PlaybackCommand, PlaylistCommand, ProviderCommand, QueueCommand,
+    Request, SearchQuery, Switch, Time, Watch,
 };
 use cli::wire::{
     self, Current, Failure, LyricsStatus, QueueEntry, QueueEntryKind, QueueSnapshot, Reply, State,
@@ -19,8 +19,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::search::{self, Catalog};
 use crate::{
-    Hit, Io, Library, LibraryPart, LyricsState, Origin, Playback, PlaybackState, QueueKind,
-    QueuePlacement, QueuePosition, Repeat, Session, SessionState, Shelf, Whence, Wisp, join, noted,
+    Addition, Hit, Io, Library, LibraryPart, LyricsState, Origin, Playback, PlaybackState,
+    QueueKind, QueuePlacement, QueuePosition, Repeat, Session, SessionState, Shelf, Whence, Wisp,
+    join, noted,
 };
 
 /// What `wisp current` calls the provider of a local file, the slug `wisp providers` gives it.
@@ -188,6 +189,7 @@ impl Control {
                 .playback
                 .update(cx, |playback, cx| play(playback, command, cx)),
             Request::Queue(command) => return self.queue(command, reply, cx),
+            Request::Playlists(command) => return self.playlists(command, reply, cx),
             Request::Provider(command) => return self.provider(command, reply, cx),
             Request::Search(query) => return self.search(query, reply, cx),
             Request::Lyrics => Reply::Value(Value::Lyrics(lyrics(self.playback.read(cx), cx))),
@@ -274,7 +276,20 @@ impl Control {
             }
             QueueCommand::Add(items) => (items, Place::Queue(QueuePlacement::End)),
             QueueCommand::PlayNext(items) => (items, Place::Queue(QueuePlacement::Next)),
+            QueueCommand::At { items, position } => {
+                let Some(placement) = Self::placement_for(position) else {
+                    reply.send(Reply::Failed(Failure::Malformed)).ok();
+                    return;
+                };
+                (items, Place::Queue(placement))
+            }
             QueueCommand::Play(items) => (items, Place::Now),
+            edit @ (QueueCommand::Remove { .. }
+            | QueueCommand::Move { .. }
+            | QueueCommand::ClearUpcoming) => {
+                reply.send(self.edit_queue(edit, cx)).ok();
+                return;
+            }
         };
         if let [Item::Local { text, kind }] = items.as_slice() {
             let (text, kind) = (text.clone(), *kind);
@@ -303,6 +318,122 @@ impl Control {
             };
             reply.send(Reply::Failed(failure)).ok();
         });
+    }
+
+    /// Whether a 1-based queue position puts its items at the same place `play-next` does, or
+    /// in a gap after that many upcoming tracks.
+    fn placement_for(position: usize) -> Option<QueuePlacement> {
+        match position.checked_sub(1) {
+            None => None,
+            Some(0) => Some(QueuePlacement::Next),
+            Some(gap) => Some(QueuePlacement::Gap(gap)),
+        }
+    }
+
+    /// Applies a remove, move or clear to the local queue and says how it went.
+    fn edit_queue(&mut self, edit: QueueCommand, cx: &mut Context<Self>) -> Reply {
+        self.playback.update(cx, |playback, cx| {
+            let (done, uid) = match edit {
+                QueueCommand::Remove { uid } => (playback.remove_queued(&uid, cx), uid),
+                QueueCommand::Move { uid, gap } => (playback.move_queued(&uid, gap, cx), uid),
+                QueueCommand::ClearUpcoming => {
+                    playback.clear_queued(cx);
+                    return Reply::Done;
+                }
+                _ => return Reply::Failed(Failure::Unsupported),
+            };
+            match done {
+                true => Reply::Done,
+                false => Reply::Failed(Failure::UnknownQueueEntry(uid)),
+            }
+        })
+    }
+
+    /// Lists or changes the listener's playlists. A change answers once Wisp has accepted it;
+    /// the app posts its own result when the provider finishes, as it does for edits in the UI.
+    fn playlists(
+        &mut self,
+        command: PlaylistCommand,
+        reply: oneshot::Sender<Reply>,
+        cx: &mut Context<Self>,
+    ) {
+        if let PlaylistCommand::List = command {
+            let library = self.library.read(cx);
+            let items = [Shelf::Streaming, Shelf::Local]
+                .into_iter()
+                .flat_map(|shelf| library.state(shelf).playlists())
+                .map(|playlist| wire::PlaylistSummary {
+                    id: playlist.id.clone(),
+                    name: playlist.name.clone(),
+                    public: playlist.public,
+                    owned: playlist.owned,
+                })
+                .collect();
+            reply.send(Reply::Value(Value::Playlists(items))).ok();
+            return;
+        }
+
+        let (shelf, id) = match &command {
+            PlaylistCommand::Create { local, .. } => (
+                match local {
+                    true => Shelf::Local,
+                    false => Shelf::Streaming,
+                },
+                None,
+            ),
+            PlaylistCommand::Rename { id, .. }
+            | PlaylistCommand::Visibility { id, .. }
+            | PlaylistCommand::Delete { id } => (Shelf::of(id), Some(id.clone())),
+            PlaylistCommand::AddTracks { id, tracks }
+            | PlaylistCommand::RemoveTracks { id, tracks } => {
+                if tracks.is_empty() {
+                    reply.send(Reply::Failed(Failure::Malformed)).ok();
+                    return;
+                }
+                if self
+                    .library
+                    .read(cx)
+                    .playlist(id)
+                    .is_some_and(|playlist| playlist.read_only)
+                {
+                    reply.send(Reply::Failed(Failure::ReadOnlyPlaylist)).ok();
+                    return;
+                }
+                (Shelf::of(id), Some(id.clone()))
+            }
+            PlaylistCommand::List => unreachable!(),
+        };
+
+        let blocked = {
+            let library = self.library.read(cx);
+            library.playlist_busy() || id.as_deref().is_some_and(|id| library.reordering(id))
+        };
+        let signed_in = self.session.read(cx).client_of(shelf).is_some();
+        let answer = if blocked {
+            Reply::Failed(Failure::Busy)
+        } else if signed_in {
+            self.library.update(cx, |library, cx| match command {
+                PlaylistCommand::Create { name, tracks, .. } => {
+                    library.create_playlist(name, Addition::Tracks(tracks), shelf, cx)
+                }
+                PlaylistCommand::Rename { id, name } => library.rename_playlist(id, name, cx),
+                PlaylistCommand::Visibility { id, public } => {
+                    library.set_playlist_public(id, public, cx)
+                }
+                PlaylistCommand::AddTracks { id, tracks } => {
+                    library.add_tracks_to_playlist(id, Addition::Tracks(tracks), cx)
+                }
+                PlaylistCommand::RemoveTracks { id, tracks } => {
+                    library.remove_tracks_from_playlist(id, tracks, cx)
+                }
+                PlaylistCommand::Delete { id } => library.delete_playlist(id, cx),
+                PlaylistCommand::List => unreachable!(),
+            });
+            Reply::Done
+        } else {
+            Reply::Failed(Failure::SignedOut)
+        };
+        reply.send(answer).ok();
     }
 
     /// Plays or queues the best match of `text` and `kind` in the local library, ranked as the
@@ -741,6 +872,7 @@ fn wire_hit(hit: Hit, client: &dyn MusicApi) -> Option<wire::Hit> {
     let link = client.share_url(media, &id)?;
     Some(wire::Hit {
         kind,
+        id,
         title,
         by,
         duration,
@@ -815,6 +947,7 @@ fn queue_snapshot(playback: &Playback, cx: &App) -> QueueSnapshot {
         view.track(position, cx).map(|track| QueueEntry {
             track: wire_track(&track),
             kind: wire_kind(view.kind(position, cx)),
+            uid: playback.queue_uid(position, cx),
         })
     };
     let previous = (0..view.sections.past)
@@ -1076,6 +1209,14 @@ mod tests {
     use music::{LyricsLine, RomanizedText};
 
     use super::*;
+
+    #[test]
+    fn queue_position_one_uses_the_next_placement() {
+        assert_eq!(Control::placement_for(1), Some(QueuePlacement::Next));
+        assert_eq!(Control::placement_for(2), Some(QueuePlacement::Gap(1)));
+        assert_eq!(Control::placement_for(3), Some(QueuePlacement::Gap(2)));
+        assert_eq!(Control::placement_for(0), None);
+    }
 
     fn hit(lyrics: Sheet) -> LyricsHit {
         LyricsHit {

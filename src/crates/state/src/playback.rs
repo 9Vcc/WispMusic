@@ -58,6 +58,7 @@ enum Intent {
 }
 
 use crate::queue::{Queue, QueuePlacement};
+use crate::QueuePosition;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -2649,6 +2650,47 @@ impl Playback {
 
     pub fn has_previous(&self, cx: &App) -> bool {
         self.track.is_some() || self.queue.read(cx).has_previous()
+    }
+
+    /// The occurrence id of a queue row, for callers that address edits by id.
+    pub fn queue_uid(&self, position: QueuePosition, cx: &App) -> Option<String> {
+        self.queue.read(cx).uid(position).map(str::to_owned)
+    }
+
+    /// Removes the upcoming queue row with `uid`, saying whether it was there. The current and
+    /// past rows cannot be removed.
+    pub fn remove_queued(&mut self, uid: &str, cx: &mut Context<Self>) -> bool {
+        let Some(index) = self
+            .queue
+            .read(cx)
+            .position(uid)
+            .and_then(QueuePosition::upcoming)
+        else {
+            return false;
+        };
+        self.queue
+            .update(cx, |queue, cx| queue.remove(QueuePosition::Upcoming(index), cx));
+        true
+    }
+
+    /// Moves the upcoming row with `uid` to `gap`, saying whether it could be moved.
+    pub fn move_queued(&mut self, uid: &str, gap: usize, cx: &mut Context<Self>) -> bool {
+        let Some(from) = self
+            .queue
+            .read(cx)
+            .position(uid)
+            .and_then(QueuePosition::upcoming)
+        else {
+            return false;
+        };
+        self.queue
+            .update(cx, |queue, cx| queue.move_upcoming_to_gap(from, gap, cx));
+        true
+    }
+
+    /// Drops everything queued after the current track, the same as the queue's Clear button.
+    pub fn clear_queued(&mut self, cx: &mut Context<Self>) {
+        self.queue.update(cx, |queue, cx| queue.clear_upcoming(cx));
     }
 
     /// Whether a play press with no track loaded starts the finished queue over instead of

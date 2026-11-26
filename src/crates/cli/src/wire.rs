@@ -51,6 +51,17 @@ pub enum Value {
     Lyrics(LyricsSnapshot),
     /// Whether the current track is a favorite, as `wisp like` prints it.
     Liked(bool),
+    /// The listener's playlists, as `wisp playlist list` prints them.
+    Playlists(Vec<PlaylistSummary>),
+}
+
+/// One playlist in `wisp playlist list`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistSummary {
+    pub id: String,
+    pub name: String,
+    pub public: bool,
+    pub owned: bool,
 }
 
 /// At most this many lines of lyrics are reported, from the start, so a very long text never
@@ -193,6 +204,9 @@ impl QueueSnapshot {
 pub struct QueueEntry {
     pub track: Track,
     pub kind: QueueEntryKind,
+    /// The occurrence id used to edit this row. Absent for a queue shown by another device.
+    #[serde(default)]
+    pub uid: Option<String>,
 }
 
 /// Why a track is in the queue, as far as the snapshot knows.
@@ -212,6 +226,9 @@ pub enum QueueEntryKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hit {
     pub kind: Kind,
+    /// The provider id, for commands that take an id such as `playlist add`.
+    #[serde(default)]
+    pub id: String,
     pub title: String,
     /// The artists, or a playlist's owner. Empty for an artist.
     pub by: String,
@@ -337,6 +354,10 @@ pub enum Failure {
     FavoriteUpdateFailed,
     /// A search to queue the best hit of found nothing.
     NothingFound(String),
+    /// The provider picks a playlist's tracks, so they cannot be changed by hand.
+    ReadOnlyPlaylist,
+    /// No upcoming row in the queue carries this id.
+    UnknownQueueEntry(String),
 }
 
 /// Why a line could not be read off the socket.
@@ -416,6 +437,7 @@ mod tests {
                 duration: 60,
             },
             kind,
+            uid: None,
         }
     }
 

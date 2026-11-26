@@ -2925,6 +2925,11 @@ impl Library {
             || self.writing_order.as_deref() == Some(playlist_id)
     }
 
+    /// Whether a playlist change is running, so another one cannot start yet.
+    pub fn playlist_busy(&self) -> bool {
+        self.playlist_task.is_some()
+    }
+
     /// Writes the next pending order after `after`, replacing any write already waiting.
     fn arm_reorders(&mut self, after: Duration, cx: &mut Context<Self>) {
         self.reorder_timer = Some(cx.spawn(async move |this, cx| {

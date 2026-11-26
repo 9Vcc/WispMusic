@@ -11,8 +11,8 @@ use clap::{
 use clap_complete::Shell;
 
 use crate::commands::{
-    CommandType, Format, Item, Kind, Level, Local, PlaybackCommand, ProviderCommand, QueueCommand,
-    Repeat, Request, SearchQuery, Switch, Time, Watch,
+    CommandType, Format, Item, Kind, Level, Local, PlaybackCommand, PlaylistCommand,
+    ProviderCommand, QueueCommand, Repeat, Request, SearchQuery, Switch, Time, Watch,
 };
 use crate::item;
 
@@ -54,6 +54,54 @@ impl Refusal {
 }
 
 #[derive(Subcommand)]
+enum QueueEdit {
+    /// Remove an upcoming row by the uid printed in `wisp queue --json`.
+    Remove { uid: String },
+    /// Move an upcoming row to a gap in the upcoming queue.
+    Move { uid: String, gap: usize },
+    /// Drop everything queued after the current track.
+    Clear,
+}
+
+#[derive(Subcommand)]
+enum PlaylistArg {
+    /// List the playlists in the library.
+    List,
+    /// Create a playlist, optionally filled with track ids.
+    Create {
+        name: String,
+        /// Track ids to put in the new playlist.
+        #[arg(long, num_args = 1..)]
+        tracks: Vec<String>,
+        /// Create in the local library instead of on the current provider.
+        #[arg(long)]
+        local: bool,
+    },
+    /// Rename a playlist.
+    Rename { id: String, name: String },
+    /// Set whether a playlist is public.
+    Public {
+        id: String,
+        #[arg(action = ArgAction::Set, value_parser = visibility)]
+        public: bool,
+    },
+    /// Add track ids to a playlist.
+    Add {
+        id: String,
+        #[arg(required = true)]
+        tracks: Vec<String>,
+    },
+    /// Drop every copy of the track ids from a playlist.
+    Remove {
+        id: String,
+        #[arg(required = true)]
+        tracks: Vec<String>,
+    },
+    /// Delete a playlist.
+    Delete { id: String },
+}
+
+#[derive(Subcommand)]
 enum Sub {
     /// Resume playback, or play files, links or the best hit of a search now.
     Play {
@@ -90,7 +138,10 @@ enum Sub {
         position: bool,
     },
     /// Print the queue: what played, what plays and what follows, without changing it.
-    Queue,
+    Queue {
+        #[command(subcommand)]
+        edit: Option<QueueEdit>,
+    },
     /// Print the lyrics of the current track, without looking any up.
     Lyrics,
     /// Print the volume, or set it: `50`, `+5`, `-5`.
@@ -105,6 +156,11 @@ enum Sub {
     Shuffle { switch: Option<SwitchArg> },
     /// Print the current track's favorite state, or change it.
     Like { switch: Option<SwitchArg> },
+    /// List or change the listener's playlists.
+    Playlist {
+        #[command(subcommand)]
+        action: PlaylistArg,
+    },
     /// Print repeat, or set it.
     Repeat { repeat: Option<RepeatArg> },
     /// Queue files or links after the tracks queued by hand.
@@ -118,6 +174,10 @@ enum Sub {
         items: Vec<Item>,
         #[command(flatten)]
         searched: Searched,
+        /// Queue at this 1-based position: 1 plays next, 2 leaves one track ahead. Suggested
+        /// tracks do not count.
+        #[arg(long, allow_hyphen_values = true, value_parser = position)]
+        at: Option<usize>,
     },
     /// Queue files or links right after the current track.
     PlayNext {
@@ -290,15 +350,47 @@ fn into_command(args: Args, line: &mut Command) -> Result<CommandType, clap::Err
         Sub::Prev => play(PlaybackCommand::Previous),
         Sub::Seek { point } => play(point),
         Sub::Current => play(PlaybackCommand::CurrentTrack),
-        Sub::Queue => Request::Queue(QueueCommand::Snapshot),
+        Sub::Queue { edit } => match edit {
+            None => Request::Queue(QueueCommand::Snapshot),
+            Some(QueueEdit::Remove { uid }) => Request::Queue(QueueCommand::Remove { uid }),
+            Some(QueueEdit::Move { uid, gap }) => Request::Queue(QueueCommand::Move { uid, gap }),
+            Some(QueueEdit::Clear) => Request::Queue(QueueCommand::ClearUpcoming),
+        },
         Sub::Lyrics => Request::Lyrics,
         Sub::Watch { position } => Request::Watch(Watch { position }),
         Sub::Volume { level } => play(PlaybackCommand::Volume(level)),
         Sub::Mute { switch } => play(PlaybackCommand::Mute(switch.map(Switch::from))),
         Sub::Shuffle { switch } => play(PlaybackCommand::Shuffle(switch.map(Switch::from))),
         Sub::Like { switch } => Request::Like(switch.map(Switch::from)),
+        Sub::Playlist { action } => Request::Playlists(match action {
+            PlaylistArg::List => PlaylistCommand::List,
+            PlaylistArg::Create {
+                name,
+                tracks,
+                local,
+            } => PlaylistCommand::Create {
+                name,
+                tracks,
+                local,
+            },
+            PlaylistArg::Rename { id, name } => PlaylistCommand::Rename { id, name },
+            PlaylistArg::Public { id, public } => PlaylistCommand::Visibility { id, public },
+            PlaylistArg::Add { id, tracks } => PlaylistCommand::AddTracks { id, tracks },
+            PlaylistArg::Remove { id, tracks } => PlaylistCommand::RemoveTracks { id, tracks },
+            PlaylistArg::Delete { id } => PlaylistCommand::Delete { id },
+        }),
         Sub::Repeat { repeat } => play(PlaybackCommand::Repeat(repeat.map(Repeat::from))),
-        Sub::Add { items, searched } => Request::Queue(QueueCommand::Add(searched.or(items))),
+        Sub::Add {
+            items,
+            searched,
+            at,
+        } => {
+            let items = searched.or(items);
+            match at {
+                Some(position) => Request::Queue(QueueCommand::At { items, position }),
+                None => Request::Queue(QueueCommand::Add(items)),
+            }
+        }
         Sub::PlayNext { items, searched } => {
             Request::Queue(QueueCommand::PlayNext(searched.or(items)))
         }
@@ -422,6 +514,25 @@ fn clock(text: &str) -> Option<u64> {
         seconds = seconds.checked_mul(60)?.checked_add(value)?;
     }
     (count <= 3).then_some(seconds)
+}
+
+/// Playlist visibility as `on` or `off`.
+fn visibility(text: &str) -> Result<bool, String> {
+    match text {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("visibility must be on or off".to_owned()),
+    }
+}
+
+/// A 1-based position in the upcoming queue: 1 puts the item right after the playing track.
+fn position(text: &str) -> Result<usize, String> {
+    let value: usize = text
+        .parse()
+        .map_err(|_| "position must be a positive number".to_owned())?;
+    (value > 0)
+        .then_some(value)
+        .ok_or_else(|| "position must be at least 1".to_owned())
 }
 
 /// An item to queue as typed: an address goes as it is, a path has to name a file here.
@@ -586,6 +697,117 @@ mod tests {
     #[test]
     fn local_needs_a_search() {
         let args = ["wisp", "play", "--local"].map(OsString::from);
+        assert!(parse(args.to_vec(), "0.0.0").is_err());
+    }
+
+    #[test]
+    fn queue_edits_map_to_control_requests() {
+        for (args, command) in [
+            (
+                &["queue", "remove", "row-3"][..],
+                QueueCommand::Remove {
+                    uid: "row-3".to_owned(),
+                },
+            ),
+            (
+                &["queue", "move", "row-3", "2"][..],
+                QueueCommand::Move {
+                    uid: "row-3".to_owned(),
+                    gap: 2,
+                },
+            ),
+            (&["queue", "clear"][..], QueueCommand::ClearUpcoming),
+        ] {
+            let CommandType::Remote(request, _) = parsed(args) else {
+                panic!("a queue edit should ask the running Wisp");
+            };
+            assert_eq!(request, Request::Queue(command));
+        }
+    }
+
+    #[test]
+    fn add_places_a_search_at_a_chosen_position() {
+        let CommandType::Remote(request, _) = parsed(&["add", "--at", "3", "-s", "daft", "punk"])
+        else {
+            panic!("a search should ask the running Wisp");
+        };
+        assert_eq!(
+            request,
+            Request::Queue(QueueCommand::At {
+                items: vec![Item::Search {
+                    text: "daft punk".to_owned(),
+                    kind: Kind::Song,
+                }],
+                position: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn add_refuses_a_position_below_one() {
+        for at in ["0", "-1", "not-a-number"] {
+            let args = ["wisp", "add", "--at", at, "-s", "queen"].map(OsString::from);
+            assert!(parse(args.to_vec(), "0.0.0").is_err(), "position: {at}");
+        }
+    }
+
+    #[test]
+    fn playlist_actions_map_to_control_requests() {
+        for (args, command) in [
+            (&["playlist", "list"][..], PlaylistCommand::List),
+            (
+                &["playlist", "create", "Road trip"][..],
+                PlaylistCommand::Create {
+                    name: "Road trip".to_owned(),
+                    tracks: Vec::new(),
+                    local: false,
+                },
+            ),
+            (
+                &["playlist", "rename", "p1", "New name"][..],
+                PlaylistCommand::Rename {
+                    id: "p1".to_owned(),
+                    name: "New name".to_owned(),
+                },
+            ),
+            (
+                &["playlist", "public", "p1", "on"][..],
+                PlaylistCommand::Visibility {
+                    id: "p1".to_owned(),
+                    public: true,
+                },
+            ),
+            (
+                &["playlist", "add", "p1", "t1", "t2"][..],
+                PlaylistCommand::AddTracks {
+                    id: "p1".to_owned(),
+                    tracks: vec!["t1".to_owned(), "t2".to_owned()],
+                },
+            ),
+            (
+                &["playlist", "remove", "p1", "t1"][..],
+                PlaylistCommand::RemoveTracks {
+                    id: "p1".to_owned(),
+                    tracks: vec!["t1".to_owned()],
+                },
+            ),
+            (
+                &["playlist", "delete", "p1"][..],
+                PlaylistCommand::Delete {
+                    id: "p1".to_owned(),
+                },
+            ),
+        ] {
+            let CommandType::Remote(request, _) = parsed(args) else {
+                panic!("a playlist action should ask the running Wisp");
+            };
+            assert_eq!(request, Request::Playlists(command));
+        }
+    }
+
+    #[test]
+    fn playlist_public_refuses_other_words() {
+        let args = ["wisp", "playlist", "public", "p1", "perhaps"].map(OsString::from);
         assert!(parse(args.to_vec(), "0.0.0").is_err());
     }
 }
