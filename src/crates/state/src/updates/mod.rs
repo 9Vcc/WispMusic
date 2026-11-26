@@ -3,6 +3,8 @@ mod install;
 
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -25,6 +27,8 @@ const ENDPOINT_ENV: &str = "WISP_UPDATE_URL";
 const POLL: Duration = Duration::from_secs(30 * 60);
 /// How many leading hex digits of a commit hash the version row shows, as `git` abbreviates it.
 const SHORT_COMMIT: usize = 7;
+/// The steps a download counts its progress in, so it fits an atomic integer.
+const PROGRESS_STEPS: f32 = 10_000.;
 const AGENT: &str = concat!(
     "wisp/",
     env!("CARGO_PKG_VERSION"),
@@ -128,6 +132,9 @@ pub struct Updates {
     http: reqwest::Client,
     io: Io,
     task: Option<Task<()>>,
+    /// Counts looks, so a look that ends after the listener closed its card or changed the
+    /// channel cannot install anything or clear a newer task.
+    look_epoch: u64,
     /// The channel chosen in settings when Wisp last looked, so a different choice looks again.
     channel: Channel,
     /// Whether the check under way was asked for from the settings row.
@@ -135,6 +142,19 @@ pub struct Updates {
     /// Whether a manual check is waiting on an answer.
     checking: bool,
     feedback: Option<CheckFeedback>,
+    /// The release whose download is under way, shown on the update card.
+    downloading: Option<String>,
+    /// The release whose install failed, shown on the update card until it is closed or a new
+    /// look starts.
+    failed: Option<String>,
+    /// The release whose card the listener closed, which later automatic looks skip. A manual
+    /// check or a change of channel forgets it.
+    dismissed: Option<String>,
+    /// How far the running download has got, in [`PROGRESS_STEPS`], written on tokio.
+    progress: Arc<AtomicU32>,
+    /// Set when the card of the running download is closed or the channel changes, so the
+    /// download stops writing instead of finishing a file nothing will install.
+    cancel: Option<Arc<AtomicBool>>,
     _poll: Task<()>,
     _settings: Subscription,
 }
@@ -158,9 +178,17 @@ impl Updates {
             }
             this.channel = channel;
             this.task = None;
+            this.look_epoch = this.look_epoch.wrapping_add(1);
             this.manual_check = false;
             this.checking = false;
             this.feedback = None;
+            this.downloading = None;
+            this.failed = None;
+            this.dismissed = None;
+            this.progress.store(0, Ordering::Relaxed);
+            if let Some(cancel) = this.cancel.take() {
+                cancel.store(true, Ordering::Relaxed);
+            }
             cx.notify();
             this.look(cx);
         });
@@ -179,10 +207,16 @@ impl Updates {
                 .expect("reqwest client"),
             io,
             task: None,
+            look_epoch: 0,
             channel,
             manual_check: false,
             checking: false,
             feedback: None,
+            downloading: None,
+            failed: None,
+            dismissed: None,
+            progress: Arc::default(),
+            cancel: None,
             _poll: poll,
             _settings: watch,
         };
@@ -200,9 +234,42 @@ impl Updates {
         self.feedback
     }
 
+    /// The release whose download is under way, for the update card.
+    pub fn downloading(&self) -> Option<&str> {
+        self.downloading.as_deref()
+    }
+
+    /// How far the running download has got, from 0 to 1, or `None` while nothing downloads or
+    /// the server has not said how large the update is. It is written off the main thread, so a
+    /// view that shows it redraws on its own while the card is up.
+    pub fn progress(&self) -> Option<f32> {
+        self.downloading.as_ref()?;
+        match self.progress.load(Ordering::Relaxed) {
+            0 => None,
+            steps => Some(steps as f32 / PROGRESS_STEPS),
+        }
+    }
+
+    /// The release whose install failed, for the update card.
+    pub fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
     /// Asks the manifest again now, from the settings page.
     pub fn check(&mut self, cx: &mut Context<Self>) {
         if !updates_itself() {
+            return;
+        }
+        self.dismissed = None;
+        self.failed = None;
+        if self.downloading.is_some() {
+            self.manual_check = false;
+            self.checking = false;
+            self.feedback = Some(CheckFeedback::Updating);
+            cx.notify();
+            return;
+        }
+        if self.checking {
             return;
         }
         self.manual_check = true;
@@ -212,6 +279,25 @@ impl Updates {
         self.look(cx);
     }
 
+    /// Puts the update card away. Closing one whose download is under way also gives up on that
+    /// update, so the same release is not installed until a manual check or a newer one turns up.
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if let Some(version) = self.downloading.take() {
+            self.dismissed = Some(version);
+            self.task = None;
+            self.look_epoch = self.look_epoch.wrapping_add(1);
+            self.manual_check = false;
+            self.checking = false;
+            self.feedback = None;
+        }
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.failed = None;
+        self.progress.store(0, Ordering::Relaxed);
+        cx.notify();
+    }
+
     /// Looks for a newer build and updates to it without asking. A found release is downloaded
     /// and verified, handed to the installer, and this process quits so the installer can put
     /// the new build in place and start it. A failure stays in the log and the next look retries.
@@ -219,6 +305,8 @@ impl Updates {
         if self.task.is_some() || !updates_itself() {
             return;
         }
+        self.look_epoch = self.look_epoch.wrapping_add(1);
+        let epoch = self.look_epoch;
         let channel = self.channel;
         let http = self.http.clone();
         let io = self.io.clone();
@@ -226,11 +314,19 @@ impl Updates {
             let lookup_http = http.clone();
             let found = join(io.spawn(async move { latest(&lookup_http, channel).await })).await;
             this.update(cx, |this, cx| {
+                if this.look_epoch != epoch {
+                    return;
+                }
                 this.task = None;
                 this.checking = false;
                 let manual = std::mem::take(&mut this.manual_check);
                 match found {
                     Ok(Some(release)) => {
+                        if !manual
+                            && this.dismissed.as_deref() == Some(release.version.as_str())
+                        {
+                            return;
+                        }
                         if manual {
                             this.feedback = Some(CheckFeedback::Updating);
                             cx.notify();
@@ -256,8 +352,8 @@ impl Updates {
         }));
     }
 
-    /// Downloads and verifies `release`, then quietly replaces this build and exits. The update
-    /// card is gone: finding a release is already the decision to install it.
+    /// Downloads and verifies `release`, then quietly replaces this build and exits. The card
+    /// reports the download while it runs, and a failure until it is closed.
     fn install(&mut self, release: Release, cx: &mut Context<Self>) {
         let Release {
             version,
@@ -267,18 +363,37 @@ impl Updates {
             ..
         } = release;
         log::info!("updates: {version} is available, installing silently");
+        self.downloading = Some(version.clone());
+        self.failed = None;
+        self.dismissed = None;
+        self.feedback = Some(CheckFeedback::Updating);
+        self.progress.store(0, Ordering::Relaxed);
+        cx.notify();
         let http = self.http.clone();
         let io = self.io.clone();
+        let progress = self.progress.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancel = Some(cancel.clone());
         let installed = version.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
+            let cancelled = cancel.clone();
             let fetched = join(io.spawn(async move {
-                download(&http, &package, &sha256, &signature, &version).await
+                download(
+                    &http, &package, &sha256, &signature, &version, &progress, &cancel,
+                )
+                .await
             }))
             .await;
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
             let applied = match fetched {
                 Ok(path) => join(io.spawn_blocking(move || Install::current().apply(&path))).await,
                 Err(error) => Err(error),
             };
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
             match applied {
                 Ok(()) => {
                     log::info!("updates: {installed} handed to the installer, restarting");
@@ -289,10 +404,17 @@ impl Updates {
                         "updates: cannot install {installed}: {error:#}; the next check retries"
                     );
                     this.update(cx, |this, cx| {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return;
+                        }
                         this.task = None;
                         this.checking = false;
                         this.manual_check = false;
                         this.feedback = Some(CheckFeedback::Failed);
+                        this.downloading = None;
+                        this.failed = Some(installed);
+                        this.progress.store(0, Ordering::Relaxed);
+                        this.cancel = None;
                         cx.notify();
                     })
                     .ok();
@@ -466,6 +588,8 @@ async fn download(
     expected: &str,
     signature: &str,
     version: &str,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
 ) -> Result<PathBuf> {
     let mut response = http
         .get(&package.url)
@@ -475,15 +599,38 @@ async fn download(
         .context("cannot reach the update")?
         .error_for_status()
         .context("the update is missing")?;
+    let total = response.content_length().filter(|total| *total > 0);
 
-    let path = std::env::temp_dir().join(format!("wisp-{version}-{}", package.name));
+    // Each attempt writes its own file, so a dismissed download cannot land in the file a
+    // check started since writes.
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "wisp-{version}-{attempt}-{}",
+        package.name
+    ));
     let mut file = std::fs::File::create(&path).context("cannot keep the update")?;
     let mut hasher = Sha256::new();
+    let mut received = 0u64;
     while let Some(chunk) = response.chunk().await.context("cannot read the update")? {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("the update was cancelled");
+        }
+        received += chunk.len() as u64;
+        if let Some(total) = total {
+            let done = (received as f64 / total as f64).clamp(0., 1.) as f32;
+            progress.store((done * PROGRESS_STEPS) as u32, Ordering::Relaxed);
+        }
         hasher.update(&chunk);
         file.write_all(&chunk).context("cannot keep the update")?;
     }
     drop(file);
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("the update was cancelled");
+    }
+    if total.is_some() {
+        progress.store(PROGRESS_STEPS as u32, Ordering::Relaxed);
+    }
 
     let checksum: String = hasher
         .finalize()

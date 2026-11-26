@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, HighlightStyle, InteractiveText,
+    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, HighlightStyle, Hsla, InteractiveText,
     Interactivity, Pixels, SharedString, Stateful, StyleRefinement, StyledText, UnderlineStyle,
     Window, div, px, svg,
 };
@@ -37,6 +37,9 @@ pub struct Toast {
     strong: Option<SharedString>,
     detail: Option<SharedString>,
     icon: Option<SharedString>,
+    /// The colour of the icon, such as red for a failure. Without it the icon takes the text
+    /// colour.
+    tint: Option<Hsla>,
     loading: bool,
     progress: Option<f32>,
     single_line: bool,
@@ -62,6 +65,7 @@ impl Toast {
             strong: None,
             detail: None,
             icon: None,
+            tint: None,
             loading: false,
             progress: None,
             single_line: false,
@@ -89,6 +93,12 @@ impl Toast {
 
     pub fn icon(mut self, path: impl Into<SharedString>) -> Self {
         self.icon = Some(path.into());
+        self
+    }
+
+    /// The colour of the icon, such as red for a failure. Without one it takes the text colour.
+    pub fn tint(mut self, color: Hsla) -> Self {
+        self.tint = Some(color);
         self
     }
 
@@ -196,6 +206,7 @@ impl RenderOnce for Toast {
             strong,
             detail,
             icon,
+            tint,
             loading,
             progress,
             single_line,
@@ -242,7 +253,7 @@ impl RenderOnce for Toast {
                     .path(icons::path(icon))
                     .size(ICON)
                     .flex_none()
-                    .text_color(theme.popover_foreground)
+                    .text_color(tint.unwrap_or(theme.popover_foreground))
                     .into_any_element(),
             ),
             (None, false, None) => None,

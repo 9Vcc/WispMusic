@@ -361,6 +361,7 @@ impl ToastStack {
             None => (slot.sway.now(), slot.drop.now()),
         };
         let scale = slot.scale.now().max(0.01);
+        let theme = *cx.theme();
 
         let card = Toast::new(("toast", id), message)
             .absolute()
@@ -395,10 +396,16 @@ impl ToastStack {
             })
             .map(|card| match toast.outcome {
                 Outcome::Plain => card,
-                Outcome::Done => card.icon("icons/circle-check.svg"),
-                Outcome::Info => card.icon("icons/info.svg"),
-                Outcome::Warning => card.icon("icons/triangle-alert.svg"),
-                Outcome::Failed => card.icon("icons/octagon-x.svg"),
+                Outcome::Done => card
+                    .icon("icons/circle-check.svg")
+                    .tint(theme.status_success),
+                Outcome::Info => card.icon("icons/info.svg").tint(theme.status_info),
+                Outcome::Warning => card
+                    .icon("icons/triangle-alert.svg")
+                    .tint(theme.status_warning),
+                Outcome::Failed => card
+                    .icon("icons/octagon-x.svg")
+                    .tint(theme.status_error),
                 Outcome::Loading => match toast.progress {
                     Some(done) => card.progress(done),
                     None => card.loading(),

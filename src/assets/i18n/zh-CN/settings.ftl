@@ -477,6 +477,11 @@ theme-install-detail = 这会将它加入你的主题文件夹。
 theme-install-confirm = 安装
 update-channel-stable = 稳定版
 update-channel-nightly = 每日版
+update-downloading = 正在下载 Wisp { $name }…
+update-fetching-detail = 下载完成后 Wisp 将自动重启。
+update-failed = 更新无法安装
+update-failed-detail = 下次检查会重试，你也可以手动安装新版本。
+update-releases = 发布页面
 
 settings-desktop-lyrics-vertical = 竖向显示
 settings-desktop-lyrics-vertical-detail = 传统直书，两行歌词改为左右两列
