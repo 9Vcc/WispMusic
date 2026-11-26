@@ -156,8 +156,10 @@ impl Card {
         let rem = window.rem_size();
         let line = |step: Text| px((theme.text(step) / px(1.) * LEADING).round());
 
-        snapped(
-            art + rem * 0.5 + line(Text::Body) + TIGHT + line(Text::Small),
+        // The cover is added unsnapped, so a cover that grows smoothly grows the tile with it
+        // instead of in whole steps that move every row under it.
+        art + snapped(
+            rem * 0.5 + line(Text::Body) + TIGHT + line(Text::Small),
             window,
         )
     }
