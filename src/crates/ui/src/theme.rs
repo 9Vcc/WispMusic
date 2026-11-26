@@ -72,6 +72,10 @@ const HEADER_FLOOR: f32 = 0.15;
 /// page back only while it is pinned, so at rest it can be nearly glass.
 const SURFACE_WEIGHT: f32 = 0.68;
 const HEADER_WEIGHT: f32 = 0.5;
+/// How much of the desktop a window lets through before the cuts above land in full. A fill is
+/// mixed against the page under it, so a cut taken whole at the top of the slider would shift
+/// every control the moment the window stops being opaque; they ease in across this stretch.
+const CLEAR_RAMP: f32 = 0.1;
 
 /// Whether the platform blurs the desktop behind a see-through window. A Linux or FreeBSD
 /// compositor may or may not, and may change its mind while Wisp runs, so the root keeps this
@@ -456,6 +460,8 @@ pub struct Theme {
     pub font_size: Pixels,
     pub metrics: Metrics,
     pub transparent: bool,
+    /// What the window keeps of its own fill: 1 on an opaque window, less on a see-through one.
+    pub opacity: f32,
     /// Whether the frosted treatments are painted. Read it through `ui::blurring` rather
     /// than reaching for the field, so every site asks the same question.
     pub blur: bool,
@@ -517,6 +523,7 @@ impl Theme {
             font_size: px(14.),
             metrics: Metrics::default(),
             transparent: false,
+            opacity: 1.,
             blur: false,
             blur_window: false,
             tint: None,
@@ -562,6 +569,7 @@ impl Theme {
             font_size: px(14.),
             metrics: Metrics::default(),
             transparent: false,
+            opacity: 1.,
             blur: false,
             blur_window: false,
             tint: None,
@@ -878,12 +886,15 @@ impl Theme {
     /// content rather than wallpaper, so thinning it only lets the page bleed
     /// through the thing that was raised to be read.
     fn see_through(&mut self, opacity: f32) {
+        let clearing = clearing(opacity);
+        let weight = |full: f32| 1. - (1. - full) * clearing;
+
         self.table_head = veil(
             self.background.blend(self.table_head),
             opacity,
             HEADER_FLOOR,
         )
-        .opacity(HEADER_WEIGHT);
+        .opacity(weight(HEADER_WEIGHT));
 
         self.background = veil(self.background, opacity, 0.);
         self.sidebar = veil(self.sidebar, opacity, 0.);
@@ -897,7 +908,7 @@ impl Theme {
             &mut self.table_hover,
             &mut self.table_active,
         ] {
-            *surface = veil(*surface, opacity, SURFACE_FLOOR).opacity(SURFACE_WEIGHT);
+            *surface = veil(*surface, opacity, SURFACE_FLOOR).opacity(weight(SURFACE_WEIGHT));
         }
     }
 
@@ -913,8 +924,12 @@ impl Theme {
         }
         theme.radius = look.rounding.radius();
         theme = theme.with_overrides(overrides);
+        theme.opacity = match look.transparent {
+            true => 1. - look.transparency.clamp(0., MAX_TRANSPARENCY),
+            false => 1.,
+        };
         if look.transparent {
-            theme.see_through(1. - look.transparency.clamp(0., MAX_TRANSPARENCY));
+            theme.see_through(theme.opacity);
         }
         theme.font_size = base;
         theme.metrics = Metrics::new(base);
@@ -977,6 +992,12 @@ fn resolve(look: Look, cx: &App) -> Look {
         kind: look.kind.resolved(cx),
         ..look
     }
+}
+
+/// How far the cuts have set in on a window that keeps `opacity` of itself, from 0 on an
+/// opaque window to 1 once it lets through `CLEAR_RAMP` of the desktop or more.
+fn clearing(opacity: f32) -> f32 {
+    ((1. - opacity) / CLEAR_RAMP).clamp(0., 1.)
 }
 
 /// Thins one fill for a window that keeps `opacity` of itself, leaving `floor`

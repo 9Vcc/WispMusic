@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{App, Hsla, Pixels, px};
 
-use crate::theme::ActiveTheme as _;
+use crate::theme::{ActiveTheme as _, BACKDROP_TRANSPARENCY, Theme};
 
 /// How much of the popover colour a glass control keeps over what it blurs.
 pub const GLASS_FILL: f32 = 0.2;
@@ -84,13 +84,18 @@ pub fn popover_surface<E: Styled>(element: E, cx: &App) -> E {
 /// the bar lets the desktop through about as much as the page does.
 pub fn bar_surface<E: Styled>(element: E, cx: &App) -> E {
     let theme = cx.theme();
-    let fill = match theme.transparent {
-        true => CLEAR_BAR_FILL,
-        false => BAR_FILL,
-    };
     element
-        .bg(theme.popover.opacity(fill))
+        .bg(theme.popover.opacity(bar_fill(theme)))
         .backdrop_blur(BAR_BLUR)
+}
+
+/// How much of the popover colour a bar keeps on `theme`'s window. A fill `f` over a page that
+/// lets `clear` of the desktop through hides `f * clear` more of it than the page does, so the
+/// fill thins as the window clears, to hide no more than the thin fill does at the default
+/// transparency. A window that is barely see-through keeps the full fill.
+fn bar_fill(theme: &Theme) -> f32 {
+    let clear = (1. - theme.opacity).max(f32::EPSILON);
+    (CLEAR_BAR_FILL * BACKDROP_TRANSPARENCY / clear).clamp(CLEAR_BAR_FILL, BAR_FILL)
 }
 
 /// Blurs what is behind an element by the glass width and nothing more, for a hover fill
