@@ -1350,7 +1350,7 @@ fn line_text(
             .text_size(px(size))
             .line_height(relative(SLOT_RATIO))
             .text_shadow(shadows(size))
-            .font_weight(FontWeight::SEMIBOLD);
+            .font_weight(FontWeight::NORMAL);
         let row = fragments.into_iter().fold(row, |row, (text, word)| {
             let (start, end) = word_window(line.start, words, word);
             let share = swept(start, end, at, word + 1 >= words.len());
@@ -1388,7 +1388,7 @@ fn line_text(
         .line_height(relative(SLOT_RATIO))
         .text_shadow(shadows(size))
         .text_color(role.color(accent))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::NORMAL)
         .child(line.text.clone())
         .into_any_element()
 }
@@ -1474,7 +1474,7 @@ fn plain_line(text: &str, role: LineRole, size: f32, accent: Hsla) -> AnyElement
         .line_height(relative(SLOT_RATIO))
         .text_shadow(shadows(size))
         .text_color(role.color(accent))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::NORMAL)
         .child(SharedString::from(text.to_owned()))
         .into_any_element()
 }
@@ -1632,7 +1632,7 @@ fn vertical_char(
         .line_height(relative(1.))
         .text_shadow(shadows(font))
         .text_color(base_color)
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::NORMAL)
         .child(SharedString::from(timing.text.to_string()));
     let base = match role == LineRole::Singing {
         true => {
@@ -1681,7 +1681,7 @@ fn vertical_line(
     at: Duration,
     role: LineRole,
     font: f32,
-    row: f32,
+    height: f32,
     accent: Hsla,
 ) -> AnyElement {
     let timings = char_timings(line);
@@ -1689,7 +1689,7 @@ fn vertical_line(
         return div().into_any_element();
     }
     let slot = font * SLOT_RATIO;
-    let per = ((row / slot).floor() as usize).max(1);
+    let per = ((height / slot).floor() as usize).max(1);
     let last = timings.len().saturating_sub(1);
     let mut columns = div()
         .flex()
@@ -1713,47 +1713,110 @@ struct VerticalStage<'a> {
     lines: &'a [LyricsLine],
     at: Duration,
     font: f32,
-    /// The height one lyric line is given in the strip.
-    row: f32,
+    height: f32,
     accent: Hsla,
 }
 
-/// One lyric line in its own band of the strip. A pair stacks one line above the other, and
-/// each line still reads downwards in columns that continue to the left.
-fn vertical_row(
-    stage: &VerticalStage<'_>,
-    index: usize,
-    role: Option<LineRole>,
-    top: f32,
+/// One pair of vertical lines: the first sits top-left, the second bottom-right, and both pull
+/// in towards the middle so the two columns stay close instead of hugging the outer edges.
+fn vertical_pair(
+    stage: VerticalStage<'_>,
+    pair: usize,
     opacity: f32,
+    offsets: (f32, f32),
+    roles: Option<(LineRole, LineRole)>,
 ) -> AnyElement {
-    let text = stage
-        .lines
-        .get(index)
+    let first = stage.lines.get(pair);
+    let second = stage.lines.get(pair + 1);
+    let (left_role, right_role) = roles.unwrap_or_else(|| {
+        (
+            first.map_or(LineRole::Preview, |line| LineRole::at(line, stage.at)),
+            second.map_or(LineRole::Preview, |line| LineRole::at(line, stage.at)),
+        )
+    });
+    let left = first
         .map(|line| {
             vertical_line(
                 line,
                 stage.at,
-                role.unwrap_or_else(|| LineRole::at(line, stage.at)),
+                left_role,
                 stage.font,
-                stage.row,
+                stage.height,
                 stage.accent,
             )
         })
         .unwrap_or_else(|| div().into_any_element());
+    let right = second
+        .map(|line| {
+            vertical_line(
+                line,
+                stage.at,
+                right_role,
+                stage.font,
+                stage.height,
+                stage.accent,
+            )
+        })
+        .unwrap_or_else(|| div().into_any_element());
+    let gap = (stage.font * 0.3).max(6.);
     div()
         .absolute()
-        .left_0()
-        .right_0()
-        .top(px(top))
-        .h(px(stage.row))
+        .size_full()
         .flex()
-        .items_start()
-        .justify_center()
-        .overflow_hidden()
+        .items_stretch()
         .opacity(opacity)
-        .child(text)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .relative()
+                .left(px(offsets.0))
+                .flex()
+                .items_start()
+                .justify_end()
+                .overflow_hidden()
+                .pl(px(EDGE / 2.))
+                .pr(px(gap / 2.))
+                .child(left),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .relative()
+                .left(px(offsets.1))
+                .flex()
+                .items_end()
+                .justify_start()
+                .overflow_hidden()
+                .pl(px(gap / 2.))
+                .pr(px(EDGE / 2.))
+                .child(right),
+        )
         .into_any_element()
+}
+
+/// The two lines leave towards their own side while the incoming pair arrives from it.
+fn vertical_scene(
+    stage: VerticalStage<'_>,
+    pair: usize,
+    swap: Option<(usize, f32)>,
+    slide: f32,
+    roles: Option<(LineRole, LineRole)>,
+) -> AnyElement {
+    let mut scene = div().relative().size_full();
+    if let Some((from, eased)) = swap {
+        let out = (-slide * eased, slide * eased);
+        let back = -slide * (1. - eased);
+        scene = scene
+            .child(vertical_pair(stage, from, 1. - eased, out, roles))
+            .child(vertical_pair(stage, pair, eased, (back, -back), roles));
+    } else {
+        scene = scene.child(vertical_pair(stage, pair, 1., (0., 0.), roles));
+    }
+    scene.into_any_element()
 }
 
 fn synthetic_line(text: String, start_ms: u64) -> LyricsLine {
@@ -1945,17 +2008,17 @@ fn stroke_view(
         .max(1);
     let color = accent;
     if vertical {
-        // Each line gets its own band, the way the text rows stack, and the cells shrink to
-        // fit their band with a margin at the top and bottom instead of running into the edges.
-        let row = (height - EDGE) / 2.;
+        // The first line sits top-left and the second bottom-right, both pulled in towards
+        // the middle so the two columns stay close and clear of the edges.
         let chars = max_chars as f32;
         let spacing = chars + (chars - 1.) * 0.14;
         let cell = font
-            .min((row - EDGE).max(0.) * 0.98 / spacing)
-            .min(width * 0.92)
+            .min((height - EDGE * 2.).max(0.) * 0.98 / spacing)
+            .min((width - EDGE * 2.) / 2.8)
             .max(12.);
         let gap = (cell * 0.14).max(4.);
-        let mut scene = div().size_full().flex().flex_col();
+        let line_gap = (cell * 0.5).max(12.);
+        let mut scene = div().size_full().flex().items_stretch();
         for offset in 0..2 {
             let line = &pair.lines[offset];
             let shadow = stroke_column(
@@ -1975,15 +2038,28 @@ fn stroke_view(
                 layered = layered.child(cells);
                 layered.into_any_element()
             };
-            let band = div()
-                .w_full()
-                .flex_none()
-                .h(px(row))
+            let column = div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
                 .flex()
-                .items_start()
-                .justify_center()
-                .pt(px(EDGE / 2.));
-            scene = scene.child(band.child(cells));
+                .flex_col()
+                .gap(px(gap))
+                .pt(px(EDGE / 2.))
+                .pb(px(EDGE / 2.))
+                .when(offset == 0, |this| {
+                    this.items_end()
+                        .justify_start()
+                        .pl(px(EDGE / 2.))
+                        .pr(px(line_gap / 2.))
+                })
+                .when(offset == 1, |this| {
+                    this.items_start()
+                        .justify_end()
+                        .pl(px(line_gap / 2.))
+                        .pr(px(EDGE / 2.))
+                });
+            scene = scene.child(column.child(cells));
         }
         return scene.into_any_element();
     }
@@ -2090,9 +2166,6 @@ impl Render for DesktopLyric {
         let breath = (self.dots_at.elapsed().as_secs_f32() / BREATH.as_secs_f32()
             * std::f32::consts::TAU)
             % std::f32::consts::TAU;
-        // A vertical strip gives each line of a pair its own band, the way the horizontal
-        // layout gives each line a row.
-        let row = ((bounds.size.height.as_f32() - EDGE) / 2.).max(slot);
         // Changing the saved size or direction resizes the strip once; the size then follows
         // whatever the window measures.
         if shape_changed {
@@ -2184,7 +2257,7 @@ impl Render for DesktopLyric {
         };
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        let mut vertical_rows: Vec<AnyElement> = Vec::new();
+        let mut vertical_stage: Option<AnyElement> = None;
         let mut placeholder = None;
         let mut stroke_animating = false;
         match lyric {
@@ -2239,48 +2312,30 @@ impl Render for DesktopLyric {
                 // The stroke view owns the stage; do not build the text layers under it.
                 if !stroke_mode {
                     if vertical {
-                        let stage = VerticalStage {
-                            lines: &lines,
-                            at,
-                            font,
-                            row,
-                            accent,
-                        };
                         match self.pair.filter(|pair| *pair < lines.len()) {
                             Some(pair) => {
-                                if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len())
-                                {
-                                    let progress = (swap.started.elapsed().as_secs_f32()
-                                        / SWAP.as_secs_f32())
-                                    .clamp(0., 1.);
-                                    let eased = 1. - (1. - progress).powi(3);
-                                    for offset in 0..2 {
-                                        vertical_rows.push(vertical_row(
-                                            &stage,
-                                            swap.from + offset,
-                                            None,
-                                            offset as f32 * row - row * eased,
-                                            1. - eased,
-                                        ));
-                                        vertical_rows.push(vertical_row(
-                                            &stage,
-                                            pair + offset,
-                                            None,
-                                            offset as f32 * row + 2. * row * (1. - eased),
-                                            eased,
-                                        ));
-                                    }
-                                } else {
-                                    for offset in 0..2 {
-                                        vertical_rows.push(vertical_row(
-                                            &stage,
-                                            pair + offset,
-                                            None,
-                                            offset as f32 * row,
-                                            1.,
-                                        ));
-                                    }
-                                }
+                                let swap =
+                                    self.swap
+                                        .filter(|swap| swap.from < lines.len())
+                                        .map(|swap| {
+                                            let progress = (swap.started.elapsed().as_secs_f32()
+                                                / SWAP.as_secs_f32())
+                                            .clamp(0., 1.);
+                                            (swap.from, 1. - (1. - progress).powi(3))
+                                        });
+                                vertical_stage = Some(vertical_scene(
+                                    VerticalStage {
+                                        lines: &lines,
+                                        at,
+                                        font,
+                                        height: bounds.size.height.as_f32() - EDGE,
+                                        accent,
+                                    },
+                                    pair,
+                                    swap,
+                                    slot,
+                                    None,
+                                ));
                             }
                             None => placeholder = Some(interlude_dots(font, accent, breath)),
                         }
@@ -2349,15 +2404,19 @@ impl Render for DesktopLyric {
                 let second = lines.next().unwrap_or_default().to_owned();
                 if vertical {
                     let lines = vec![synthetic_line(first, 0), synthetic_line(second, 10_000)];
-                    let stage = VerticalStage {
-                        lines: &lines,
-                        at,
-                        font,
-                        row,
-                        accent,
-                    };
-                    vertical_rows.push(vertical_row(&stage, 0, Some(LineRole::Singing), 0., 1.));
-                    vertical_rows.push(vertical_row(&stage, 1, Some(LineRole::Preview), row, 1.));
+                    vertical_stage = Some(vertical_scene(
+                        VerticalStage {
+                            lines: &lines,
+                            at,
+                            font,
+                            height: bounds.size.height.as_f32() - EDGE,
+                            accent,
+                        },
+                        0,
+                        None,
+                        font * SLOT_RATIO,
+                        Some((LineRole::Singing, LineRole::Preview)),
+                    ));
                 } else {
                     rows.push(plain_row(
                         first,
@@ -2391,15 +2450,19 @@ impl Render for DesktopLyric {
                         synthetic_line(title.to_string(), 0),
                         synthetic_line(artist.to_string(), 10_000),
                     ];
-                    let stage = VerticalStage {
-                        lines: &lines,
-                        at,
-                        font,
-                        row,
-                        accent,
-                    };
-                    vertical_rows.push(vertical_row(&stage, 0, Some(LineRole::Singing), 0., 1.));
-                    vertical_rows.push(vertical_row(&stage, 1, Some(LineRole::Preview), row, 1.));
+                    vertical_stage = Some(vertical_scene(
+                        VerticalStage {
+                            lines: &lines,
+                            at,
+                            font,
+                            height: bounds.size.height.as_f32() - EDGE,
+                            accent,
+                        },
+                        0,
+                        None,
+                        font * SLOT_RATIO,
+                        Some((LineRole::Singing, LineRole::Preview)),
+                    ));
                 } else {
                     rows.push(plain_row(
                         title.to_string(),
@@ -2445,21 +2508,15 @@ impl Render for DesktopLyric {
         let showing_stroke = stroke_mode && self.stroke.is_some();
         // The interlude dots breathe, so a stage that shows them keeps asking for frames.
         let idle = match vertical {
-            true => vertical_rows.is_empty(),
+            true => vertical_stage.is_none(),
             false => placeholder.is_some(),
         };
         let breathing = !showing_stroke && idle;
         if breathing {
             window.request_animation_frame();
         }
-        let vertical_content = div()
-            .relative()
-            .size_full()
-            .when(idle, |this| {
-                this.child(interlude_dots(font, accent, breath))
-            })
-            .children(vertical_rows)
-            .into_any_element();
+        let vertical_content =
+            vertical_stage.unwrap_or_else(|| interlude_dots(font, accent, breath));
         let vertical_stage_element = div()
             .flex_1()
             .min_h_0()

@@ -34,6 +34,9 @@ const STAGE_SAFE_RATIO: f32 = 0.1;
 const INSTANT_CHAR_BUDGET_MS: f64 = 250.;
 const CATCHUP_INSTANT_MS: f64 = 600.;
 const STROKE_CACHE_LIMIT: usize = 800;
+/// How much a stroke outline widens, in the glyph box's 1024 units: each filled stroke gets an
+/// outline as thick as this under it, which reads as a bolder brush at any size.
+const STROKE_BOLD: f32 = 24.;
 
 const FLY_STAGGER_SPACE_MS: f64 = 300.;
 const FLY_PATH_NATURAL_MS: f64 = 940.;
@@ -296,7 +299,7 @@ pub(crate) async fn fetch_hanzi(ch: char) -> Result<Option<Arc<Hanzi>>> {
                 continue;
             }
             let svg = format!(
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(0,900) scale(1,-1)"><path d="{}" fill="black"/></g></svg>"#,
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><g transform="translate(0,900) scale(1,-1)"><path d="{}" fill="black" stroke="black" stroke-width="{STROKE_BOLD}" stroke-linejoin="round" stroke-linecap="round"/></g></svg>"#,
                 path.replace('"', "&quot;").replace('&', "&amp;")
             );
             strokes.push(HanziStroke {

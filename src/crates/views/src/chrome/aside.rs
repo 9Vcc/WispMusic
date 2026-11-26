@@ -1948,7 +1948,7 @@ impl Aside {
                         .text_size(verse)
                         .line_height(line_height)
                         .text_color(tint)
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::NORMAL)
                         .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                             this.set_hovered(Warm::Verse(index), *over, cx)
                         }))
@@ -2023,7 +2023,7 @@ impl Aside {
                                 .flex_col()
                                 .gap_1()
                                 .text_size(plain_size)
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.foreground)
                                 .when(sung.mirrored, |this| this.text_right())
                                 .map(|this| match (&rows, romanized.is_some()) {
@@ -2744,7 +2744,7 @@ pub(crate) fn verse(
         })
         .line_height(active_size * ui::LEADING)
         .text_color(tint)
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::NORMAL)
         .child(
             div()
                 .flex()
@@ -3323,7 +3323,7 @@ fn lyrics_wrap_rows(
     }
 
     let mut style = window.text_style();
-    style.font_weight = FontWeight::SEMIBOLD;
+    style.font_weight = FontWeight::NORMAL;
     let fragments = parts
         .iter()
         .map(|(text, _)| SharedString::from(text.clone()))
