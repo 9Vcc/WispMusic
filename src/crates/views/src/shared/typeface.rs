@@ -17,7 +17,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::{Font, FontWeight, TextSystem, font, px};
+use gpui::{Font, FontFallbacks, FontWeight, SharedString, TextSystem, font, px};
+use state::SYSTEM_FONT;
 
 /// Set while a family is being probed. Asking a broken face for its box panics (that is the
 /// whole point of the probe), and the app-wide panic hook would otherwise write a full backtrace
@@ -60,6 +61,86 @@ pub(crate) fn drawable(text_system: &Arc<TextSystem>, names: Vec<String>) -> Vec
         .collect()
 }
 
+// [wisp] 全局主字体：内嵌的阿里巴巴普惠体 3.0（`src/assets/fonts/`，由
+// `wisp/build.rs` 扫成 `FONTS` 表注册进 TextSystem）。它自带拉丁与中日韩字形，
+// 中英文共用一套笔画与字面，观感统一；系统自带的雅黑/宋体在部分字号与字重下会
+// 丢笔画、发虚。
+//
+// 这里必须是**主字体**，不能只当回退项：gpui_windows 生成回退映射时是从
+// **系统**字体集合里按族名查字的（`direct_write.rs::generate_font_fallbacks`），
+// 内嵌字体只活在 custom 集合里，系统里没装就查不到、那条映射会被静默跳过。
+// 所以把普惠体写进 `SCRIPTS` 是无效的（此前即如此，中文实际一直走雅黑）。
+//
+// 族名取 typographic family（nameID 16）而**不是** nameID 1：实测注册进
+// DirectWrite 后，字体集合报告的名字是本地化的「阿里巴巴普惠体 3.0」，而
+// `Alibaba PuHuiTi 3.0 65 Medium` 这种带字重后缀的 nameID 1 反而查不到——排版
+// 宽度与兜底字体一致，说明静默回落了。同一份实测还确认 10 个字重被归为**一个**
+// 字族，能按 weight 选到不同字面，所以字重差异必须靠内嵌多份 ttf 来给：
+// 目前内嵌 65 Medium（500，正文）/ 75 SemiBold（600）/ 85 Bold（700）三档，
+// 品牌名与标题用的 SEMIBOLD/BOLD 就落到真字面上，而不是由 500 一档顶替。
+pub(crate) const UI_FONT: &str = "Alibaba PuHuiTi 3.0";
+
+// [wisp] 主字体缺字时的回退链，按语种排优先级。普惠体覆盖拉丁与中日韩，
+// 这里补的是阿拉伯/希伯来/泰/天城体与 emoji，以及各平台的中文兜底。
+const SCRIPTS: [&str; 18] = [
+    "Source Han Sans",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK TC",
+    "Noto Sans CJK KR",
+    "Noto Sans Arabic",
+    "Noto Sans Hebrew",
+    "Noto Sans Thai",
+    "Noto Sans Devanagari",
+    "Hiragino Sans",
+    "PingFang SC",
+    "Apple SD Gothic Neo",
+    "Yu Gothic UI",
+    "Microsoft YaHei UI",
+    "Malgun Gothic",
+    "Noto Color Emoji",
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+];
+
+pub(crate) fn ui_font(chosen: &str) -> Font {
+    match chosen == SYSTEM_FONT {
+        true => Font {
+            fallbacks: Some(scripts()),
+            ..font(UI_FONT)
+        },
+        false => Font {
+            fallbacks: Some(scripts()),
+            ..font(SharedString::from(chosen.to_owned()))
+        },
+    }
+}
+
+/// The system fonts drawn for whatever `UI_FONT` and a chosen face leave uncovered. One list
+/// for both, since an embedded face cannot serve as a fallback: gpui_windows resolves the
+/// names below against the **system** collection only, where the bundled font is absent.
+fn scripts() -> FontFallbacks {
+    static SCRIPTS_FALLBACK: std::sync::OnceLock<FontFallbacks> = std::sync::OnceLock::new();
+    SCRIPTS_FALLBACK
+        .get_or_init(|| {
+            FontFallbacks::from_fonts(SCRIPTS.iter().map(|name| (*name).to_owned()).collect())
+        })
+        .clone()
+}
+
+/// The family lyrics draw in: a Kai face bundled beside the interface font. The stroke effect
+/// draws vector paths rather than glyphs, so a font only changes the text of a lyric line and
+/// the letters that effect falls back to for characters it has no strokes for.
+pub(crate) const LYRICS_FONT: &str = "Alimama DongFangDaKai";
+
+/// The bundled lyric face with the same system fallbacks the interface font carries.
+pub(crate) fn lyrics() -> Font {
+    Font {
+        fallbacks: Some(scripts()),
+        ..font(LYRICS_FONT)
+    }
+}
+
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
@@ -74,6 +155,37 @@ mod tests {
     #[test]
     fn the_app_font_is_drawable() {
         assert!(draws(&bundled(), "Alibaba PuHuiTi 3.0"));
+    }
+
+    /// The embedded lyric face must be found by the name the lyrics ask for, or every lyric line
+    /// would quietly fall back to the interface font.
+    #[test]
+    fn the_lyric_font_registers_under_its_name() {
+        let text = TextSystem::new(gpui_platform::current_platform(false).text_system());
+        text.add_fonts(vec![std::borrow::Cow::Borrowed(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/fonts/AlimamaDongFangDaKai-Regular.ttf"
+            ))
+            .as_slice(),
+        )])
+        .unwrap();
+        let face = |family: &str| {
+            let id = text.resolve_font(&Font {
+                family: family.to_owned().into(),
+                ..Default::default()
+            });
+            (
+                text.em_width(id, px(100.)).ok(),
+                text.ascent(id, px(100.)),
+                text.descent(id, px(100.)),
+            )
+        };
+        assert_ne!(
+            face(LYRICS_FONT),
+            face("No Such Family Zzz 12345"),
+            "the lyric face resolved to the fallback instead"
+        );
     }
 
     /// A name DirectWrite knows nothing about resolves to the fallback face, which draws. The

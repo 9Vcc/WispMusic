@@ -13,10 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
-    FontWeight, Global, Hsla, IntoElement, MouseButton, MouseMoveEvent, Render, SharedString,
-    Task, TextShadow, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowOptions, black,
-    div, point, px, relative, size, white,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, Bounds, Context, CursorStyle,
+    Entity, FontWeight, Global, Hsla, IntoElement, MouseButton, MouseMoveEvent, Render,
+    SharedString, Task, TextShadow, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowKind, WindowOptions, black, div, point, px, relative, size, white,
 };
 use i18n::t;
 use music::{Lyrics as MusicLyrics, LyricsLine, LyricsWord};
@@ -24,33 +24,40 @@ use state::{AppSettings, Io, Lyrics, Playback, PlaybackState, Wisp};
 use ui::Button;
 
 use crate::chrome::stroke_lyrics::{
-    FlyStroke, Hanzi, Pose, StrokeCell, Timing, fetch_hanzi, fit_timeline, flatten_line,
-    fly_strokes, instant_line, is_strokable, next_random, STROKE_SCATTER_MS,
+    FlyStroke, Hanzi, Pose, STROKE_SCATTER_MS, StrokeCell, Timing, fetch_hanzi, fit_timeline,
+    flatten_line, fly_strokes, instant_line, is_strokable, next_random,
 };
 
 use crate::shared::transport::{next, previous, toggle};
+use crate::shared::typeface;
 
 const WIDTH: f32 = 1000.;
 /// Vertical windows trade the wide strip for a tall one, two columns wide.
 const VERTICAL_HEIGHT: f32 = 620.;
-const VERTICAL_MIN_WIDTH: f32 = 300.;
-const VERTICAL_MAX_WIDTH: f32 = 600.;
-const VERTICAL_RATIO: f32 = 6.5;
 /// Room above the taskbar for the window's bottom edge.
 const MARGIN: f32 = 56.;
 const HEADER: f32 = 48.;
 const EDGE: f32 = 16.;
-/// Keep the vertical toolbar and the right column clear of each other.
-const VERTICAL_SAFE: f32 = 48.;
 const RADIUS: f32 = 12.;
-const MIN_FONT: f32 = 24.;
-const MAX_FONT: f32 = 64.;
-const FONT_STEP: f32 = 2.;
-/// Line slot height and the stage height a font size designs for, from the reference.
+const MIN_FONT: f32 = 20.;
+const MAX_FONT: f32 = 96.;
+/// Line slot height, from the reference.
 const SLOT_RATIO: f32 = 1.35;
-const DESIGN_RATIO: f32 = 3.4;
-const DESIGN_MIN: f32 = 140.;
-const DESIGN_MAX: f32 = 320.;
+/// The window height, horizontal, and width, vertical, that show the smallest and the largest
+/// lyrics. The window is the one size control: its sizing axis maps linearly onto the font,
+/// taken from EchoMusic, and the other axis only decides how much of a line fits.
+const STRIP_MIN: f32 = 140.;
+const STRIP_MAX: f32 = 360.;
+const COLUMN_MIN: f32 = 120.;
+const COLUMN_MAX: f32 = 520.;
+/// The smallest the window may be dragged to, in logical pixels.
+const WINDOW_MIN: f32 = 80.;
+/// The grab zones along the edges, the bigger corners that take precedence, and the inset that
+/// keeps the two apart. A transparent window cannot wear a native sizing frame, so the strip
+/// resizes itself from these.
+const HANDLE: f32 = 8.;
+const CORNER: f32 = 14.;
+const HANDLE_INSET: f32 = 12.;
 /// The pair slides out over this long after its second line ends.
 const SWAP: Duration = Duration::from_millis(220);
 /// The dark plate that fades in under the lyrics on hover, and the heavier one that backs
@@ -60,15 +67,17 @@ const INTERACT_ALPHA: f32 = 0.7;
 const HOVER_FADE: Duration = Duration::from_millis(300);
 /// How often the pointer is checked against the window, catching leaves the hover events miss.
 const HOVER_POLL: Duration = Duration::from_millis(200);
-/// The lyrics ease towards the size their window now calls for, rather than snapping.
-const FONT_SETTLE: Duration = Duration::from_millis(220);
-/// Repaint cadence for the word sweep and the size transition.
+/// One breath of the interlude dots.
+const BREATH: Duration = Duration::from_millis(2400);
+/// Repaint cadence for the word sweep and the drag resize, one frame per tick.
 const SWEEP_FRAME: Duration = Duration::from_millis(16);
 const SWEEP_LEAST: Duration = Duration::from_millis(180);
 const SWEEP_STRETCH: f32 = 1.4;
 const SWEPT: f32 = 0.98;
 /// How much of a word the leading edge fades over, relative to its text size.
 const SWEEP_EDGE: f32 = 0.25;
+/// How bright a character stays before the sweep reaches it, so the fill reads as it grows.
+const UNSUNG: f32 = 0.32;
 
 #[derive(Clone, Copy)]
 struct MainHost(AnyWindowHandle);
@@ -176,7 +185,7 @@ fn open(cx: &mut App) {
             window.on_window_should_close(cx, {
                 let settings = settings.clone();
                 move |_, cx| {
-                    clear_interaction();
+                    clear_moving();
                     settings.update(cx, |settings, cx| settings.set_desktop_lyrics(false, cx));
                     cx.remove_global::<DesktopWindow>();
                     true
@@ -201,20 +210,22 @@ fn hwnd(window: &Window) -> Option<*mut std::ffi::c_void> {
 }
 
 /// Hides the DWM frame, which otherwise draws an inactive border and shadow around the
-/// transparent strip.
+/// transparent strip, and watches the window's move loop so the view can show its plate.
 #[cfg(target_os = "windows")]
 fn hide_frame(window: &Window) {
     use windows_sys::Win32::Graphics::Dwm::{
         DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
         DwmSetWindowAttribute,
     };
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
     let Some(hwnd) = hwnd(window) else {
         return;
     };
-    make_resizable(hwnd);
+    clear_moving();
     let policy = DWMNCRP_DISABLED;
     let border = DWMWA_COLOR_NONE;
     unsafe {
+        SetWindowSubclass(hwnd, Some(frame_subclass), FRAME_SUBCLASS, 0);
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_NCRENDERING_POLICY as u32,
@@ -233,27 +244,92 @@ fn hide_frame(window: &Window) {
 #[cfg(not(target_os = "windows"))]
 fn hide_frame(_window: &Window) {}
 
-/// Set while Windows runs the move or resize loop, so the view can show its outline.
+/// Set while Windows runs the move loop, so the view can show its plate and outline.
 #[cfg(target_os = "windows")]
-static INTERACTING: AtomicBool = AtomicBool::new(false);
+static MOVING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
-fn interacting() -> bool {
-    INTERACTING.load(Ordering::Relaxed)
+fn moving() -> bool {
+    MOVING.load(Ordering::Relaxed)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn interacting() -> bool {
+fn moving() -> bool {
     false
 }
 
 #[cfg(target_os = "windows")]
-fn clear_interaction() {
-    INTERACTING.store(false, Ordering::Relaxed);
+fn clear_moving() {
+    MOVING.store(false, Ordering::Relaxed);
 }
 
 #[cfg(not(target_os = "windows"))]
-fn clear_interaction() {}
+fn clear_moving() {}
+
+#[cfg(target_os = "windows")]
+const FRAME_SUBCLASS: usize = 1;
+
+/// The private message that hands the window loop a new rect. Sizing straight from a gpui
+/// update would re-enter the app from the resize callback it provokes, which the app cannot
+/// take, so the drag leaves the rect here and lets the message loop apply it instead.
+#[cfg(target_os = "windows")]
+const RESIZE_MESSAGE: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+
+#[cfg(target_os = "windows")]
+static PENDING_RECT: std::sync::Mutex<Option<(i32, i32, i32, i32)>> = std::sync::Mutex::new(None);
+
+/// Keeps the client area over the whole window, reports the move loop, and applies the rects
+/// a drag hands over. Sizing is the view's own: setting `WS_THICKFRAME` would hand the drag to
+/// the OS, whose modal loop stutters on a layered window and whose frame the strip does not
+/// want.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn frame_subclass(
+    handle: *mut std::ffi::c_void,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    _subclass: usize,
+    _data: usize,
+) -> isize {
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+        WM_NCCALCSIZE,
+    };
+
+    unsafe {
+        match message {
+            WM_ENTERSIZEMOVE => {
+                MOVING.store(true, Ordering::Relaxed);
+                DefSubclassProc(handle, message, wparam, lparam)
+            }
+            WM_EXITSIZEMOVE => {
+                MOVING.store(false, Ordering::Relaxed);
+                DefSubclassProc(handle, message, wparam, lparam)
+            }
+            WM_NCCALCSIZE if wparam != 0 => 0,
+            RESIZE_MESSAGE => {
+                let rect = PENDING_RECT
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.take());
+                if let Some((x, y, width, height)) = rect {
+                    SetWindowPos(
+                        handle,
+                        std::ptr::null_mut(),
+                        x,
+                        y,
+                        width,
+                        height,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
+                0
+            }
+            _ => DefSubclassProc(handle, message, wparam, lparam),
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn window_host(window: &Window) -> Option<usize> {
@@ -297,167 +373,99 @@ fn left_button_down() -> bool {
     false
 }
 
+/// The pointer in screen pixels, which do not shift as the window follows a resize drag.
 #[cfg(target_os = "windows")]
-const RESIZE_SUBCLASS: usize = 1;
+fn cursor_position() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut point = POINT::default();
+    unsafe { (GetCursorPos(&mut point) != 0).then_some((point.x, point.y)) }
+}
 
-/// Adds the sizing frame back and owns its hit testing: the client area covers the whole
-/// window, and the outer few pixels answer as resize edges instead of as content.
+/// The window rect in screen pixels, as left, top, right and bottom.
 #[cfg(target_os = "windows")]
-fn make_resizable(handle: *mut std::ffi::c_void) {
-    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_THICKFRAME,
-    };
-    clear_interaction();
+fn window_rect(window: &Window) -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let handle = hwnd(window)?;
+    let mut rect = RECT::default();
     unsafe {
-        SetWindowSubclass(handle, Some(resize_subclass), RESIZE_SUBCLASS, 0);
-        let style = GetWindowLongPtrW(handle, GWL_STYLE);
-        SetWindowLongPtrW(handle, GWL_STYLE, style | WS_THICKFRAME as isize);
-        SetWindowPos(
-            handle,
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-        );
+        (GetWindowRect(handle, &mut rect) != 0).then_some((
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+        ))
     }
 }
 
+/// Moves and resizes the window without activating it, which is what keeps the strip out of
+/// the way while it is dragged. The rect is applied by the window loop, never from here, so
+/// the resize callback it provokes finds the app free.
 #[cfg(target_os = "windows")]
-fn resize_hit(code: u32) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+fn post_window_rect(window: &Window, rect: (i32, i32, i32, i32)) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+    let Some(handle) = hwnd(window) else {
+        return;
     };
-    matches!(
-        code,
-        HTLEFT
-            | HTRIGHT
-            | HTTOP
-            | HTTOPLEFT
-            | HTTOPRIGHT
-            | HTBOTTOM
-            | HTBOTTOMLEFT
-            | HTBOTTOMRIGHT
-    )
+    if let Ok(mut pending) = PENDING_RECT.lock() {
+        *pending = Some(rect);
+    }
+    unsafe {
+        PostMessageW(handle, RESIZE_MESSAGE, 0, 0);
+    }
 }
 
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn resize_subclass(
-    handle: *mut std::ffi::c_void,
-    message: u32,
-    wparam: usize,
-    lparam: isize,
-    _subclass: usize,
-    _data: usize,
-) -> isize {
-    use windows_sys::Win32::Foundation::{POINT, RECT};
-    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
-    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows_sys::Win32::UI::Shell::DefSubclassProc;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, GetClientRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
-        HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCCALCSIZE,
-        WM_NCHITTEST, WM_NCLBUTTONDOWN,
-    };
+/// Maps a position along the window's sizing axis onto a lyric size, and back, linearly
+/// between the two design ends. Rounding both ways keeps the size a step and the window it
+/// designs for telling the same story.
+fn font_for(size: f32, from: f32, to: f32) -> f32 {
+    let share = ((size - from) / (to - from)).clamp(0., 1.);
+    (MIN_FONT + share * (MAX_FONT - MIN_FONT)).round()
+}
 
-    unsafe {
-        match message {
-            WM_ENTERSIZEMOVE => {
-                INTERACTING.store(true, Ordering::Relaxed);
-                DefSubclassProc(handle, message, wparam, lparam)
-            }
-            WM_EXITSIZEMOVE => {
-                INTERACTING.store(false, Ordering::Relaxed);
-                DefSubclassProc(handle, message, wparam, lparam)
-            }
-            WM_NCCALCSIZE if wparam != 0 => 0,
-            WM_NCHITTEST => {
-                let mut point = POINT {
-                    x: (lparam as u32 & 0xffff) as u16 as i16 as i32,
-                    y: ((lparam as u32 >> 16) & 0xffff) as u16 as i16 as i32,
-                };
-                let mut rect = RECT::default();
-                if GetClientRect(handle, &mut rect) == 0
-                    || ScreenToClient(handle, &mut point) == 0
-                {
-                    return DefSubclassProc(handle, message, wparam, lparam);
-                }
-                let dpi = GetDpiForWindow(handle);
-                let border = (8. * dpi as f32 / 96.).round().max(4.) as i32;
-                let left = point.x < border;
-                let right = point.x >= rect.right - border;
-                let top = point.y < border;
-                let bottom = point.y >= rect.bottom - border;
-                let edge = match (left, right, top, bottom) {
-                    (true, _, true, _) => HTTOPLEFT,
-                    (_, true, true, _) => HTTOPRIGHT,
-                    (true, _, _, true) => HTBOTTOMLEFT,
-                    (_, true, _, true) => HTBOTTOMRIGHT,
-                    (true, _, _, _) => HTLEFT,
-                    (_, true, _, _) => HTRIGHT,
-                    (_, _, true, _) => HTTOP,
-                    (_, _, _, true) => HTBOTTOM,
-                    _ => return DefSubclassProc(handle, message, wparam, lparam),
-                };
-                edge as isize
-            }
-            WM_NCLBUTTONDOWN if resize_hit(wparam as u32) => {
-                DefWindowProcW(handle, message, wparam, lparam);
-                0
-            }
-            _ => DefSubclassProc(handle, message, wparam, lparam),
-        }
-    }
+fn size_for(font: f32, from: f32, to: f32) -> f32 {
+    let share = ((font - MIN_FONT) / (MAX_FONT - MIN_FONT)).clamp(0., 1.);
+    (from + share * (to - from)).round()
 }
 
 fn design_width(font: f32, vertical: bool) -> f32 {
     match vertical {
-        true => (font * VERTICAL_RATIO)
-            .round()
-            .clamp(VERTICAL_MIN_WIDTH, VERTICAL_MAX_WIDTH),
+        true => size_for(font, COLUMN_MIN, COLUMN_MAX),
         false => WIDTH,
     }
 }
 
-/// The window height a font size designs for: two 1.35em slots plus the header, or a tall
-/// column that fits a whole line.
+/// The window height a font size designs for, horizontal, or the tall column a vertical strip
+/// keeps whatever its width.
 fn design_height(font: f32, vertical: bool) -> f32 {
     match vertical {
         true => VERTICAL_HEIGHT,
-        false => (font * DESIGN_RATIO).round().clamp(DESIGN_MIN, DESIGN_MAX) + HEADER,
+        false => size_for(font, STRIP_MIN, STRIP_MAX),
     }
 }
 
-/// The size lyrics draw at: the saved size times how far the window has strayed from the
-/// geometry its size designs for. A window made shorter or narrower brings smaller lyrics.
-fn effective_font(setting: f32, width: f32, height: f32, vertical: bool) -> f32 {
-    let design_width = design_width(setting, vertical);
-    let design_height = design_height(setting, vertical);
-    let (base, actual) = match vertical {
-        true => (design_width, width),
-        false => (design_height - HEADER, height - HEADER),
-    };
-    if base <= 0. || actual <= 0. || width <= 0. || height <= 0. {
-        return setting;
+/// The lyric size the window shows: its height when horizontal, its width when vertical. The
+/// other axis only decides how much of a line fits at that size.
+fn window_font(width: f32, height: f32, vertical: bool) -> f32 {
+    match vertical {
+        true => font_for(width, COLUMN_MIN, COLUMN_MAX),
+        false => font_for(height, STRIP_MIN, STRIP_MAX),
     }
-    let factor = match vertical {
-        true => (actual / base).min(height / design_height),
-        false => (actual / base).min(width / design_width),
-    };
-    (setting * factor).round().clamp(16., 96.)
 }
 
-/// Resizes the strip for a new font size or direction, keeping its centre where it was.
-fn fit_to_shape(window: &mut Window, font: f32, vertical: bool, cx: &App) {
-    place_window(
-        window,
-        design_width(font, vertical),
-        design_height(font, vertical),
-        cx,
-    );
+/// Resizes the strip for a new font size, keeping its width in the horizontal layout and its
+/// height in the vertical one. Turning the strip re-fits both axes; the axis the lyrics do not
+/// read stays as the user dragged it.
+fn fit_to_shape(window: &mut Window, font: f32, vertical: bool, turned: bool, cx: &App) {
+    let bounds = window.bounds();
+    let (width, height) = match (vertical, turned) {
+        (true, true) => (design_width(font, true), VERTICAL_HEIGHT),
+        (true, false) => (design_width(font, true), bounds.size.height.as_f32()),
+        (false, true) => (WIDTH, design_height(font, false)),
+        (false, false) => (bounds.size.width.as_f32(), design_height(font, false)),
+    };
+    place_window(window, width, height, cx);
 }
 
 fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
@@ -494,33 +502,141 @@ fn place_window(window: &mut Window, width: f32, height: f32, cx: &App) {
         y = y.clamp(top, (bottom - height).max(top));
     }
     #[cfg(target_os = "windows")]
-    if let Some(hwnd) = hwnd(window) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
-        };
+    {
         let scale = window.scale_factor();
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                std::ptr::null_mut(),
+        post_window_rect(
+            window,
+            (
                 (x * scale).round() as i32,
                 (y * scale).round() as i32,
                 (width * scale).round() as i32,
                 (height * scale).round() as i32,
-                SWP_NOACTIVATE | SWP_NOZORDER,
-            );
-        }
-        return;
+            ),
+        );
     }
     #[cfg(not(target_os = "windows"))]
-    let _ = (x, y);
-    window.resize(size(px(width), px(height)));
+    {
+        let _ = (x, y);
+        window.resize(size(px(width), px(height)));
+    }
 }
 
 #[derive(Clone, Copy)]
 struct Swap {
     from: usize,
     started: Instant,
+}
+
+/// Which edge or corner a resize drag moves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResizeDir {
+    Top,
+    TopRight,
+    Right,
+    BottomRight,
+    Bottom,
+    BottomLeft,
+    Left,
+    TopLeft,
+}
+
+impl ResizeDir {
+    const ALL: [Self; 8] = [
+        Self::Top,
+        Self::TopRight,
+        Self::Right,
+        Self::BottomRight,
+        Self::Bottom,
+        Self::BottomLeft,
+        Self::Left,
+        Self::TopLeft,
+    ];
+
+    #[cfg(target_os = "windows")]
+    fn west(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn east(self) -> bool {
+        matches!(self, Self::Right | Self::TopRight | Self::BottomRight)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn north(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn south(self) -> bool {
+        matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
+    }
+
+    fn cursor(self) -> CursorStyle {
+        match self {
+            Self::Top | Self::Bottom => CursorStyle::ResizeUpDown,
+            Self::Left | Self::Right => CursorStyle::ResizeLeftRight,
+            Self::TopLeft | Self::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+            Self::TopRight | Self::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn edge(self) -> gpui::ResizeEdge {
+        use gpui::ResizeEdge;
+        match self {
+            Self::Top => ResizeEdge::Top,
+            Self::TopRight => ResizeEdge::TopRight,
+            Self::Right => ResizeEdge::Right,
+            Self::BottomRight => ResizeEdge::BottomRight,
+            Self::Bottom => ResizeEdge::Bottom,
+            Self::BottomLeft => ResizeEdge::BottomLeft,
+            Self::Left => ResizeEdge::Left,
+            Self::TopLeft => ResizeEdge::TopLeft,
+        }
+    }
+}
+
+/// A drag on one of the strip's edges: where the pointer and the window were when it started,
+/// in screen pixels, so the window can follow the pointer exactly while the strip resizes.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct ResizeDrag {
+    dir: ResizeDir,
+    cursor: (i32, i32),
+    /// Left, top, right and bottom.
+    rect: (i32, i32, i32, i32),
+    applied: (i32, i32, i32, i32),
+}
+
+#[cfg(target_os = "windows")]
+impl ResizeDrag {
+    /// The window rect a drag to `cursor` calls for, never smaller than the least size.
+    fn rect_at(self, cursor: (i32, i32), scale: f32) -> (i32, i32, i32, i32) {
+        let (left, top, right, bottom) = self.rect;
+        let least = (WINDOW_MIN * scale).round() as i32;
+        let dx = cursor.0 - self.cursor.0;
+        let dy = cursor.1 - self.cursor.1;
+        let width = match (self.dir.east(), self.dir.west()) {
+            (true, _) => (right - left + dx).max(least),
+            (_, true) => (right - left - dx).max(least),
+            _ => right - left,
+        };
+        let height = match (self.dir.south(), self.dir.north()) {
+            (true, _) => (bottom - top + dy).max(least),
+            (_, true) => (bottom - top - dy).max(least),
+            _ => bottom - top,
+        };
+        let x = match self.dir.west() {
+            true => right - width,
+            false => left,
+        };
+        let y = match self.dir.north() {
+            true => bottom - height,
+            false => top,
+        };
+        (x, y, width, height)
+    }
 }
 
 struct DesktopLyric {
@@ -535,11 +651,12 @@ struct DesktopLyric {
     swap: Option<Swap>,
     track: Option<String>,
     fit: Option<(f32, bool)>,
-    /// The size on screen, easing towards what the window measures.
-    font: Option<f32>,
-    font_goal: f32,
-    font_from: f32,
-    font_started: Option<Instant>,
+    /// When the strip opened, which is where the interlude dots' breath starts.
+    dots_at: Instant,
+    #[cfg(target_os = "windows")]
+    resize: Option<ResizeDrag>,
+    #[cfg(target_os = "windows")]
+    resize_task: Option<Task<()>>,
     hovering: bool,
     hover_changed: bool,
     hover_epoch: u32,
@@ -599,10 +716,12 @@ impl DesktopLyric {
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         // The window can move out from under the pointer in the middle of a drag, so its
         // leave message is not enough to keep hover honest.
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(HOVER_POLL).await;
-            if this.update(cx, |this, cx| this.poll_hover(cx)).is_err() {
-                break;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(HOVER_POLL).await;
+                if this.update(cx, |this, cx| this.poll_hover(cx)).is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -617,10 +736,11 @@ impl DesktopLyric {
             swap: None,
             track: None,
             fit: None,
-            font: None,
-            font_goal: 0.,
-            font_from: 0.,
-            font_started: None,
+            dots_at: Instant::now(),
+            #[cfg(target_os = "windows")]
+            resize: None,
+            #[cfg(target_os = "windows")]
+            resize_task: None,
             hovering: false,
             hover_changed: false,
             hover_epoch: 0,
@@ -645,19 +765,154 @@ impl DesktopLyric {
         cx.notify();
     }
 
-    /// Keeps hover and the move/resize outline honest when the pointer leaves without a leave
-    /// message, which happens when the window moves under the cursor during a drag.
+    /// Keeps hover honest when the pointer leaves without a leave message, which happens when
+    /// the window moves under the cursor during a drag.
     fn poll_hover(&mut self, cx: &mut Context<Self>) {
         let Some(host) = self.host else {
             return;
         };
-        let inside = cursor_over_window(host);
-        let held = left_button_down();
-        if !held && interacting() {
-            clear_interaction();
-        }
-        let want = inside || (held && interacting());
+        let want = cursor_over_window(host) || self.resizing();
         self.set_hovered(want, cx);
+    }
+
+    /// Whether a resize drag is running; the plate stays up for the whole drag.
+    #[cfg(target_os = "windows")]
+    fn resizing(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn resizing(&self) -> bool {
+        false
+    }
+
+    /// Starts a resize from one of the grab zones. Windows resizes the window here, from the
+    /// pointer, because the OS sizing loop stalls a transparent window; other platforms hand
+    /// the drag to their own frame.
+    fn start_resize(&mut self, dir: ResizeDir, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_hovered(true, cx);
+        #[cfg(target_os = "windows")]
+        {
+            let (Some(cursor), Some(rect)) = (cursor_position(), window_rect(window)) else {
+                return;
+            };
+            self.resize = Some(ResizeDrag {
+                dir,
+                cursor,
+                rect,
+                applied: rect,
+            });
+            self.pump_resize(window, cx);
+        }
+        #[cfg(not(target_os = "windows"))]
+        window.start_window_resize(dir.edge());
+    }
+
+    /// Drives the resize drag one frame at a time. The pointer's screen position, which the OS
+    /// keeps delivering under its mouse capture, is the source of truth, so the window follows
+    /// exactly even when the edge outruns it.
+    #[cfg(target_os = "windows")]
+    fn pump_resize(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.resize_task.is_some() {
+            return;
+        }
+        self.resize_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SWEEP_FRAME).await;
+            this.update_in(cx, |this, window, cx| {
+                this.resize_task = None;
+                this.step_resize(window, cx);
+            })
+            .ok();
+        }));
+    }
+
+    #[cfg(target_os = "windows")]
+    fn step_resize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.resize else {
+            return;
+        };
+        if !left_button_down() {
+            self.finish_resize(window, cx);
+            return;
+        }
+        let Some(cursor) = cursor_position() else {
+            self.finish_resize(window, cx);
+            return;
+        };
+        let next = drag.rect_at(cursor, window.scale_factor());
+        if next != drag.applied {
+            post_window_rect(window, next);
+            if let Some(drag) = self.resize.as_mut() {
+                drag.applied = next;
+            }
+        }
+        self.pump_resize(window, cx);
+    }
+
+    /// Ends a resize drag. The size the window came out at becomes the saved font size, so the
+    /// strip reopens at the size it was left at.
+    #[cfg(target_os = "windows")]
+    fn finish_resize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.resize.take() else {
+            return;
+        };
+        let final_rect = cursor_position()
+            .map(|cursor| drag.rect_at(cursor, window.scale_factor()))
+            .unwrap_or(drag.applied);
+        if final_rect != drag.applied {
+            post_window_rect(window, final_rect);
+        }
+        let scale = window.scale_factor();
+        let vertical = self.settings.read(cx).desktop_lyrics_vertical();
+        let font = window_font(
+            final_rect.2 as f32 / scale,
+            final_rect.3 as f32 / scale,
+            vertical,
+        );
+        self.fit = Some((font, vertical));
+        self.settings.update(cx, |settings, cx| {
+            settings.set_desktop_lyrics_font_size(font, cx)
+        });
+        cx.notify();
+    }
+
+    /// A grab zone for one edge or corner, placed just inside the border so the pointer never
+    /// has to leave the window to catch it.
+    fn resize_zone(&self, dir: ResizeDir, cx: &mut Context<Self>) -> AnyElement {
+        let zone = div().absolute().cursor(dir.cursor()).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.start_resize(dir, window, cx);
+            }),
+        );
+        let zone = match dir {
+            ResizeDir::Top => zone
+                .top_0()
+                .left(px(HANDLE_INSET))
+                .right(px(HANDLE_INSET))
+                .h(px(HANDLE)),
+            ResizeDir::Bottom => zone
+                .bottom_0()
+                .left(px(HANDLE_INSET))
+                .right(px(HANDLE_INSET))
+                .h(px(HANDLE)),
+            ResizeDir::Left => zone
+                .left_0()
+                .top(px(HANDLE_INSET))
+                .bottom(px(HANDLE_INSET))
+                .w(px(HANDLE)),
+            ResizeDir::Right => zone
+                .right_0()
+                .top(px(HANDLE_INSET))
+                .bottom(px(HANDLE_INSET))
+                .w(px(HANDLE)),
+            ResizeDir::TopLeft => zone.top_0().left_0().size(px(CORNER)),
+            ResizeDir::TopRight => zone.top_0().right_0().size(px(CORNER)),
+            ResizeDir::BottomLeft => zone.bottom_0().left_0().size(px(CORNER)),
+            ResizeDir::BottomRight => zone.bottom_0().right_0().size(px(CORNER)),
+        };
+        zone.into_any_element()
     }
 
     /// Redraws at the karaoke cadence while a line is filling. Position reports arrive twice a
@@ -710,7 +965,11 @@ impl DesktopLyric {
     }
 
     fn build_stroke_pair(&mut self, lines: &[LyricsLine], pair: usize, cx: &mut Context<Self>) {
-        if self.stroke.as_ref().is_some_and(|scene| scene.first == pair) {
+        if self
+            .stroke
+            .as_ref()
+            .is_some_and(|scene| scene.first == pair)
+        {
             return;
         }
         let mut built = Vec::with_capacity(2);
@@ -732,10 +991,7 @@ impl DesktopLyric {
             let window = next_start
                 .saturating_sub(line.start)
                 .max(Duration::from_millis(600));
-            let last_offset = timings
-                .last()
-                .map(|timing| timing.trigger_ms)
-                .unwrap_or(0.)
+            let last_offset = timings.last().map(|timing| timing.trigger_ms).unwrap_or(0.)
                 - line.start.as_secs_f64() * 1000.;
             let fly_budget = (window.as_secs_f64() * 1000. - 120. - last_offset).max(0.);
             let instant = instant_line(&timings);
@@ -887,13 +1143,6 @@ impl DesktopLyric {
         }
     }
 
-    fn change_font(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let size = self.settings.read(cx).desktop_lyrics_font_size();
-        self.settings.update(cx, |settings, cx| {
-            settings.set_desktop_lyrics_font_size((size + delta).clamp(MIN_FONT, MAX_FONT), cx)
-        });
-    }
-
     fn transport(&self, vertical: bool, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
@@ -912,8 +1161,7 @@ impl DesktopLyric {
             .into_any_element()
     }
 
-    fn display(&self, vertical: bool, size: f32, cx: &mut Context<Self>) -> AnyElement {
-        let font = SharedString::from(format!("{}", size.round() as i32));
+    fn display(&self, vertical: bool, cx: &mut Context<Self>) -> AnyElement {
         let vertical_layout = self.settings.read(cx).desktop_lyrics_vertical();
         let stroke = self.settings.read(cx).desktop_lyrics_stroke();
         div()
@@ -965,33 +1213,6 @@ impl DesktopLyric {
                     })),
             )
             .child(
-                Button::new("desktop-lyrics-font-down")
-                    .ghost()
-                    .small()
-                    .icon("icons/minus.svg")
-                    .tint(white())
-                    .tooltip_above("desktop-lyrics-font-down")
-                    .on_click(cx.listener(|this, _, _, cx| this.change_font(-FONT_STEP, cx))),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .min_w(px(20.))
-                    .text_center()
-                    .text_size(px(11.))
-                    .text_color(white().opacity(0.7))
-                    .child(font),
-            )
-            .child(
-                Button::new("desktop-lyrics-font-up")
-                    .ghost()
-                    .small()
-                    .icon("icons/plus.svg")
-                    .tint(white())
-                    .tooltip_above("desktop-lyrics-font-up")
-                    .on_click(cx.listener(|this, _, _, cx| this.change_font(FONT_STEP, cx))),
-            )
-            .child(
                 Button::new("desktop-lyrics-close")
                     .ghost()
                     .small()
@@ -1006,7 +1227,7 @@ impl DesktopLyric {
             .into_any_element()
     }
 
-    fn header(&self, title: SharedString, size: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, title: SharedString, cx: &mut Context<Self>) -> AnyElement {
         let title = div()
             .flex()
             .min_w_0()
@@ -1043,11 +1264,11 @@ impl DesktopLyric {
             .when(!self.hovering, |this| this.invisible())
             .child(title)
             .child(self.transport(false, cx))
-            .child(self.display(false, size, cx))
+            .child(self.display(false, cx))
             .into_any_element()
     }
 
-    fn vertical_header(&self, size: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn vertical_header(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .absolute()
             .right(px(8.))
@@ -1060,7 +1281,7 @@ impl DesktopLyric {
             .gap(px(8.))
             .when(!self.hovering, |this| this.invisible())
             .child(self.transport(true, cx))
-            .child(self.display(true, size, cx))
+            .child(self.display(true, cx))
             .into_any_element()
     }
 }
@@ -1072,15 +1293,10 @@ fn shadows(size: f32) -> Vec<TextShadow> {
     let edge = (size * 0.04).clamp(1., 2.5);
     let mut shadows = Vec::with_capacity(10);
     for (x, y) in [(1., 0.), (-1., 0.), (0., 1.), (0., -1.)] {
-        shadows.push(
-            TextShadow::new(black().opacity(0.55)).offset(px(edge * x), px(edge * y)),
-        );
+        shadows.push(TextShadow::new(black().opacity(0.55)).offset(px(edge * x), px(edge * y)));
     }
     for (x, y) in [(0.7, 0.7), (-0.7, 0.7), (0.7, -0.7), (-0.7, -0.7)] {
-        shadows.push(
-            TextShadow::new(black().opacity(0.4))
-                .offset(px(edge * x), px(edge * y)),
-        );
+        shadows.push(TextShadow::new(black().opacity(0.4)).offset(px(edge * x), px(edge * y)));
     }
     shadows.push(TextShadow::new(black().opacity(0.55)).blur(px(2.)));
     shadows.push(TextShadow::new(black().opacity(0.35)).blur(px(7.)));
@@ -1115,7 +1331,13 @@ impl LineRole {
     }
 }
 
-fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32, accent: Hsla) -> AnyElement {
+fn line_text(
+    line: &LyricsLine,
+    at: Duration,
+    role: LineRole,
+    size: f32,
+    accent: Hsla,
+) -> AnyElement {
     if role == LineRole::Singing
         && let Some(words) = line.words.as_deref()
         && let Some(fragments) = word_fragments(&line.text, words)
@@ -1136,7 +1358,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32, accent:
                 .relative()
                 .flex_none()
                 .whitespace_nowrap()
-                .text_color(accent.opacity(0.32))
+                .text_color(accent.opacity(UNSUNG))
                 .child(SharedString::from(text.clone()));
             let cell = match share > 0. {
                 true => cell.child(
@@ -1152,11 +1374,7 @@ fn line_text(line: &LyricsLine, at: Duration, role: LineRole, size: f32, accent:
                         .text_shadow([])
                         .text_color(accent)
                         .when(share < 1., |this| this.fade_sides(px(0.), px(edge)))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .child(SharedString::from(text)),
-                        ),
+                        .child(div().whitespace_nowrap().child(SharedString::from(text))),
                 ),
                 false => cell,
             };
@@ -1339,7 +1557,11 @@ fn char_timings(line: &LyricsLine) -> Vec<CharTiming> {
     let mut timings = Vec::new();
     if let Some(words) = line.words.as_deref().filter(|words| !words.is_empty()) {
         for word in words {
-            let chars = word.text.chars().filter(|ch| !ch.is_whitespace()).collect::<Vec<_>>();
+            let chars = word
+                .text
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<Vec<_>>();
             let count = chars.len() as f64;
             if count == 0. {
                 continue;
@@ -1392,6 +1614,12 @@ fn vertical_char(
     accent: Hsla,
 ) -> AnyElement {
     let width = (font * 1.2).max(1.);
+    // The current line's unsung characters stay dim, as they do in the horizontal sweep, so
+    // the bright fill is what marks how far the line has been sung.
+    let base_color = match role {
+        LineRole::Singing => accent.opacity(UNSUNG),
+        _ => role.color(accent),
+    };
     let base = div()
         .relative()
         .flex_none()
@@ -1403,7 +1631,7 @@ fn vertical_char(
         .text_size(px(font))
         .line_height(relative(1.))
         .text_shadow(shadows(font))
-        .text_color(role.color(accent))
+        .text_color(base_color)
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(timing.text.to_string()));
     let base = match role == LineRole::Singing {
@@ -1420,7 +1648,9 @@ fn vertical_char(
                         .overflow_hidden()
                         .text_shadow([])
                         .text_color(accent)
-                        .when(share < 1., |this| this.fade_edges(px(0.), px(font * SWEEP_EDGE)))
+                        .when(share < 1., |this| {
+                            this.fade_edges(px(0.), px(font * SWEEP_EDGE))
+                        })
                         .child(
                             div()
                                 .absolute()
@@ -1451,8 +1681,7 @@ fn vertical_line(
     at: Duration,
     role: LineRole,
     font: f32,
-    height: f32,
-    align_end: bool,
+    row: f32,
     accent: Hsla,
 ) -> AnyElement {
     let timings = char_timings(line);
@@ -1460,13 +1689,12 @@ fn vertical_line(
         return div().into_any_element();
     }
     let slot = font * SLOT_RATIO;
-    let per = ((height / slot).floor() as usize).max(1);
+    let per = ((row / slot).floor() as usize).max(1);
     let last = timings.len().saturating_sub(1);
     let mut columns = div()
         .flex()
         .flex_row_reverse()
-        .when(align_end, |this| this.items_end())
-        .when(!align_end, |this| this.items_start())
+        .items_start()
         .gap(px((font * 0.12).max(2.)));
     let chunks = timings.chunks(per).collect::<Vec<_>>();
     for chunk in chunks {
@@ -1485,87 +1713,46 @@ struct VerticalStage<'a> {
     lines: &'a [LyricsLine],
     at: Duration,
     font: f32,
-    height: f32,
+    /// The height one lyric line is given in the strip.
+    row: f32,
     accent: Hsla,
 }
 
-fn vertical_pair(
-    stage: VerticalStage<'_>,
-    pair: usize,
+/// One lyric line in its own band of the strip. A pair stacks one line above the other, and
+/// each line still reads downwards in columns that continue to the left.
+fn vertical_row(
+    stage: &VerticalStage<'_>,
+    index: usize,
+    role: Option<LineRole>,
+    top: f32,
     opacity: f32,
-    offsets: (f32, f32),
-    roles: Option<(LineRole, LineRole)>,
 ) -> AnyElement {
-    let first = stage.lines.get(pair);
-    let second = stage.lines.get(pair + 1);
-    let (left_role, right_role) = roles.unwrap_or_else(|| {
-        (
-            first.map_or(LineRole::Preview, |line| LineRole::at(line, stage.at)),
-            second.map_or(LineRole::Preview, |line| LineRole::at(line, stage.at)),
-        )
-    });
-    let left = first
+    let text = stage
+        .lines
+        .get(index)
         .map(|line| {
             vertical_line(
                 line,
                 stage.at,
-                left_role,
+                role.unwrap_or_else(|| LineRole::at(line, stage.at)),
                 stage.font,
-                stage.height,
-                false,
-                stage.accent,
-            )
-        })
-        .unwrap_or_else(|| div().into_any_element());
-    let right = second
-        .map(|line| {
-            vertical_line(
-                line,
-                stage.at,
-                right_role,
-                stage.font,
-                stage.height,
-                true,
+                stage.row,
                 stage.accent,
             )
         })
         .unwrap_or_else(|| div().into_any_element());
     div()
         .absolute()
-        .size_full()
+        .left_0()
+        .right_0()
+        .top(px(top))
+        .h(px(stage.row))
         .flex()
-        .items_stretch()
+        .items_start()
+        .justify_center()
+        .overflow_hidden()
         .opacity(opacity)
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .relative()
-                .left(px(offsets.0))
-                .flex()
-                .items_start()
-                .justify_start()
-                .overflow_hidden()
-                .pl(px(EDGE / 2.))
-                .pr(px(4.))
-                .child(left),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .relative()
-                .left(px(offsets.1))
-                .flex()
-                .items_end()
-                .justify_end()
-                .overflow_hidden()
-                .pl(px(4.))
-                .pr(px(VERTICAL_SAFE))
-                .child(right),
-        )
+        .child(text)
         .into_any_element()
 }
 
@@ -1579,28 +1766,6 @@ fn synthetic_line(text: String, start_ms: u64) -> LyricsLine {
         secondary: Vec::new(),
         voice: Default::default(),
     }
-}
-
-fn vertical_scene(
-    stage: VerticalStage<'_>,
-    pair: usize,
-    swap: Option<(usize, f32)>,
-    slide: f32,
-    roles: Option<(LineRole, LineRole)>,
-) -> AnyElement {
-    let mut scene = div().relative().size_full();
-    if let Some((from, eased)) = swap {
-        // Both pair columns leave towards their own edge, and the incoming pair
-        // arrives from the same side.
-        let out = (-slide * eased, slide * eased);
-        let back = -slide * (1. - eased);
-        scene = scene
-            .child(vertical_pair(stage, from, 1. - eased, out, roles))
-            .child(vertical_pair(stage, pair, eased, (back, -back), roles));
-    } else {
-        scene = scene.child(vertical_pair(stage, pair, 1., (0., 0.), roles));
-    }
-    scene.into_any_element()
 }
 
 fn scatter_poses(trigger_ms: f64, index: usize, count: usize) -> Vec<Pose> {
@@ -1654,8 +1819,7 @@ fn stroke_poses(item: &StrokeChar, out_at: Option<Instant>, now: Instant) -> (Ve
             .strokes
             .iter()
             .map(|stroke| {
-                let progress =
-                    ((elapsed - stroke.delay_ms) / stroke.duration_ms).clamp(0., 1.);
+                let progress = ((elapsed - stroke.delay_ms) / stroke.duration_ms).clamp(0., 1.);
                 let eased = 1. - (1. - progress).powi(3);
                 Pose {
                     dx: stroke.dx * (1. - eased as f32),
@@ -1781,12 +1945,17 @@ fn stroke_view(
         .max(1);
     let color = accent;
     if vertical {
+        // Each line gets its own band, the way the text rows stack, and the cells shrink to
+        // fit their band with a margin at the top and bottom instead of running into the edges.
+        let row = (height - EDGE) / 2.;
+        let chars = max_chars as f32;
+        let spacing = chars + (chars - 1.) * 0.14;
         let cell = font
-            .min((height - EDGE) * 0.94 / max_chars as f32)
-            .min((width - VERTICAL_SAFE - EDGE) / 2. / 1.4)
+            .min((row - EDGE).max(0.) * 0.98 / spacing)
+            .min(width * 0.92)
             .max(12.);
         let gap = (cell * 0.14).max(4.);
-        let mut scene = div().size_full().flex().items_stretch();
+        let mut scene = div().size_full().flex().flex_col();
         for offset in 0..2 {
             let line = &pair.lines[offset];
             let shadow = stroke_column(
@@ -1806,23 +1975,15 @@ fn stroke_view(
                 layered = layered.child(cells);
                 layered.into_any_element()
             };
-            let column = div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
+            let band = div()
+                .w_full()
+                .flex_none()
+                .h(px(row))
                 .flex()
-                .flex_col()
-                .when(offset == 0, |this| this.items_start().justify_start())
-                .when(offset == 1, |this| this.items_end().justify_end())
-                .gap(px(gap))
-                .pt(px(EDGE / 2.))
-                .pb(px(EDGE / 2.))
-                .when(offset == 0, |this| this.pl(px(EDGE / 2.)));
-            let column = match offset {
-                1 => column.pr(px(VERTICAL_SAFE)),
-                _ => column,
-            };
-            scene = scene.child(column.child(cells));
+                .items_start()
+                .justify_center()
+                .pt(px(EDGE / 2.));
+            scene = scene.child(band.child(cells));
         }
         return scene.into_any_element();
     }
@@ -1865,17 +2026,31 @@ fn stroke_view(
     scene.into_any_element()
 }
 
-fn placeholder_lyric(font: f32, accent: Hsla) -> AnyElement {
+/// Three dots that breathe in the accent colour where a line would be: the interlude mark the
+/// lyrics page draws, in place of a note or a blank stage. `phase` is the breath in radians.
+fn interlude_dots(font: f32, accent: Hsla, phase: f32) -> AnyElement {
+    let size = (font * 0.26).clamp(6., 16.);
+    let gap = (font * 0.2).clamp(6., 18.);
+    let mut row = div().flex().items_center().gap(px(gap));
+    for index in 0..3 {
+        // A third of a breath apart, so the glow travels along the row.
+        let breath = ((phase - index as f32 * 0.9).sin() * 0.5 + 0.5).powi(2);
+        row = row.child(
+            div()
+                .flex_none()
+                .size(px(size))
+                .rounded_full()
+                .bg(accent.opacity(0.25 + 0.65 * breath))
+                .layer_scale(0.8 + 0.2 * breath),
+        );
+    }
     div()
         .absolute()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(font))
-        .text_color(accent.opacity(0.6))
-        .text_shadow(shadows(font))
-        .child("♪")
+        .child(row)
         .into_any_element()
 }
 
@@ -1895,65 +2070,40 @@ impl Render for DesktopLyric {
         }
         let bounds = window.bounds();
         let shape_changed = self.fit != Some((setting_font, vertical));
-        // While the window still has its old shape, draw at the saved size instead of
-        // reading a huge horizontal size out of a tall window (or the reverse).
-        let goal = match shape_changed {
+        // The window is the size control: its height, horizontal, or width, vertical, decides
+        // the lyric size directly. A changed saved size or direction re-fits the window once,
+        // and the frame in between draws at the saved size instead of reading a huge
+        // horizontal size out of a tall window (or the reverse).
+        let font = match shape_changed {
             true => setting_font,
-            false => effective_font(
-                setting_font,
+            false => window_font(
                 bounds.size.width.as_f32(),
                 bounds.size.height.as_f32(),
                 vertical,
             ),
-        };
-        let now = Instant::now();
-        match self.font {
-            None => {
-                self.font = Some(goal);
-                self.font_goal = goal;
-            }
-            Some(current) => {
-                if (goal - self.font_goal).abs() >= 0.5 {
-                    self.font_goal = goal;
-                    self.font_from = current;
-                    self.font_started = Some(now);
-                }
-            }
         }
-        if let Some(started) = self.font_started {
-            let progress =
-                ((now - started).as_secs_f32() / FONT_SETTLE.as_secs_f32()).clamp(0., 1.);
-            if progress >= 1. {
-                self.font = Some(self.font_goal);
-                self.font_started = None;
-            } else {
-                let eased = ui::ease_out_cubic(progress);
-                self.font = Some(self.font_from + (self.font_goal - self.font_from) * eased);
-                self.pump(cx);
-            }
-        } else if self.font != Some(self.font_goal) {
-            self.font = Some(self.font_goal);
-        }
-        // Whole-pixel sizes rasterize cleanly; the eased value above only paces the steps.
-        let font = self.font.unwrap_or(goal).round().max(1.);
+        .round()
+        .max(1.);
         let slot = font * SLOT_RATIO;
-        // Changing the saved size or direction resizes the strip once; the effective size
-        // then follows whatever the window measures.
+        // The interlude dots breathe on the strip's own clock, so a paused intro keeps its
+        // gentle motion.
+        let breath = (self.dots_at.elapsed().as_secs_f32() / BREATH.as_secs_f32()
+            * std::f32::consts::TAU)
+            % std::f32::consts::TAU;
+        // A vertical strip gives each line of a pair its own band, the way the horizontal
+        // layout gives each line a row.
+        let row = ((bounds.size.height.as_f32() - EDGE) / 2.).max(slot);
+        // Changing the saved size or direction resizes the strip once; the size then follows
+        // whatever the window measures.
         if shape_changed {
+            let turned = self.fit.is_some_and(|(_, saved)| saved != vertical);
             self.fit = Some((setting_font, vertical));
-            let target_width = design_width(setting_font, vertical);
-            let target_height = design_height(setting_font, vertical);
-            if (bounds.size.width.as_f32() - target_width).abs() > 1.
-                || (bounds.size.height.as_f32() - target_height).abs() > 1.
-            {
-                cx.defer_in(window, move |_, window, cx| {
-                    fit_to_shape(window, setting_font, vertical, cx);
-                    // SetWindowPos settles the native size; read it back before the next
-                    // frame so layout does not keep drawing at the old shape.
-                    window.bounds_changed(cx);
-                    cx.notify();
-                });
-            }
+            cx.defer_in(window, move |_, window, cx| {
+                // The strip takes its new rect from the window loop, which reports the new
+                // size back through the bounds callback; a resize straight from here would
+                // re-enter the app from that very callback.
+                fit_to_shape(window, setting_font, vertical, turned, cx);
+            });
         }
         let (track, position, playing) = {
             let playback = self.playback.read(cx);
@@ -2034,7 +2184,7 @@ impl Render for DesktopLyric {
         };
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        let mut vertical_stage: Option<AnyElement> = None;
+        let mut vertical_rows: Vec<AnyElement> = Vec::new();
         let mut placeholder = None;
         let mut stroke_animating = false;
         match lyric {
@@ -2064,10 +2214,7 @@ impl Render for DesktopLyric {
                     {
                         self.pump(cx);
                     }
-                    if self
-                        .swap
-                        .is_some_and(|swap| swap.started.elapsed() >= SWAP)
-                    {
+                    if self.swap.is_some_and(|swap| swap.started.elapsed() >= SWAP) {
                         self.swap = None;
                     }
                     match (self.pair, active) {
@@ -2092,32 +2239,50 @@ impl Render for DesktopLyric {
                 // The stroke view owns the stage; do not build the text layers under it.
                 if !stroke_mode {
                     if vertical {
+                        let stage = VerticalStage {
+                            lines: &lines,
+                            at,
+                            font,
+                            row,
+                            accent,
+                        };
                         match self.pair.filter(|pair| *pair < lines.len()) {
                             Some(pair) => {
-                                let swap = self
-                                    .swap
-                                    .filter(|swap| swap.from < lines.len())
-                                    .map(|swap| {
-                                        let progress = (swap.started.elapsed().as_secs_f32()
-                                            / SWAP.as_secs_f32())
-                                        .clamp(0., 1.);
-                                        (swap.from, 1. - (1. - progress).powi(3))
-                                    });
-                                vertical_stage = Some(vertical_scene(
-                                    VerticalStage {
-                                        lines: &lines,
-                                        at,
-                                        font,
-                                        height: bounds.size.height.as_f32() - EDGE,
-                                        accent,
-                                    },
-                                    pair,
-                                    swap,
-                                    slot,
-                                    None,
-                                ));
+                                if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len())
+                                {
+                                    let progress = (swap.started.elapsed().as_secs_f32()
+                                        / SWAP.as_secs_f32())
+                                    .clamp(0., 1.);
+                                    let eased = 1. - (1. - progress).powi(3);
+                                    for offset in 0..2 {
+                                        vertical_rows.push(vertical_row(
+                                            &stage,
+                                            swap.from + offset,
+                                            None,
+                                            offset as f32 * row - row * eased,
+                                            1. - eased,
+                                        ));
+                                        vertical_rows.push(vertical_row(
+                                            &stage,
+                                            pair + offset,
+                                            None,
+                                            offset as f32 * row + 2. * row * (1. - eased),
+                                            eased,
+                                        ));
+                                    }
+                                } else {
+                                    for offset in 0..2 {
+                                        vertical_rows.push(vertical_row(
+                                            &stage,
+                                            pair + offset,
+                                            None,
+                                            offset as f32 * row,
+                                            1.,
+                                        ));
+                                    }
+                                }
                             }
-                            None => placeholder = Some(placeholder_lyric(font, accent)),
+                            None => placeholder = Some(interlude_dots(font, accent, breath)),
                         }
                     } else {
                         let stage = Stage {
@@ -2129,7 +2294,8 @@ impl Render for DesktopLyric {
                         };
                         match self.pair.filter(|pair| *pair < lines.len()) {
                             Some(pair) => {
-                                if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len()) {
+                                if let Some(swap) = self.swap.filter(|swap| swap.from < lines.len())
+                                {
                                     let progress = (swap.started.elapsed().as_secs_f32()
                                         / SWAP.as_secs_f32())
                                     .clamp(0., 1.);
@@ -2166,11 +2332,11 @@ impl Render for DesktopLyric {
                                     }
                                 }
                             }
-                            None => placeholder = Some(placeholder_lyric(font, accent)),
+                            None => placeholder = Some(interlude_dots(font, accent, breath)),
                         }
                     }
                 } else if self.stroke.is_none() {
-                    placeholder = Some(placeholder_lyric(font, accent));
+                    placeholder = Some(interlude_dots(font, accent, breath));
                 }
             }
             Some(MusicLyrics::Plain { text, .. }) => {
@@ -2183,19 +2349,15 @@ impl Render for DesktopLyric {
                 let second = lines.next().unwrap_or_default().to_owned();
                 if vertical {
                     let lines = vec![synthetic_line(first, 0), synthetic_line(second, 10_000)];
-                    vertical_stage = Some(vertical_scene(
-                        VerticalStage {
-                            lines: &lines,
-                            at,
-                            font,
-                            height: bounds.size.height.as_f32() - EDGE,
-                            accent,
-                        },
-                        0,
-                        None,
-                        font * SLOT_RATIO,
-                        Some((LineRole::Singing, LineRole::Preview)),
-                    ));
+                    let stage = VerticalStage {
+                        lines: &lines,
+                        at,
+                        font,
+                        row,
+                        accent,
+                    };
+                    vertical_rows.push(vertical_row(&stage, 0, Some(LineRole::Singing), 0., 1.));
+                    vertical_rows.push(vertical_row(&stage, 1, Some(LineRole::Preview), row, 1.));
                 } else {
                     rows.push(plain_row(
                         first,
@@ -2229,19 +2391,15 @@ impl Render for DesktopLyric {
                         synthetic_line(title.to_string(), 0),
                         synthetic_line(artist.to_string(), 10_000),
                     ];
-                    vertical_stage = Some(vertical_scene(
-                        VerticalStage {
-                            lines: &lines,
-                            at,
-                            font,
-                            height: bounds.size.height.as_f32() - EDGE,
-                            accent,
-                        },
-                        0,
-                        None,
-                        font * SLOT_RATIO,
-                        Some((LineRole::Singing, LineRole::Preview)),
-                    ));
+                    let stage = VerticalStage {
+                        lines: &lines,
+                        at,
+                        font,
+                        row,
+                        accent,
+                    };
+                    vertical_rows.push(vertical_row(&stage, 0, Some(LineRole::Singing), 0., 1.));
+                    vertical_rows.push(vertical_row(&stage, 1, Some(LineRole::Preview), row, 1.));
                 } else {
                     rows.push(plain_row(
                         title.to_string(),
@@ -2265,8 +2423,8 @@ impl Render for DesktopLyric {
             }
         }
 
-        let interacting = interacting();
-        if interacting {
+        let plate_down = moving() || self.resizing();
+        if moving() {
             self.pump(cx);
         }
         let hovering = self.hovering;
@@ -2285,12 +2443,29 @@ impl Render for DesktopLyric {
         }
         let stage_height = slot * 2.;
         let showing_stroke = stroke_mode && self.stroke.is_some();
-        let vertical_content = vertical_stage.unwrap_or_else(|| placeholder_lyric(font, accent));
+        // The interlude dots breathe, so a stage that shows them keeps asking for frames.
+        let idle = match vertical {
+            true => vertical_rows.is_empty(),
+            false => placeholder.is_some(),
+        };
+        let breathing = !showing_stroke && idle;
+        if breathing {
+            window.request_animation_frame();
+        }
+        let vertical_content = div()
+            .relative()
+            .size_full()
+            .when(idle, |this| {
+                this.child(interlude_dots(font, accent, breath))
+            })
+            .children(vertical_rows)
+            .into_any_element();
         let vertical_stage_element = div()
             .flex_1()
             .min_h_0()
             .w_full()
             .relative()
+            .font(typeface::lyrics())
             .overflow_hidden()
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
@@ -2314,6 +2489,7 @@ impl Render for DesktopLyric {
             .flex()
             .items_center()
             .justify_center()
+            .font(typeface::lyrics())
             .overflow_hidden()
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
@@ -2362,10 +2538,10 @@ impl Render for DesktopLyric {
                 plate,
                 Animation::new(HOVER_FADE).with_easing(ui::ease_out_cubic),
                 move |this, delta| {
-                    if !hover_changed && !interacting {
+                    if !hover_changed && !plate_down {
                         return this;
                     }
-                    let alpha = match (interacting, hovering) {
+                    let alpha = match (plate_down, hovering) {
                         (true, _) => INTERACT_ALPHA,
                         (false, true) => HOVER_ALPHA * delta,
                         (false, false) => HOVER_ALPHA * (1. - delta),
@@ -2375,13 +2551,13 @@ impl Render for DesktopLyric {
             )
             .when(vertical, |this| {
                 this.child(vertical_stage_element)
-                    .child(self.vertical_header(setting_font, cx))
+                    .child(self.vertical_header(cx))
             })
             .when(!vertical, |this| {
-                this.child(self.header(header_title, setting_font, cx))
+                this.child(self.header(header_title, cx))
                     .child(horizontal_stage)
             })
-            .when(interacting, |this| {
+            .when(moving() || self.resizing(), |this| {
                 this.child(
                     div()
                         .absolute()
@@ -2393,6 +2569,7 @@ impl Render for DesktopLyric {
                         .border_color(white().opacity(0.4)),
                 )
             })
+            .children(ResizeDir::ALL.map(|dir| self.resize_zone(dir, cx)))
     }
 }
 
@@ -2439,31 +2616,53 @@ mod tests {
             end: Some(Duration::from_millis(2000)),
             text: "hold on".to_owned(),
             romanized: None,
-            words: Some(vec![
-                word("hold", 1000, 1500),
-                word("on", 1600, 2000),
-            ]),
+            words: Some(vec![word("hold", 1000, 1500), word("on", 1600, 2000)]),
             secondary: Vec::new(),
             voice: Default::default(),
         };
-        assert_eq!(LineRole::at(&line, Duration::from_millis(500)), LineRole::Preview);
-        assert_eq!(LineRole::at(&line, Duration::from_millis(1200)), LineRole::Singing);
-        assert_eq!(LineRole::at(&line, Duration::from_millis(1800)), LineRole::Singing);
-        assert_eq!(LineRole::at(&line, Duration::from_millis(2200)), LineRole::Sung);
+        assert_eq!(
+            LineRole::at(&line, Duration::from_millis(500)),
+            LineRole::Preview
+        );
+        assert_eq!(
+            LineRole::at(&line, Duration::from_millis(1200)),
+            LineRole::Singing
+        );
+        assert_eq!(
+            LineRole::at(&line, Duration::from_millis(1800)),
+            LineRole::Singing
+        );
+        assert_eq!(
+            LineRole::at(&line, Duration::from_millis(2200)),
+            LineRole::Sung
+        );
     }
 
     #[test]
-    fn the_font_follows_the_window_but_not_under_sixteen() {
-        assert_eq!(design_height(40., false), 188.);
-        assert_eq!(design_height(64., false), 266.);
-        assert_eq!(design_height(40., true), 620.);
-        assert_eq!(design_width(40., true), 300.);
-        assert_eq!(effective_font(40., 1000., 188., false), 40.);
-        assert!(effective_font(40., 1000., 120., false) < 40.);
-        assert_eq!(effective_font(40., 500., 188., false), 20.);
-        assert_eq!(effective_font(40., 200., 60., false), 16.);
-        assert_eq!(effective_font(40., 400., 620., true), 40.);
-        assert!(effective_font(40., 200., 620., true) < 40.);
+    fn the_window_size_is_the_lyric_size() {
+        // The strip's height sets the font, its width only how much of a line fits.
+        assert_eq!(window_font(1000., STRIP_MIN, false), MIN_FONT);
+        assert_eq!(window_font(1000., STRIP_MAX, false), MAX_FONT);
+        assert_eq!(window_font(500., STRIP_MAX, false), MAX_FONT);
+        assert_eq!(window_font(1000., 250., false), 58.);
+        assert_eq!(window_font(COLUMN_MIN, 620., true), MIN_FONT);
+        assert_eq!(window_font(COLUMN_MAX, 620., true), MAX_FONT);
+        assert_eq!(window_font(COLUMN_MIN, 200., true), MIN_FONT);
+    }
+
+    #[test]
+    fn a_designed_size_reads_back_as_the_font_it_was_made_for() {
+        for font in (20..=96).step_by(2).map(|font| font as f32) {
+            assert_eq!(window_font(1000., design_height(font, false), false), font,);
+            assert_eq!(
+                window_font(design_width(font, true), VERTICAL_HEIGHT, true),
+                font,
+            );
+        }
+        assert_eq!(design_height(40., false), 198.);
+        assert_eq!(design_width(40., true), 225.);
+        assert_eq!(design_height(40., true), VERTICAL_HEIGHT);
+        assert_eq!(design_width(40., false), WIDTH);
     }
 
     #[test]

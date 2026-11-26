@@ -7,10 +7,9 @@ use gpui::prelude::*;
 
 use gpui::accesskit::{Role, Toggled};
 use gpui::{
-    Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity,
-    ExternalPaths, FontWeight, Hsla, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels,
-    Point, Render, ScrollHandle, ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task,
+    Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity, ExternalPaths,
+    FontWeight, Hsla, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Render, ScrollHandle, ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task,
     UniformListScrollHandle, Window, canvas, div, ease_in_out, px, relative, size, svg,
     uniform_list,
 };
@@ -18,25 +17,25 @@ use i18n::t;
 use music::{Contributor, Listening, Shape, Spectrum, Track, Voice};
 use router::{Destination, LibraryTab, Link as _};
 use state::{
-    AppSettings, Lyrics, LyricsState, LyricMotionPreset, Network, Playback, PlaybackState, Queue,
+    AppSettings, LyricMotionPreset, Lyrics, LyricsState, Network, Playback, PlaybackState, Queue,
     QueuePosition, QueueSections as Sections, QueueSlot as Slot, QueueView, RomanizationScripts,
-    Shelf, SideTab, Wisp, Whence,
+    Shelf, SideTab, Whence, Wisp,
 };
 use ui::{
-    ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Glowing as _, Initials, Motion,
-    Menu, MenuItem, Motioned as _, PREFETCH_REACH, Pin, Pinnable as _, Popup, Scrollbar, Scroller,
-    Spot, Springs,
-    Tails as _, Text, Vacancy, drop_gap, drop_marker, ease_out_cubic, ease_out_expo, eyebrow,
-    faint, mix, prefetch, snapped, vacant,
+    ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Glowing as _, Initials, Menu,
+    MenuItem, Motion, Motioned as _, PREFETCH_REACH, Pin, Pinnable as _, Popup, Scrollbar,
+    Scroller, Spot, Springs, Tails as _, Text, Vacancy, drop_gap, drop_marker, ease_out_cubic,
+    ease_out_expo, eyebrow, faint, mix, prefetch, snapped, vacant,
 };
 use unicode_bidi::{BidiClass, Direction};
 
+use super::lyrics_effects::parallax_offset;
+use super::stroke_lyrics::StrokeLyrics;
 use crate::chrome::{Chrome, section_label};
 use crate::shared::menus::ItemMenu;
 use crate::shared::pins::Pinned as _;
+use crate::shared::typeface;
 use crate::shared::{effects, quiet};
-use super::lyrics_effects::parallax_offset;
-use super::stroke_lyrics::StrokeLyrics;
 
 const QUEUE: &str = "queue";
 /// How many text heights across the picture of whoever queued a song is.
@@ -345,9 +344,8 @@ impl Aside {
         let lyrics = Wisp::global(cx).lyrics.clone();
         cx.observe(&lyrics, |_, _, cx| cx.notify()).detach();
         let settings = Wisp::global(cx).settings.clone();
-        let stroke = cx.new(|cx| {
-            StrokeLyrics::new(lyrics.clone(), playback.clone(), settings.clone(), cx)
-        });
+        let stroke =
+            cx.new(|cx| StrokeLyrics::new(lyrics.clone(), playback.clone(), settings.clone(), cx));
         let motion_preset = settings.read(cx).lyrics_motion_preset();
         cx.observe(&settings, |this, settings, cx| {
             if !settings.read(cx).breathing_lyrics() {
@@ -1141,7 +1139,8 @@ impl Aside {
                 .selected(selected)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.version_menu = None;
-                    this.lyrics.update(cx, |lyrics, cx| lyrics.choose(index, cx));
+                    this.lyrics
+                        .update(cx, |lyrics, cx| lyrics.choose(index, cx));
                     cx.notify();
                 }))
         }));
@@ -1177,8 +1176,7 @@ impl Aside {
                         .tooltip("lyrics-offset-reset")
                         .tint(theme.primary)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.lyrics
-                                .update(cx, |lyrics, cx| lyrics.reset_offset(cx));
+                            this.lyrics.update(cx, |lyrics, cx| lyrics.reset_offset(cx));
                         })),
                 )
             })
@@ -1618,7 +1616,14 @@ impl Aside {
                         let softness = match hazing && instrumental_line != Some(index) {
                             true => clearing(
                                 notes_touch,
-                                viewport_haze(&scroll, notes_row, view, blur, notes_translation, pin_lift),
+                                viewport_haze(
+                                    &scroll,
+                                    notes_row,
+                                    view,
+                                    blur,
+                                    notes_translation,
+                                    pin_lift,
+                                ),
                             ),
                             false => 0.,
                         };
@@ -1878,14 +1883,22 @@ impl Aside {
                         });
 
                     let softness = match hazing && Some(index) != active_line {
-                        true => haze(viewport_haze(&scroll, row, view, blur, translation, pin_lift)),
+                        true => haze(viewport_haze(
+                            &scroll,
+                            row,
+                            view,
+                            blur,
+                            translation,
+                            pin_lift,
+                        )),
                         false => 0.,
                     };
-                    let row_blur = match (blur_lyrics, background_line_singing(line, active, position)) {
-                        (true, true) => BACKGROUND_SINGING_BLUR * lyrics_blur_amount,
-                        (true, false) => blur,
-                        (false, _) => Pixels::ZERO,
-                    };
+                    let row_blur =
+                        match (blur_lyrics, background_line_singing(line, active, position)) {
+                            (true, true) => BACKGROUND_SINGING_BLUR * lyrics_blur_amount,
+                            (true, false) => blur,
+                            (false, _) => Pixels::ZERO,
+                        };
                     let breath = match (breathing, active, departing) {
                         (true, true, _) => {
                             1. + BREATH_MAX_OFFSET
@@ -2101,6 +2114,7 @@ impl Aside {
         };
 
         let sheet = Scroller::new("lyrics", &self.verse_bar)
+            .font(typeface::lyrics())
             .hold_while(!self.pinned)
             .reflowed(rewrapped)
             .bottom_inset(self.bottom(cx))
@@ -2443,8 +2457,7 @@ impl Aside {
                         let look = RowLook {
                             playing: audible && position == QueuePosition::Current,
                             drop_line,
-                            queued: listing.kind(position, cx)
-                                == Some(state::QueueKind::Queued),
+                            queued: listing.kind(position, cx) == Some(state::QueueKind::Queued),
                         };
                         let place = track_place(&sections, position);
                         Self::row(track, index, position, revision, look, place, cx)
@@ -2746,7 +2759,9 @@ pub(crate) fn verse(
                     |this, text| this.child(romanized_lyrics_lane(text, look.lane, theme)),
                 ),
         )
-        .when(look.fade && haze > 0., |this| this.opacity(1. - VEIL * haze))
+        .when(look.fade && haze > 0., |this| {
+            this.opacity(1. - VEIL * haze)
+        })
         .when(look.distance_scale && haze > 0., |this| {
             this.layer_scale(1. - DISTANCE_SCALE_AMOUNT * haze)
         })
@@ -3798,7 +3813,13 @@ fn background_line_singing(
     !line_active && position >= line.start && line.sung_end().is_some_and(|end| position < end)
 }
 
-fn instrumental_row(progress: f32, past: bool, verse: Pixels, theme: &ui::Theme, dots: bool) -> Div {
+fn instrumental_row(
+    progress: f32,
+    past: bool,
+    verse: Pixels,
+    theme: &ui::Theme,
+    dots: bool,
+) -> Div {
     let note_size = verse * 1.;
     div()
         .flex()
@@ -4065,8 +4086,7 @@ mod tests {
 
     #[test]
     fn lyrics_follow_preserves_a_subpixel_target() {
-        let offset =
-            anchored_lyrics_offset(px(0.25), px(200.125), px(100.5), px(500.), px(0.));
+        let offset = anchored_lyrics_offset(px(0.25), px(200.125), px(100.5), px(500.), px(0.));
 
         assert!((offset.as_f32() - -149.625).abs() < 0.001);
     }
@@ -4158,7 +4178,8 @@ mod tests {
 
     #[test]
     fn apple_motion_is_critically_damped() {
-        let (_, scroll_ratio) = lyric_scroll_spring(state::LyricMotionPreset::AppleMusic).canonical();
+        let (_, scroll_ratio) =
+            lyric_scroll_spring(state::LyricMotionPreset::AppleMusic).canonical();
         let (_, row_ratio) = lyric_row_spring(state::LyricMotionPreset::AppleMusic).canonical();
         assert!((scroll_ratio - 1.).abs() < 0.001);
         assert!((row_ratio - 1.).abs() < 0.001);

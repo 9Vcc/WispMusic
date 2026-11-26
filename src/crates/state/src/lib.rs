@@ -40,8 +40,8 @@ mod wake;
 mod window_shape;
 
 pub use artist::{ArtistDetail, ArtistDetailEvent};
-pub use control::Control;
 pub use climax::Climax;
+pub use control::Control;
 pub use cover::Cover;
 pub use detail::{Collection, Detail, DetailEvent, Header, Reorder};
 pub use equalizer::{DeviceRule, Equalizer, RuleDevice, Sound};
@@ -77,10 +77,10 @@ pub use scrobble::Scrobbling;
 pub use search::{AlbumHit, ArtistHit, Hit, Kind, PlaylistHit, Search};
 pub use session::{Failure, ProviderInfo, Session, SessionEvent, SessionState};
 pub use settings::{
-    AppSettings, FilterValue, FullscreenControlsAutohide, LYRIC_OFFSET_MAX_MS,
-    LYRIC_OFFSET_NUDGE_MS, LYRICS_SOURCES, PREAMP_MAX, PREAMP_MIN, LyricMotionPreset, PageWidth,
-    PlayerBarLayout,
-    Reloaded, RomanizationScripts, SYSTEM_FONT, SideTab, ThemeFamily, ThemeOffer, ThemeVariant,
+    AppSettings, DESKTOP_LYRICS_FONT_MAX, DESKTOP_LYRICS_FONT_MIN, FilterValue,
+    FullscreenControlsAutohide, LYRIC_OFFSET_MAX_MS, LYRIC_OFFSET_NUDGE_MS, LYRICS_SOURCES,
+    LyricMotionPreset, PREAMP_MAX, PREAMP_MIN, PageWidth, PlayerBarLayout, Reloaded,
+    RomanizationScripts, SYSTEM_FONT, SideTab, ThemeFamily, ThemeOffer, ThemeVariant,
     VisualizerScreens, equalizer_profile_label, remember_window, window_placement,
 };
 pub use signal::{Change, Equalizing, FLOAT_BITS, Following, Signal, SignalPath};
@@ -272,9 +272,7 @@ pub fn init(
     let settings_for_unblock = settings.clone();
     cx.subscribe(&session, move |session, _: &SessionEvent, cx| {
         let enabled = session.read(cx).provider_slug() == Some("netease");
-        settings_for_unblock.update(cx, |settings, cx| {
-            settings.set_unblock_enabled(enabled, cx)
-        });
+        settings_for_unblock.update(cx, |settings, cx| settings.set_unblock_enabled(enabled, cx));
     })
     .detach();
     let settings_for_plugins = settings.clone();
@@ -286,9 +284,7 @@ pub fn init(
             session.reload_providers(providers, cx);
         });
         let enabled = event_session.read(cx).provider_slug() == Some("netease");
-        settings_for_plugins.update(cx, |settings, cx| {
-            settings.set_unblock_enabled(enabled, cx)
-        });
+        settings_for_plugins.update(cx, |settings, cx| settings.set_unblock_enabled(enabled, cx));
     })
     .detach();
     let network = cx.new(|_| Network::new(session.clone(), io.clone()));
@@ -324,14 +320,7 @@ pub fn init(
         )
     });
     let outputs = cx.new(|cx| Outputs::new(settings.clone(), playback.clone(), cx));
-    let climax = cx.new(|cx| {
-        Climax::new(
-            playback.clone(),
-            session.clone(),
-            io.clone(),
-            cx,
-        )
-    });
+    let climax = cx.new(|cx| Climax::new(playback.clone(), session.clone(), io.clone(), cx));
     equalizer.update(cx, |equalizer, cx| {
         equalizer.follow(&playback, &outputs, cx)
     });

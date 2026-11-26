@@ -12,19 +12,18 @@ use gpui::{
 };
 use gpui::{Div, ElementId, Window, anchored, canvas, deferred, div, phi, point, px, svg};
 use i18n::t;
-use input::{
-    ToggleLyrics, ToggleQueue, ToggleWindowFullscreen, WORKSPACE_CONTEXT,
-};
+use input::{ToggleLyrics, ToggleQueue, ToggleWindowFullscreen, WORKSPACE_CONTEXT};
 use router::{Destination, back, navigate};
-use state::{ Lyrics, AppSettings, Cover, FullscreenControlsAutohide, Playback, Queue, SideTab, Wisp};
+use state::{
+    AppSettings, Cover, FullscreenControlsAutohide, Lyrics, Playback, Queue, SideTab, Wisp,
+};
 use ui::{
     ActiveTheme as _, Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Modal, Motion,
-    Motioned as _, Popup, Room, Scrollbar, Scroller, Scrubber, ScrubberState, Springs, Sprung,
-    Popovers, TabBar, Tails as _, Text, Tipped as _, Visualizer, Zoom, clock, entering, growing,
+    Motioned as _, Popovers, Popup, Room, Scrollbar, Scroller, Scrubber, ScrubberState, Springs,
+    Sprung, TabBar, Tails as _, Text, Tipped as _, Visualizer, Zoom, clock, entering, growing,
     snapped,
 };
 use ui::{Perch, tabular};
-
 
 use crate::chrome::{Aside, OutputPicker, PlayerBar, TitleBarOptions};
 use crate::shared::menus::ItemMenu;
@@ -127,7 +126,7 @@ pub struct FullscreenView {
     cover: Entity<Cover>,
     settings: Entity<AppSettings>,
     aside: Entity<Aside>,
-    collapse: Entity<LyricsCollapse>,
+    collapse: Entity<Collapse>,
     panel: Option<SideTab>,
     /// How much of the content the pill just switched to is still hidden, springing from 1 to 0
     /// at the pace the cover travels, so a panel fades in while the cover slides aside. A spring
@@ -182,11 +181,13 @@ pub struct FullscreenView {
     output: Entity<OutputPicker>,
 }
 
-struct LyricsCollapse;
+/// The player's way out, at the start of the title bar on every page: the cover, the lyrics
+/// and the queue alike.
+struct Collapse;
 
-impl Render for LyricsCollapse {
+impl Render for Collapse {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("lyrics-collapse")
+        Button::new("fullscreen-collapse")
             .ghost()
             .small()
             .icon("icons/chevron-down.svg")
@@ -242,7 +243,7 @@ impl FullscreenView {
             true => SideTab::Lyrics,
             false => SideTab::Queue,
         });
-        let collapse = cx.new(|_| LyricsCollapse);
+        let collapse = cx.new(|_| Collapse);
         let aside = cx.new(|cx| Aside::new(queue.clone(), playback.clone(), shown, cx));
         aside.update(cx, |aside, cx| aside.strip(cx));
         let me = cx.entity_id();
@@ -1306,13 +1307,14 @@ impl FullscreenView {
                             true => t!("lyric-stroke-disable"),
                             false => t!("lyric-stroke-enable"),
                         };
-                        let button = tool("lyric-tool-stroke", "icons/pencil.svg", hint)
-                            .on_click(move |_, _, cx| {
+                        let button = tool("lyric-tool-stroke", "icons/pencil.svg", hint).on_click(
+                            move |_, _, cx| {
                                 cx.stop_propagation();
                                 settings.update(cx, |settings, cx| {
                                     settings.set_stroke_lyrics(!stroke, cx)
                                 });
-                            });
+                            },
+                        );
                         div().relative().child(button).when(stroke, |this| {
                             this.child(
                                 div()
@@ -1328,59 +1330,63 @@ impl FullscreenView {
                         })
                     })
                     .child({
-                        let button = tool("lyric-tool-choose", "icons/list.svg", t!("lyric-choose"))
-                            .on_click({
-                                let me = me.clone();
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    me.update(cx, |this, cx| {
-                                        this.version_dialog = true;
-                                        this.version_pick = Some(this.lyrics.read(cx).chosen());
-                                        cx.notify();
-                                    })
-                                    .ok();
-                                }
-                            });
-                        div()
-                            .relative()
-                            .child(button)
-                            .when(picked, |this| {
-                                this.child(
-                                    div()
-                                        .absolute()
-                                        .right(px(3.))
-                                        .bottom(px(3.))
-                                        .size(px(7.))
-                                        .rounded_full()
-                                        .bg(gpui::rgb(0x34d399))
-                                        .border_1()
-                                        .border_color(gpui::black().opacity(0.5)),
-                                )
-                            })
+                        let button =
+                            tool("lyric-tool-choose", "icons/list.svg", t!("lyric-choose"))
+                                .on_click({
+                                    let me = me.clone();
+                                    move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        me.update(cx, |this, cx| {
+                                            this.version_dialog = true;
+                                            this.version_pick = Some(this.lyrics.read(cx).chosen());
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    }
+                                });
+                        div().relative().child(button).when(picked, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .right(px(3.))
+                                    .bottom(px(3.))
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(gpui::rgb(0x34d399))
+                                    .border_1()
+                                    .border_color(gpui::black().opacity(0.5)),
+                            )
+                        })
                     })
                     .child(
-                        tool("lyric-tool-back", "icons/undo-2.svg", t!("lyric-offset-back"))
-                            .on_click({
-                                let lyrics = self.lyrics.clone();
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    lyrics.update(cx, |lyrics, cx| {
-                                        lyrics.nudge_offset(-LYRIC_NUDGE, cx)
-                                    });
-                                }
-                            }),
+                        tool(
+                            "lyric-tool-back",
+                            "icons/undo-2.svg",
+                            t!("lyric-offset-back"),
+                        )
+                        .on_click({
+                            let lyrics = self.lyrics.clone();
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                lyrics
+                                    .update(cx, |lyrics, cx| lyrics.nudge_offset(-LYRIC_NUDGE, cx));
+                            }
+                        }),
                     )
                     .child(
-                        tool("lyric-tool-forward", "icons/redo-2.svg", t!("lyric-offset-forward"))
-                            .on_click({
-                                let lyrics = self.lyrics.clone();
-                                move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    lyrics.update(cx, |lyrics, cx| {
-                                        lyrics.nudge_offset(LYRIC_NUDGE, cx)
-                                    });
-                                }
-                            }),
+                        tool(
+                            "lyric-tool-forward",
+                            "icons/redo-2.svg",
+                            t!("lyric-offset-forward"),
+                        )
+                        .on_click({
+                            let lyrics = self.lyrics.clone();
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                lyrics
+                                    .update(cx, |lyrics, cx| lyrics.nudge_offset(LYRIC_NUDGE, cx));
+                            }
+                        }),
                     )
                     // 重置在偏移非 0 时现身，其余时候隐形占位保持按钮列不跳。
                     .child(
@@ -1517,25 +1523,20 @@ impl FullscreenView {
                         .when_some(hit.score, |this, score| {
                             let filled = ((score as f32 / 20.).round() as usize).min(5);
                             this.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .child(
-                                                div()
-                                                    .text_color(theme.primary)
-                                                    .child(SharedString::from("★".repeat(filled))),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(theme.muted_foreground.opacity(0.5))
-                                                    .child(SharedString::from(
-                                                        "★".repeat(5 - filled),
-                                                    )),
-                                            ),
-                                    ),
+                                div().flex_none().text_size(px(10.)).child(
+                                    div()
+                                        .flex()
+                                        .child(
+                                            div()
+                                                .text_color(theme.primary)
+                                                .child(SharedString::from("★".repeat(filled))),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme.muted_foreground.opacity(0.5))
+                                                .child(SharedString::from("★".repeat(5 - filled))),
+                                        ),
+                                ),
                             )
                         }),
                 )
@@ -1573,22 +1574,23 @@ impl FullscreenView {
         // 把播放中的那行加粗，与原版的实时预览一致。
         // 播放中的行：只在预览的就是当前版本时才有意义，按含偏移的播放位置
         // 找最后一个已经开始的行（逐行时间轴），纯文本歌词没有时间轴就不标。
-        let active = (pick == chosen).then(|| {
-            let position = lyrics.offset_time();
-            lyrics.hits().get(pick).and_then(|hit| match &hit.lyrics {
-                music::Lyrics::Synced { lines } => {
-                    lines.iter().rposition(|line| line.start <= position)
-                }
-                music::Lyrics::Plain { .. } => None,
+        let active = (pick == chosen)
+            .then(|| {
+                let position = lyrics.offset_time();
+                lyrics.hits().get(pick).and_then(|hit| match &hit.lyrics {
+                    music::Lyrics::Synced { lines } => {
+                        lines.iter().rposition(|line| line.start <= position)
+                    }
+                    music::Lyrics::Plain { .. } => None,
+                })
             })
-        }).flatten();
+            .flatten();
         let mut preview_rows: Vec<AnyElement> = Vec::new();
         if let Some(hit) = lyrics.hits().get(pick) {
             let lines: Vec<(&str, Option<String>)> = match &hit.lyrics {
-                music::Lyrics::Plain { text, .. } => text
-                    .lines()
-                    .map(|line| (line, None))
-                    .collect(),
+                music::Lyrics::Plain { text, .. } => {
+                    text.lines().map(|line| (line, None)).collect()
+                }
                 music::Lyrics::Synced { lines } => lines
                     .iter()
                     .map(|line| (line.text.as_str(), None))
@@ -1663,41 +1665,41 @@ impl FullscreenView {
                                     .pl(px(8.))
                                     .pr(px(2.))
                                     .child(
-                                Scroller::new("lyric-version-list", &self.version_scroll)
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .h_full()
-                                    .when(picked, |this| {
-                                        this.child(
-                                            div()
-                                                .id("lyric-version-auto")
-                                                .flex()
-                                                .items_center()
-                                                .px(px(10.))
-                                                .py(px(8.))
-                                                .rounded(theme.radius)
-                                                .border_1()
-                                                .border_color(theme.border)
-                                                .cursor_pointer()
-                                                .hover(move |style| {
-                                                    style.bg(theme.table_hover)
-                                                })
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.lyrics.update(cx, |lyrics, cx| {
-                                                        lyrics.choose_auto(cx)
-                                                    });
-                                                    this.version_dialog = false;
-                                                    cx.notify();
-                                                }))
-                                                .child(
+                                        Scroller::new("lyric-version-list", &self.version_scroll)
+                                            .flex()
+                                            .flex_col()
+                                            .gap_2()
+                                            .h_full()
+                                            .when(picked, |this| {
+                                                this.child(
                                                     div()
-                                                        .text_color(theme.foreground)
-                                                        .child(t!("lyric-version-auto")),
-                                                ),
-                                        )
-                                    })
-                                    .children(cards),
+                                                        .id("lyric-version-auto")
+                                                        .flex()
+                                                        .items_center()
+                                                        .px(px(10.))
+                                                        .py(px(8.))
+                                                        .rounded(theme.radius)
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .cursor_pointer()
+                                                        .hover(move |style| {
+                                                            style.bg(theme.table_hover)
+                                                        })
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.lyrics.update(cx, |lyrics, cx| {
+                                                                lyrics.choose_auto(cx)
+                                                            });
+                                                            this.version_dialog = false;
+                                                            cx.notify();
+                                                        }))
+                                                        .child(
+                                                            div()
+                                                                .text_color(theme.foreground)
+                                                                .child(t!("lyric-version-auto")),
+                                                        ),
+                                                )
+                                            })
+                                            .children(cards),
                                     ),
                             )
                             // 右列：预览头（标题/来源/行数）+ 可滚动的歌词正文。
@@ -1712,58 +1714,53 @@ impl FullscreenView {
                                     .border_color(theme.border)
                                     .overflow_hidden()
                                     .when_some(preview_head, |this, (title, source)| {
-                                        this
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .flex()
-                                                    .items_start()
-                                                    .justify_between()
-                                                    .gap_2()
-                                                    .px(px(12.))
-                                                    .py(px(10.))
-                                                    .border_b_1()
-                                                    .border_color(theme.border)
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .gap(px(2.))
-                                                            .min_w_0()
-                                                            .child(
-                                                                div()
-                                                                    .truncate()
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
-                                                                    .text_color(theme.foreground)
-                                                                    .child(title),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .truncate()
-                                                                    .text_size(px(11.))
-                                                                    .text_color(
-                                                                        theme.muted_foreground,
-                                                                    )
-                                                                    .child(source),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .text_size(px(10.))
-                                                            .px(px(8.))
-                                                            .py(px(2.))
-                                                            .rounded_full()
-                                                            .bg(theme.foreground.opacity(0.06))
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(t!(
-                                                                "lyric-version-lines",
-                                                                count = preview_count
-                                                            )),
-                                                    ),
-                                            )
+                                        this.child(
+                                            div()
+                                                .flex_none()
+                                                .flex()
+                                                .items_start()
+                                                .justify_between()
+                                                .gap_2()
+                                                .px(px(12.))
+                                                .py(px(10.))
+                                                .border_b_1()
+                                                .border_color(theme.border)
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(2.))
+                                                        .min_w_0()
+                                                        .child(
+                                                            div()
+                                                                .truncate()
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(theme.foreground)
+                                                                .child(title),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .truncate()
+                                                                .text_size(px(11.))
+                                                                .text_color(theme.muted_foreground)
+                                                                .child(source),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_size(px(10.))
+                                                        .px(px(8.))
+                                                        .py(px(2.))
+                                                        .rounded_full()
+                                                        .bg(theme.foreground.opacity(0.06))
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(t!(
+                                                            "lyric-version-lines",
+                                                            count = preview_count
+                                                        )),
+                                                ),
+                                        )
                                     })
                                     .child(
                                         div()
@@ -1796,8 +1793,9 @@ impl FullscreenView {
                                                 .ghost()
                                                 .label(t!("lyric-version-restore"))
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.lyrics
-                                                        .update(cx, |lyrics, cx| lyrics.choose_auto(cx));
+                                                    this.lyrics.update(cx, |lyrics, cx| {
+                                                        lyrics.choose_auto(cx)
+                                                    });
                                                     this.version_dialog = false;
                                                     cx.notify();
                                                 })),
@@ -1823,8 +1821,9 @@ impl FullscreenView {
                                             .primary()
                                             .label(t!("lyric-version-apply"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.lyrics
-                                                    .update(cx, |lyrics, cx| lyrics.choose(pick, cx));
+                                                this.lyrics.update(cx, |lyrics, cx| {
+                                                    lyrics.choose(pick, cx)
+                                                });
                                                 this.version_dialog = false;
                                                 cx.notify();
                                             })),
@@ -1965,9 +1964,7 @@ impl FullscreenView {
                     .small()
                     .icon("icons/minimize.svg")
                     .tooltip_above("player-fullscreen-leave")
-                    .on_click(|_, _, cx| {
-                        back(cx)
-                    });
+                    .on_click(|_, _, cx| back(cx));
                 let leave = match swap {
                     ShellSwap::Opening => deferred(leave).into_any_element(),
                     ShellSwap::Closing => leave.invisible().into_any_element(),
@@ -2013,8 +2010,9 @@ impl Shell for FullscreenView {
             sidebar_right: None,
             border: false,
             content: None,
-            left: (self.panel == Some(SideTab::Lyrics))
-                .then(|| self.collapse.clone().into()),
+            // The cover, the lyrics and the queue are all pages of the player, so each keeps
+            // the same way out at the start of the bar.
+            left: Some(self.collapse.clone().into()),
             transparent: ambient::shown(cx),
         }
     }

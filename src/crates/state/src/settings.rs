@@ -293,6 +293,9 @@ pub const UNBLOCK_BUDGET_DEFAULT_MS: u32 = 15_000;
 pub const LYRIC_OFFSET_MAX_MS: i32 = 10_000;
 /// [wisp] 歌词偏移微调的步长（毫秒）。
 pub const LYRIC_OFFSET_NUDGE_MS: i32 = 500;
+/// [wisp] 桌面歌词字号的边界：窗口大小决定字号，拖动窗口只会落在这个区间里。
+pub const DESKTOP_LYRICS_FONT_MIN: f32 = 20.;
+pub const DESKTOP_LYRICS_FONT_MAX: f32 = 96.;
 /// How many chosen search results the history keeps, across every provider.
 const PICKS: usize = 40;
 const DEFAULT_SIDEBAR_WIDTH: f32 = 195.;
@@ -1359,7 +1362,9 @@ impl AppSettings {
     }
 
     pub fn desktop_lyrics_font_size(&self) -> f32 {
-        self.values.desktop_lyrics_font_size.clamp(24., 64.)
+        self.values
+            .desktop_lyrics_font_size
+            .clamp(DESKTOP_LYRICS_FONT_MIN, DESKTOP_LYRICS_FONT_MAX)
     }
 
     pub fn desktop_lyrics_vertical(&self) -> bool {
@@ -1541,7 +1546,6 @@ impl AppSettings {
     pub fn startup(&self) -> &str {
         &self.values.startup
     }
-
 
     pub fn startup_animation(&self) -> bool {
         self.values.startup_animation
@@ -1998,7 +2002,7 @@ impl AppSettings {
     }
 
     pub fn set_desktop_lyrics_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        let size = size.clamp(24., 64.);
+        let size = size.clamp(DESKTOP_LYRICS_FONT_MIN, DESKTOP_LYRICS_FONT_MAX);
         if (self.values.desktop_lyrics_font_size - size).abs() < f32::EPSILON {
             return;
         }
@@ -2083,11 +2087,7 @@ impl AppSettings {
         self.schedule_save(cx);
     }
 
-    pub fn set_lyrics_motion_preset(
-        &mut self,
-        preset: LyricMotionPreset,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_lyrics_motion_preset(&mut self, preset: LyricMotionPreset, cx: &mut Context<Self>) {
         self.values.lyrics_motion_preset = preset;
         self.schedule_save(cx);
     }
@@ -2521,7 +2521,6 @@ impl AppSettings {
         }
         self.schedule_save(cx);
     }
-
 
     pub fn requirement_silenced(&self, slug: &str) -> bool {
         self.values
@@ -3601,7 +3600,10 @@ mod tests {
         assert_eq!(preset, LyricMotionPreset::AppleMusic);
         assert_eq!(serde_json::to_string(&preset).unwrap(), "\"apple-music\"");
         assert_eq!(LyricMotionPreset::from_id("apple-music"), preset);
-        assert_eq!(LyricMotionPreset::from_id("unknown"), LyricMotionPreset::Wisp);
+        assert_eq!(
+            LyricMotionPreset::from_id("unknown"),
+            LyricMotionPreset::Wisp
+        );
     }
 
     #[test]

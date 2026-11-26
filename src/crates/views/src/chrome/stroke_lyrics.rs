@@ -15,15 +15,16 @@ use std::{
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Element, ElementId, GlobalElementId, Hsla, IntoElement,
-    InspectorElementId, LayoutId, Pixels, Render, ScaledPixels, SharedString, Size, Style,
-    Styled, Task, TransformationMatrix, Window, canvas, div, point, px, radians,
+    App, Bounds, Context, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, LayoutId, Pixels, Render, ScaledPixels, SharedString, Size, Style, Styled, Task,
+    TransformationMatrix, Window, canvas, div, point, px, radians,
 };
 use music::{Lyrics, LyricsLine};
 use state::{AppSettings, Io, Playback};
 use ui::ActiveTheme as _;
 
 use super::aside::lyrics_frame_scale;
+use crate::shared::typeface;
 
 pub(crate) const STROKE_SCATTER_MS: f64 = 320.;
 const CELL_MIN: f32 = 26.;
@@ -532,7 +533,9 @@ impl StrokeLyrics {
         let settings = self.settings.read(cx);
         match self.titled {
             true => settings.panel_lyrics_scale(),
-            false => settings.fullscreen_lyrics_scale() * lyrics_frame_scale(window.viewport_size()),
+            false => {
+                settings.fullscreen_lyrics_scale() * lyrics_frame_scale(window.viewport_size())
+            }
         }
     }
 
@@ -675,7 +678,10 @@ impl StrokeLyrics {
                 timing: timing.clone(),
                 data: self.cache.get(&timing.text).cloned().flatten(),
                 no_data: !is_strokable(timing.text)
-                    || self.cache.get(&timing.text).is_some_and(|data| data.is_none()),
+                    || self
+                        .cache
+                        .get(&timing.text)
+                        .is_some_and(|data| data.is_none()),
                 fallback_at: None,
                 fly: None,
                 assembled: false,
@@ -687,7 +693,12 @@ impl StrokeLyrics {
             line: line.clone(),
             timings,
             columns,
-            instant: instant_line(&chars.iter().map(|char| char.timing.clone()).collect::<Vec<_>>()),
+            instant: instant_line(
+                &chars
+                    .iter()
+                    .map(|char| char.timing.clone())
+                    .collect::<Vec<_>>(),
+            ),
             fly_budget,
             chars,
             cell,
@@ -772,7 +783,8 @@ impl StrokeLyrics {
                     if now >= switch_at {
                         scene.phase = Phase::Out;
                         scene.scatter_started = Some(now);
-                        self.out_at = Some(now + Duration::from_secs_f64(STROKE_SCATTER_MS / 1000.));
+                        self.out_at =
+                            Some(now + Duration::from_secs_f64(STROKE_SCATTER_MS / 1000.));
                         self.switch_at = None;
                         scatter_scene(scene, now);
                     }
@@ -824,12 +836,8 @@ pub(crate) fn fly_strokes(
         let distance = 500. + next_random(seed) * 260.;
         let depth = next_random(seed);
         let rot = (next_random(seed) * 2. - 1.) * (24. + 48. * depth);
-        let delay = (slot as f64 * step
-            + next_random(seed) * step * 0.6)
-            * timeline.scale;
-        let duration = (FLY_PATH_NATURAL_MS
-            * timeline.scale
-            * (0.85 + next_random(seed) * 0.15))
+        let delay = (slot as f64 * step + next_random(seed) * step * 0.6) * timeline.scale;
+        let duration = (FLY_PATH_NATURAL_MS * timeline.scale * (0.85 + next_random(seed) * 0.15))
             + timeline.tail_ms;
         let end_at = start + Duration::from_secs_f64((delay + duration) / 1000.);
         end = end.max(end_at);
@@ -914,8 +922,8 @@ fn char_poses(char: &Char, phase: Phase, now: Instant, scene: &Scene) -> (Vec<Po
                     .strokes
                     .iter()
                     .map(|stroke| {
-                        let progress = ((elapsed - stroke.delay_ms) / stroke.duration_ms)
-                            .clamp(0., 1.);
+                        let progress =
+                            ((elapsed - stroke.delay_ms) / stroke.duration_ms).clamp(0., 1.);
                         let eased = ease_out_cubic(progress);
                         Pose {
                             dx: stroke.dx * (1. - eased as f32),
@@ -981,7 +989,6 @@ impl Render for StrokeLyrics {
             window.request_animation_frame();
         }
         let theme = *cx.theme();
-        let font = SharedString::from(self.settings.read(cx).font().to_owned());
         let stage = self.stage.clone();
         let stage_height = Rc::new(Cell::new(self.stage_height));
         let mut stage_view = div().relative().size_full();
@@ -1012,8 +1019,7 @@ impl Render for StrokeLyrics {
                 };
                 for index in &column.indices {
                     let char = &scene.chars[*index];
-                    let (poses, fallback_alpha) =
-                        char_poses(char, scene.phase, now, scene);
+                    let (poses, fallback_alpha) = char_poses(char, scene.phase, now, scene);
                     let cell_element = match char.data.as_ref() {
                         Some(data) => StrokeCell {
                             hanzi: data.clone(),
@@ -1031,7 +1037,7 @@ impl Render for StrokeLyrics {
                             .opacity(fallback_alpha)
                             .text_size(cell * 0.62)
                             .text_color(color)
-                            .font_family(font.clone())
+                            .font(typeface::lyrics())
                             .child(SharedString::from(char.timing.text.to_string()))
                             .into_any_element(),
                     };
@@ -1040,7 +1046,8 @@ impl Render for StrokeLyrics {
                 columns = columns.child(body);
             }
             let mut root = div()
-                .relative().id("stroke-lyrics-stage")
+                .relative()
+                .id("stroke-lyrics-stage")
                 .size_full()
                 .cursor_pointer()
                 .child(columns)
@@ -1100,7 +1107,12 @@ mod tests {
     use super::*;
     use music::LyricsWord;
 
-    fn line(start: u64, end: Option<u64>, text: &str, words: Option<Vec<LyricsWord>>) -> LyricsLine {
+    fn line(
+        start: u64,
+        end: Option<u64>,
+        text: &str,
+        words: Option<Vec<LyricsWord>>,
+    ) -> LyricsLine {
         LyricsLine {
             start: Duration::from_millis(start),
             end: end.map(Duration::from_millis),

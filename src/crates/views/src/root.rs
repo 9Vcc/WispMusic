@@ -1,5 +1,5 @@
 use gpui::{AnyView, Context, Entity, MouseButton, NavigationDirection, Render, Task};
-use gpui::{App, Font, FontFallbacks, Pixels, SharedString, StyleRefinement, font, prelude::*};
+use gpui::{App, Font, Pixels, StyleRefinement, prelude::*};
 use gpui::{Window, deferred, div};
 use input::{
     CloseWindow, MinimizeWindow, NavigateBack, NavigateForward, OpenFilter, OpenSearch,
@@ -20,8 +20,8 @@ use ui::{
 };
 
 use crate::chrome::{
-    Busy, PlayerBar, ThemeInvite, TitleBar,
-    TitleBarEvent, TitleBarOptions, ToastStack, Toolbar, Tooled,
+    Busy, PlayerBar, ThemeInvite, TitleBar, TitleBarEvent, TitleBarOptions, ToastStack, Toolbar,
+    Tooled,
 };
 use crate::screens::picks::{DailyEmpty, RadioHeader, RadioView};
 use crate::screens::search::SearchView;
@@ -34,6 +34,7 @@ use crate::shared::smart_playlist::SmartPlaylistEditor;
 use crate::shared::tag_editor::TagEditor;
 use crate::shared::tracks::{LIBRARY_COLUMNS, album_columns};
 use crate::shared::transport::{CoverAway, CoverFade, ShellSwap};
+use crate::shared::typeface::{UI_FONT, ui_font};
 use crate::shells::Shell;
 use crate::shells::workspace::{Workspace, WorkspaceHeader};
 use crate::splash::Splash;
@@ -1065,43 +1066,42 @@ impl Root {
                         let view = cx.new(|cx| DailyEmpty::new(home.clone(), cx));
                         self.screens.daily_empty = Some(view);
                     }
-                    self.screens
-                        .daily_empty
-                        .clone()
-                        .unwrap()
-                        .into()
+                    self.screens.daily_empty.clone().unwrap().into()
                 } else {
-                let (playlist, detail) = self.playlist(cx);
-                let cover = tracks.first().and_then(|track| track.cover.clone());
-                let signature = (tracks.len(), tracks.first().and_then(|track| track.id.clone()));
-                let synthetic = music::PlaylistDetail {
-                    playlist: music::Playlist {
-                        id: "daily-recommend".to_owned(),
-                        name: "每日推荐".to_owned(),
-                        owner: "为你量身定制".to_owned(),
-                        owner_id: String::new(),
-                        owned: false,
-                        collaborative: false,
-                        blend: false,
-                        public: false,
-                        cover,
-                        track_count: tracks.len() as u32,
-                        modified_at: None,
-                        read_only: true,
-                    },
-                    tracks,
-                    continuation: None,
-                };
-                // 同一批曲子只装一次：每次渲染都重装会清掉详情页的滚动与选中。
-                // 但详情页可能还停在别的歌单上（签名没变时也要重装），否则点卡片进来
-                // 看到的会是上次打开的那张歌单。
-                let showing_daily = detail.read(cx).id() == Some("daily-recommend");
-                if !showing_daily || self.daily_signature.as_ref() != Some(&signature) {
-                    detail.update(cx, |detail, cx| detail.show_playlist(synthetic, cx));
-                    self.daily_signature = Some(signature);
-                }
-                toolbar = Some(playlist.read(cx).toolbar());
-                playlist.into()
+                    let (playlist, detail) = self.playlist(cx);
+                    let cover = tracks.first().and_then(|track| track.cover.clone());
+                    let signature = (
+                        tracks.len(),
+                        tracks.first().and_then(|track| track.id.clone()),
+                    );
+                    let synthetic = music::PlaylistDetail {
+                        playlist: music::Playlist {
+                            id: "daily-recommend".to_owned(),
+                            name: "每日推荐".to_owned(),
+                            owner: "为你量身定制".to_owned(),
+                            owner_id: String::new(),
+                            owned: false,
+                            collaborative: false,
+                            blend: false,
+                            public: false,
+                            cover,
+                            track_count: tracks.len() as u32,
+                            modified_at: None,
+                            read_only: true,
+                        },
+                        tracks,
+                        continuation: None,
+                    };
+                    // 同一批曲子只装一次：每次渲染都重装会清掉详情页的滚动与选中。
+                    // 但详情页可能还停在别的歌单上（签名没变时也要重装），否则点卡片进来
+                    // 看到的会是上次打开的那张歌单。
+                    let showing_daily = detail.read(cx).id() == Some("daily-recommend");
+                    if !showing_daily || self.daily_signature.as_ref() != Some(&signature) {
+                        detail.update(cx, |detail, cx| detail.show_playlist(synthetic, cx));
+                        self.daily_signature = Some(signature);
+                    }
+                    toolbar = Some(playlist.read(cx).toolbar());
+                    playlist.into()
                 }
             }
             Destination::Radio => {
@@ -1215,71 +1215,6 @@ impl Root {
         });
         cx.notify();
     }
-}
-
-// [wisp] 全局主字体：内嵌的阿里巴巴普惠体 3.0（`src/assets/fonts/`，由
-// `wisp/build.rs` 扫成 `FONTS` 表注册进 TextSystem）。它自带拉丁与中日韩字形，
-// 中英文共用一套笔画与字面，观感统一；系统自带的雅黑/宋体在部分字号与字重下会
-// 丢笔画、发虚。
-//
-// 这里必须是**主字体**，不能只当回退项：gpui_windows 生成回退映射时是从
-// **系统**字体集合里按族名查字的（`direct_write.rs::generate_font_fallbacks`），
-// 内嵌字体只活在 custom 集合里，系统里没装就查不到、那条映射会被静默跳过。
-// 所以把普惠体写进 `SCRIPTS` 是无效的（此前即如此，中文实际一直走雅黑）。
-//
-// 族名取 typographic family（nameID 16）而**不是** nameID 1：实测注册进
-// DirectWrite 后，字体集合报告的名字是本地化的「阿里巴巴普惠体 3.0」，而
-// `Alibaba PuHuiTi 3.0 65 Medium` 这种带字重后缀的 nameID 1 反而查不到——排版
-// 宽度与兜底字体一致，说明静默回落了。同一份实测还确认 10 个字重被归为**一个**
-// 字族，能按 weight 选到不同字面，所以字重差异必须靠内嵌多份 ttf 来给：
-// 目前内嵌 65 Medium（500，正文）/ 75 SemiBold（600）/ 85 Bold（700）三档，
-// 品牌名与标题用的 SEMIBOLD/BOLD 就落到真字面上，而不是由 500 一档顶替。
-const UI_FONT: &str = "Alibaba PuHuiTi 3.0";
-
-// [wisp] 主字体缺字时的回退链，按语种排优先级。普惠体覆盖拉丁与中日韩，
-// 这里补的是阿拉伯/希伯来/泰/天城体与 emoji，以及各平台的中文兜底。
-const SCRIPTS: [&str; 18] = [
-    "Source Han Sans",
-    "Noto Sans CJK JP",
-    "Noto Sans CJK SC",
-    "Noto Sans CJK TC",
-    "Noto Sans CJK KR",
-    "Noto Sans Arabic",
-    "Noto Sans Hebrew",
-    "Noto Sans Thai",
-    "Noto Sans Devanagari",
-    "Hiragino Sans",
-    "PingFang SC",
-    "Apple SD Gothic Neo",
-    "Yu Gothic UI",
-    "Microsoft YaHei UI",
-    "Malgun Gothic",
-    "Noto Color Emoji",
-    "Apple Color Emoji",
-    "Segoe UI Emoji",
-];
-
-fn ui_font(chosen: &str) -> Font {
-    match chosen == SYSTEM_FONT {
-        true => Font {
-            fallbacks: Some(scripts()),
-            ..font(UI_FONT)
-        },
-        false => Font {
-            fallbacks: Some(scripts()),
-            ..font(SharedString::from(chosen.to_owned()))
-        },
-    }
-}
-
-/// The system fonts drawn for whatever `UI_FONT` and a chosen face leave uncovered. One list
-/// for both, since an embedded face cannot serve as a fallback: gpui_windows resolves the
-/// names below against the **system** collection only, where the bundled font is absent.
-fn scripts() -> FontFallbacks {
-    static SCRIPTS_FALLBACK: std::sync::OnceLock<FontFallbacks> = std::sync::OnceLock::new();
-    SCRIPTS_FALLBACK
-        .get_or_init(|| FontFallbacks::from_fonts(SCRIPTS.iter().map(|name| (*name).to_owned()).collect()))
-        .clone()
 }
 
 /// Tells the wake lock whether the window has focus, which the display lock needs.
@@ -1459,7 +1394,9 @@ impl Render for Root {
                     .flex_col()
                     .size_full()
                     .bg(ui::page_wash(&theme))
-                    .when_some(radius, |this, radius| this.rounded(radius).overflow_hidden())
+                    .when_some(radius, |this, radius| {
+                        this.rounded(radius).overflow_hidden()
+                    })
                     .child(splash.clone());
             }
         }
@@ -1614,21 +1551,23 @@ impl Render for Root {
             })
             .when(!ambient && !opening, |this| this.bg(ui::page_wash(&theme)))
             .text_color(theme.foreground)
-            .capture_any_mouse_down(cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                if let Some(splash) = this.splash.as_ref() {
-                    if !splash.read(cx).done() {
-                        if event.button == MouseButton::Left {
+            .capture_any_mouse_down(cx.listener(
+                |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if let Some(splash) = this.splash.as_ref() {
+                        if !splash.read(cx).done() {
+                            if event.button == MouseButton::Left {
+                                return;
+                            }
+                            cx.stop_propagation();
                             return;
                         }
-                        cx.stop_propagation();
-                        return;
                     }
-                }
-                if ui::cancel_middle_scroll(cx) {
-                    window.refresh();
-                    cx.stop_propagation();
-                }
-            }))
+                    if ui::cancel_middle_scroll(cx) {
+                        window.refresh();
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .capture_any_mouse_up(|event, window, cx| {
                 if event.button == MouseButton::Middle
                     && ui::release_middle_scroll(event.position, cx)

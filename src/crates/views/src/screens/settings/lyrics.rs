@@ -147,7 +147,11 @@ impl SettingsView {
     pub(super) fn desktop_lyrics_font_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let size = self.settings.read(cx).desktop_lyrics_font_size();
-        let adjust = |suffix: &'static str, icon: &'static str, key: &'static str, delta: f32, disabled: bool| {
+        let adjust = |suffix: &'static str,
+                      icon: &'static str,
+                      key: &'static str,
+                      delta: f32,
+                      disabled: bool| {
             Button::new(SharedString::from(format!("desktop-lyrics-font-{suffix}")))
                 .ghost()
                 .small()
@@ -171,7 +175,7 @@ impl SettingsView {
                 "icons/minus.svg",
                 "settings-desktop-lyrics-font-down",
                 -2.,
-                size <= 24.,
+                size <= state::DESKTOP_LYRICS_FONT_MIN,
             ))
             .child(
                 div()
@@ -185,7 +189,7 @@ impl SettingsView {
                 "icons/plus.svg",
                 "settings-desktop-lyrics-font-up",
                 2.,
-                size >= 64.,
+                size >= state::DESKTOP_LYRICS_FONT_MAX,
             ));
         self.row(
             t!("settings-desktop-lyrics-font"),
@@ -204,24 +208,23 @@ impl SettingsView {
             .into_iter()
             .map(|ms| SharedString::from(format!("{:+.1}s", ms as f32 / 1000.)));
 
-        let adjust =
-            |suffix: &'static str, icon: &'static str, label: &'static str, delta: i32| {
-                let wanted = (offset + delta).clamp(-max, max);
+        let adjust = |suffix: &'static str, icon: &'static str, label: &'static str, delta: i32| {
+            let wanted = (offset + delta).clamp(-max, max);
 
-                Button::new(SharedString::from(format!("lyric-offset-default-{suffix}")))
-                    .ghost()
-                    .small()
-                    .icon(icon)
-                    .tooltip(label)
-                    .tint(theme.muted_foreground)
-                    .disabled(wanted == offset)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.update(cx, |settings, cx| {
-                            settings.set_lyric_offset_default_ms(wanted, cx)
-                        });
-                        cx.notify();
-                    }))
-            };
+            Button::new(SharedString::from(format!("lyric-offset-default-{suffix}")))
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(label)
+                .tint(theme.muted_foreground)
+                .disabled(wanted == offset)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_lyric_offset_default_ms(wanted, cx)
+                    });
+                    cx.notify();
+                }))
+        };
 
         let controls = div()
             .flex()
@@ -233,7 +236,11 @@ impl SettingsView {
                 "settings-lyrics-offset-later",
                 -step,
             ))
-            .child(ui::spoken_steady("lyric-offset-default-value", shown, shown_widths))
+            .child(ui::spoken_steady(
+                "lyric-offset-default-value",
+                shown,
+                shown_widths,
+            ))
             .child(adjust(
                 "earlier",
                 "icons/plus.svg",
@@ -578,9 +585,8 @@ impl SettingsView {
             Switch::new("karaoke-cover-color", on)
                 .name(t!("settings-karaoke-cover-color"))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.update(cx, |settings, cx| {
-                        settings.set_lyrics_cover_color(!on, cx)
-                    });
+                    this.settings
+                        .update(cx, |settings, cx| settings.set_lyrics_cover_color(!on, cx));
                 }))
                 .into_any_element(),
         )
@@ -614,7 +620,8 @@ impl SettingsView {
             Switch::new(id, on)
                 .name(i18n::lookup(title, None))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.update(cx, |settings, cx| apply(settings, !on, cx));
+                    this.settings
+                        .update(cx, |settings, cx| apply(settings, !on, cx));
                 }))
                 .into_any_element(),
         )
@@ -633,8 +640,9 @@ impl SettingsView {
                     .outline()
                     .disabled(wanted == amount)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings
-                            .update(cx, |settings, cx| settings.set_lyrics_blur_amount(wanted, cx));
+                        this.settings.update(cx, |settings, cx| {
+                            settings.set_lyrics_blur_amount(wanted, cx)
+                        });
                         cx.notify();
                     }))
             };

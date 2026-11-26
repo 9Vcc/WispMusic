@@ -12,6 +12,7 @@ use ui::{ActiveTheme as _, Theme};
 
 use crate::chrome::{VerseLook, verse, verse_gap, verse_sizes};
 use crate::screens::settings::{Layout, SettingsView};
+use crate::shared::typeface;
 
 /// How tall the preview stands for its width.
 const ASPECT: f32 = 0.4;
@@ -95,6 +96,7 @@ pub(in crate::screens::settings) fn preview(
         .relative()
         .w_full()
         .h(height)
+        .font(typeface::lyrics())
         .bg(theme.background)
         .children(field)
         .child(lines(look, sizes, height, &theme))

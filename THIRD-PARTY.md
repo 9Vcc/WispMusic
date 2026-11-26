@@ -20,6 +20,9 @@ The binary embeds:
 - 阿里巴巴普惠体 3.0 (Alibaba PuHuiTi 3.0) — 阿里巴巴免费商用字体，见
   `assets/fonts/ALIBABA-PUHUITI-NOTICE.txt`。用于界面主字体（正文 65 Medium，
   标题 75 SemiBold / 85 Bold）。
+- 阿里妈妈东方大楷 (Alimama DongFangDaKai) — 阿里巴巴免费商用字体，见
+  `assets/fonts/ALIMAMA-DONGFANGDAKAI-NOTICE.txt`。用于歌词默认字体
+  （Regular 单字重）。
 - Lucide icons — ISC License, `assets/icons/lucide/LICENSE`
 - Iconoir — MIT License, `assets/icons/iconoir/LICENSE`
 - Remix Icon 4.8.0 — Apache License 2.0, `assets/icons/remix/LICENSE`
