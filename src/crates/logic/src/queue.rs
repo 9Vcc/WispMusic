@@ -692,6 +692,15 @@ impl<O: Clone + PartialEq> Order<O> {
         self.current.as_ref().map(|entry| entry.track.as_ref())
     }
 
+    /// Ends a queue that has run out. Its last song moves to the queue history.
+    pub fn finish(&mut self) {
+        let Some(last) = self.current.take() else {
+            return;
+        };
+        self.past.push(last);
+        self.changed();
+    }
+
     /// The collection the current track was queued from. `None` while nothing plays or when the
     /// user added the current track on its own.
     pub fn origin(&self) -> Option<&O> {
@@ -892,6 +901,9 @@ impl<O: Clone + PartialEq> Order<O> {
     }
 
     pub fn reordered(&self) -> bool {
+        if self.current.is_none() {
+            return false;
+        }
         let sequence = self
             .past
             .iter()
@@ -1624,6 +1636,24 @@ mod tests {
         order.set_shuffle(false);
         let upcoming: Vec<_> = order.upcoming().map(|track| track.name.clone()).collect();
         assert_eq!(upcoming, ["b", "c"]);
+    }
+
+    #[test]
+    fn finishing_clears_the_current_song_and_rewinds_to_the_first() {
+        let mut order = super::Order::new(false);
+        order.start(vec![track("a"), track("b")], 0, None::<()>);
+        assert_eq!(
+            order.next().map(|(track, _)| track.name.clone()),
+            Some("b".to_owned())
+        );
+        order.finish();
+        assert!(order.current().is_none());
+        assert!(order.has_previous());
+        assert!(!order.reordered());
+        assert_eq!(
+            order.rewind().map(|track| track.name.clone()),
+            Some("a".to_owned())
+        );
     }
 
     #[test]

@@ -277,6 +277,11 @@ impl Queue {
         self.edit(cx, Order::next)
     }
 
+    /// Puts the last song in history when the queue runs out, leaving nothing as now playing.
+    pub fn finish(&mut self, cx: &mut Context<Self>) {
+        self.edit(cx, Order::finish);
+    }
+
     pub fn rewind(&mut self, cx: &mut Context<Self>) -> Option<Track> {
         self.edit(cx, Order::rewind)
     }

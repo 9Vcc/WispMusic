@@ -2567,8 +2567,14 @@ impl Playback {
                     this.leave_station(cx);
                     this.follow_queue(Start::Segue, cx);
                 }
-                Ok(_) => log::warn!("playback: radio returned no tracks"),
-                Err(error) => log::warn!("playback: cannot extend radio: {error:#}"),
+                Ok(_) => {
+                    log::warn!("playback: radio returned no tracks");
+                    this.finish_queue(cx);
+                }
+                Err(error) => {
+                    log::warn!("playback: cannot extend radio: {error:#}");
+                    this.finish_queue(cx);
+                }
             },
             cx,
         ));
@@ -2576,9 +2582,23 @@ impl Playback {
 
     fn follow_queue(&mut self, start: Start, cx: &mut Context<Self>) {
         let Some(track) = self.playable_next(cx) else {
-            return;
+            return self.finish_queue(cx);
         };
         self.load_after(&track, start, cx);
+    }
+
+    /// Ends a queue that has run out with repeat off, moving its last song to history so Play
+    /// can start it over. Does nothing while a track is loaded or more is queued.
+    fn finish_queue(&mut self, cx: &mut Context<Self>) {
+        if self.repeat == Repeat::Off
+            && !self.fm_session
+            && self.track.is_none()
+            && !self.queue.read(cx).has_next()
+        {
+            self.fetch = None;
+            self.queue.update(cx, |queue, cx| queue.finish(cx));
+            cx.notify();
+        }
     }
 
     /// The next playable track the queue has, dropping the ones that are not. Reaching the
@@ -2626,6 +2646,15 @@ impl Playback {
 
     pub fn has_previous(&self, cx: &App) -> bool {
         self.track.is_some() || self.queue.read(cx).has_previous()
+    }
+
+    /// Whether a play press with no track loaded starts the finished queue over instead of
+    /// doing nothing.
+    pub fn can_restart_queue(&self, cx: &App) -> bool {
+        self.fetch.is_none()
+            && self.track.is_none()
+            && self.queue.read(cx).current().is_none()
+            && self.queue.read(cx).has_previous()
     }
 
     pub fn previous(&mut self, cx: &mut Context<Self>) {
@@ -2812,7 +2841,15 @@ impl Playback {
     pub fn toggle_play(&mut self, cx: &mut Context<Self>) {
         match self.wants_playing() {
             true => self.pause(cx),
-            false => self.resume(cx),
+            false => {
+                if self.can_restart_queue(cx) {
+                    if let Some(track) = self.queue.update(cx, |queue, cx| queue.rewind(cx)) {
+                        self.follow_after(track, Start::Pick, cx);
+                    }
+                    return;
+                }
+                self.resume(cx);
+            }
         }
     }
 

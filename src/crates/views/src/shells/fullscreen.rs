@@ -307,6 +307,10 @@ impl FullscreenView {
         window.focus(&self.focus, cx);
     }
 
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
     /// Starts the idle clock as the view opens and stops it as the view closes, so it never
     /// hides the cursor over the workspace. Either way the view next shows with its controls up.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
@@ -421,10 +425,34 @@ impl FullscreenView {
         self.stir(cx);
     }
 
+    /// Covers the whole view while the controls sleep and the cursor is hidden, so nothing under
+    /// the pointer stays hovered and a click only wakes the controls instead of landing blind.
+    /// Scrolling passes through, and the layer takes over the root's own pointer listeners, which
+    /// no longer count as hovered beneath it.
+    fn dormant(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .block_mouse_except_scroll()
+            .on_mouse_move(cx.listener(Self::hover))
+            .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, _, cx| {
+                this.left = true;
+                cx.notify();
+            }))
+            .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.rouse(cx)))
+    }
+
+    /// Wakes the sleeping controls from a press, keeping the press from whatever sits under the
+    /// hidden pointer.
+    fn rouse(&mut self, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.stir(cx);
+    }
+
     /// Whether anything under the pointer should hold the chrome awake. A hover flag only counts
     /// while the pointer is over the window: one set when it left stays set, and a stale flag
-    /// would keep the controls up for good. A Jam invite drawn over the view holds it too, since
-    /// the pointer over the dialog never reaches the view and the cursor would hide under it.
+    /// would keep the controls up for good. A track menu drawn over the view holds it too, since
+    /// the pointer over it never reaches the view and the cursor would hide under it.
     fn busy(&self, cx: &App) -> bool {
         let parked = self.volume.parked()
             || self.over_pill
@@ -436,6 +464,7 @@ impl FullscreenView {
             || self.volume.held
             || self.pending.is_some()
             || self.context_menu.is_some()
+            || (self.panel.is_some() && self.aside.read(cx).menu_open())
     }
 
     /// Clears hover state when the fullscreen view opens or closes. Its elements report their
@@ -2262,8 +2291,14 @@ impl Render for FullscreenView {
                 cx.notify();
             }))
             // Capture phase: every click stirs the idle timer, even one a
-            // control underneath swallows for itself.
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.poke(cx)))
+            // control underneath swallows for itself. Asleep, it only wakes, which covers the
+            // frame before the dormant layer first paints.
+            .capture_any_mouse_down(cx.listener(
+                |this, _: &MouseDownEvent, _, cx| match this.awake {
+                    true => this.poke(cx),
+                    false => this.rouse(cx),
+                },
+            ))
             // A trackpad reports fingers that only touch it as a scroll that moves nothing.
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 if event.delta.pixel_delta(window.line_height()) != Point::default() {
@@ -2429,6 +2464,9 @@ impl Render for FullscreenView {
             })
             .when(self.version_dialog, |this| {
                 this.child(self.version_dialog_panel(window, cx))
+            })
+            .when(!self.awake && self.on_show, |this| {
+                this.child(self.dormant(cx))
             })
             .children(self.menu(cx))
     }

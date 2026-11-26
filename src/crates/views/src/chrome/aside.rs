@@ -518,6 +518,11 @@ impl Aside {
             .update(cx, |stroke, cx| stroke.set_titled(false, cx));
     }
 
+    /// Whether a track menu is open over the panel, which keeps the fullscreen chrome awake.
+    pub(crate) fn menu_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
     /// Whether the pointer is parked on the panel's scrollbar. Fullscreen
     /// reads this to keep its chrome awake while the reader holds it.
     pub(crate) fn scrollbar_active(&self, cx: &App) -> bool {

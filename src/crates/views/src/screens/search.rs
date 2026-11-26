@@ -173,6 +173,10 @@ impl SearchView {
         })
         .detach();
         cx.on_blur(&field, window, |this, _, cx| {
+            // A submenu's search takes the keyboard while it is open and gives it back after.
+            if this.context_menu.is_some() {
+                return;
+            }
             this.dismissed = true;
             cx.notify();
         })
@@ -347,14 +351,15 @@ impl SearchView {
         self.keyword_task = Some(task);
     }
 
-    /// Whether the panel shows: the field has the keyboard, nothing put the panel away, and it
-    /// has rows or is still waiting on the first suggestions.
+    /// Whether the panel shows: the field or a context menu opened over the panel has the
+    /// keyboard, nothing put the panel away, and it has rows or is still waiting on the first
+    /// suggestions.
     ///
     /// The rows act on the press rather than the release precisely because the field lets go of
     /// the focus on a press outside itself: by the time the release comes the panel this test
     /// turned away is already gone.
     fn panel_open(&self, window: &Window, cx: &App) -> bool {
-        if self.dismissed || !self.typing(window, cx) {
+        if self.dismissed || !self.typing(window, cx) && self.context_menu.is_none() {
             return false;
         }
         let waiting = !self.typed.trim().is_empty() && self.keywords_loading;
@@ -604,8 +609,15 @@ impl SearchView {
                 .flex_1()
                 .min_w_0()
                 .open(open)
+                // A press on a context menu opened over the panel lands outside it, and the
+                // menu's own close decides about the panel then.
                 .on_close(move |_, cx| {
-                    me.update(cx, |this, cx| this.close_panel(cx)).ok();
+                    me.update(cx, |this, cx| {
+                        if this.context_menu.is_none() {
+                            this.close_panel(cx);
+                        }
+                    })
+                    .ok();
                 })
                 .when(open, |this| this.child(self.panel_rows(window, cx)))
         };
@@ -1634,8 +1646,15 @@ impl Render for SearchView {
                 }
             };
 
-            Popup::new(position, menu).on_close(cx.listener(|this, _, _, cx| {
+            Popup::new(position, menu).on_close(cx.listener(|this, _, window, cx| {
                 this.context_menu = None;
+                // The menu hands the keyboard back to the field before the press that closed it
+                // is done, and the panel stays only if the field still holds it after.
+                cx.defer_in(window, |this, window, cx| {
+                    if !this.typing(window, cx) {
+                        this.close_panel(cx);
+                    }
+                });
                 cx.notify();
             }))
         });

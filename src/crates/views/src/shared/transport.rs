@@ -144,7 +144,7 @@ pub(crate) fn climax(playback: &Entity<Playback>, frosted: bool, cx: &App) -> Bu
 pub(crate) fn toggle(playback: &Entity<Playback>, big: bool, frosted: bool, cx: &App) -> Button {
     let held = playback.read(cx);
     let playing = held.wants_playing();
-    let idle = held.track().is_none();
+    let idle = held.track().is_none() && !held.can_restart_queue(cx);
     let playback = playback.clone();
 
     let (icon, tooltip) = match playing {
