@@ -218,6 +218,16 @@ fn span(
     )
 }
 
+/// What the IME position was last computed from: the caret, the scroll and the field's
+/// place in the window. A change in any of them moves the composition and candidate windows.
+#[derive(Clone, Copy, PartialEq)]
+struct ImeState {
+    selection: (usize, usize),
+    scroll: f32,
+    origin: (f32, f32),
+    size: (f32, f32),
+}
+
 const MASK: &str = "•";
 
 fn mask_map(content: &str) -> Vec<usize> {
@@ -366,6 +376,9 @@ pub struct Input {
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// The caret and layout an input last pushed the IME position for, so a composition that
+    /// scrolls the text or moves the caret takes the IME's window along with it.
+    ime: Option<ImeState>,
     /// How far the text is scrolled left under the field, so the caret stays in sight when the
     /// text is wider than the field.
     scroll: Pixels,
@@ -407,6 +420,7 @@ impl Input {
             marked_range: None,
             last_layout: None,
             last_bounds: None,
+            ime: None,
             scroll: Pixels::ZERO,
             selecting: false,
             selected_word: None,
@@ -1200,7 +1214,10 @@ mod tests {
         // no phase covers, so the field always has a wait to schedule.
         assert_eq!(caret.phase, None);
         let first = caret.until_turn();
-        assert!(!first.is_zero() && first <= CARET_PHASE, "a full phase is due");
+        assert!(
+            !first.is_zero() && first <= CARET_PHASE,
+            "a full phase is due"
+        );
         assert!(caret.showing((0, 0), false));
         assert!(caret.until_turn() <= CARET_PHASE);
     }

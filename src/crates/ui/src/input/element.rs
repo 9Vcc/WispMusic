@@ -213,6 +213,36 @@ impl Element for Text {
             ),
         };
 
+        // Push the IME position whenever the caret, the scroll or the field's place changes,
+        // not only when a composition starts. The next frame reads the layout this one paints.
+        let (focused, selection_range) = {
+            let input = self.input.read(cx);
+            (
+                input.focus_handle.is_focused(window),
+                (input.selected_range.start, input.selected_range.end),
+            )
+        };
+        let state = super::ImeState {
+            selection: selection_range,
+            scroll: scroll.as_f32(),
+            origin: (bounds.origin.x.as_f32(), bounds.origin.y.as_f32()),
+            size: (bounds.size.width.as_f32(), bounds.size.height.as_f32()),
+        };
+        let moved = self.input.update(cx, |input, _| match focused {
+            true => {
+                let moved = input.ime != Some(state);
+                input.ime = Some(state);
+                moved
+            }
+            false => {
+                input.ime = None;
+                false
+            }
+        });
+        if moved {
+            window.invalidate_character_coordinates();
+        }
+
         Painted {
             line: Some(line),
             origin: point(left, bounds.top()),
@@ -275,7 +305,9 @@ impl Element for Text {
         });
 
         self.input.update(cx, |input, _| {
-            input.last_layout = (!input.content.is_empty()).then_some(line);
+            // An empty field keeps the layout too: the IME asks for the caret box before the
+            // first character lands, and without a line it has nowhere to put its window.
+            input.last_layout = Some(line);
             input.last_bounds = Some(Bounds::from_corners(origin, bounds.bottom_right()));
         });
     }
