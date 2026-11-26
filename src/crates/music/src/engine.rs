@@ -135,7 +135,7 @@ pub trait Fetch: Send + Sync + 'static {
     ///
     /// A fragmented stream has no index for a decoder to jump around in: asking one to seek
     /// leaves it producing nothing, which looks exactly like a track that ended.
-    fn reopen_to_seek(&self) -> bool {
+    fn reopen_to_seek(&self, _loaded: &Self::Loaded) -> bool {
         false
     }
 }
@@ -1198,7 +1198,7 @@ fn audio_loop<F: Fetch>(
                 }
                 Job::Seek(position) => {
                     let Some(held) = &mut current else { continue };
-                    match fetch.reopen_to_seek() {
+                    match fetch.reopen_to_seek(&held.loaded) {
                         // A second decoder over the same download. Whatever is lined up behind
                         // this track is still what follows it; only the end it was waiting for
                         // has moved.

@@ -6,15 +6,17 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use rodio::Source as _;
 
 use super::runtime::{PluginHealth, WasmPlugin};
 use crate::engine::{self, Fetch};
+use crate::ranged::{self, Address, Reach};
 use crate::speed::{SpeedControl, SpeedSource};
 use crate::stream::{Plain, Reader, Stream};
 use crate::vault::{Recording, Shelf};
@@ -230,17 +232,7 @@ impl WasmClient {
         url: &str,
         headers: &[wisp_plugin_api::Header],
     ) -> Result<reqwest::Response> {
-        let mut request = self.http.get(url);
-        let mut has_agent = false;
-        for header in headers {
-            if header.name.eq_ignore_ascii_case("user-agent") {
-                has_agent = true;
-            }
-            request = request.header(header.name.as_str(), header.value.as_str());
-        }
-        if !has_agent {
-            request = request.header("User-Agent", "wisp-provider/0.51");
-        }
+        let request = self.http.get(url).headers(stream_headers(headers));
         let response = request
             .send()
             .await
@@ -1457,6 +1449,7 @@ struct WasmPlaybackFactory {
 
 impl PlaybackFactory for WasmPlaybackFactory {
     fn start(&self, config: PlaybackConfig) -> (Box<dyn Player>, Box<dyn PlaybackEvents>) {
+        let media = ranged::media(self.slug, || self.client.http.clone());
         engine::start(
             WasmPlayback {
                 client: self.client.clone(),
@@ -1464,6 +1457,7 @@ impl PlaybackFactory for WasmPlaybackFactory {
                 quality: config.quality,
                 control: config.speed_control.clone(),
                 speed: config.speed,
+                media,
                 shelf: config
                     .vault
                     .as_ref()
@@ -1480,6 +1474,8 @@ struct WasmPlayback {
     quality: Quality,
     control: Arc<SpeedControl>,
     speed: f32,
+    /// The client a seek's own download goes through.
+    media: reqwest::Client,
     shelf: Option<Shelf>,
 }
 
@@ -1493,11 +1489,39 @@ impl WasmPlayback {
     }
 }
 
+/// The headers a plugin's stream is fetched with, including the host's user agent when the
+/// plugin gives none.
+fn stream_headers(headers: &[wisp_plugin_api::Header]) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    let mut has_agent = false;
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("user-agent") {
+            has_agent = true;
+        }
+        let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(header.name.as_bytes()),
+            HeaderValue::from_str(&header.value),
+        ) else {
+            continue;
+        };
+        map.append(name, value);
+    }
+    if !has_agent {
+        map.insert(USER_AGENT, HeaderValue::from_static("wisp-provider/0.51"));
+    }
+    map
+}
+
 #[derive(Clone)]
 struct Loaded {
     stream: Stream<Plain>,
     duration: Option<Duration>,
     level: String,
+    /// What a seek past the download fetches the file through. Only a plain FLAC, Ogg or MP3
+    /// stream whose server answers byte ranges has one.
+    leap: Option<Arc<ranged::File<Plain>>>,
+    /// The track's length once a lookup lands, which a seek enters the file by.
+    length: Option<Arc<OnceLock<Duration>>>,
 }
 
 #[async_trait]
@@ -1529,10 +1553,12 @@ impl Fetch for WasmPlayback {
                     stream,
                     duration,
                     level: requested.to_owned(),
+                    leap: None,
+                    length: None,
                 });
             }
         }
-        let (url, headers, mut variant) = match self.client.stream_plan(id, requested).await {
+        let (mut url, mut headers, mut variant) = match self.client.stream_plan(id, requested).await {
             Ok(plan) => (plan.url, plan.headers, plan.variant),
             Err(error) if self.slug == "netease" => {
                 log::info!("playback: {id} has no plugin stream; trying the built-in unblock chain");
@@ -1550,8 +1576,10 @@ impl Fetch for WasmPlayback {
                     "playback: {id} official stream failed ({error:#}); trying the built-in unblock chain"
                 );
                 match self.try_unblock(id).await {
-                    Some((url, source)) => {
+                    Some((fresh, source)) => {
                         variant = format!("unm-{source}-{requested}");
+                        url = fresh;
+                        headers.clear();
                         self.client
                             .open_stream(&url, &[])
                             .await
@@ -1563,6 +1591,7 @@ impl Fetch for WasmPlayback {
             Err(error) => return Err(error),
         };
         let total = response.content_length();
+        let seekable = ranged::ranges(&response);
         let level = if variant.is_empty() {
             requested.to_owned()
         } else {
@@ -1582,15 +1611,49 @@ impl Fetch for WasmPlayback {
             None => Recording::through(response),
         };
         let stream = Stream::pulling(body, total, Plain).primed().await?;
+        let leap = match seekable {
+            true => {
+                let headers = stream_headers(&headers);
+                let (media, url, slug) = (self.media.clone(), url.clone(), self.slug);
+                let reach = Reach::new(slug, id, move |_| {
+                    let address = Address::new(slug, media.clone(), url.clone());
+                    (address.headers(headers.clone()), Plain)
+                });
+                ranged::File::detect(&stream, reach)
+            }
+            false => None,
+        };
+        let length = leap.as_ref().map(|_| {
+            let length = Arc::new(OnceLock::new());
+            let cell = Arc::clone(&length);
+            let client = self.client.clone();
+            let track_id = id.to_owned();
+            tokio::spawn(async move {
+                if let Ok(track) = client.track(&track_id).await {
+                    let _ = cell.set(track.duration);
+                }
+            });
+            length
+        });
         Ok(Loaded {
             stream,
             duration: None,
             level,
+            leap,
+            length,
         })
     }
 
     fn length(&self, loaded: &Loaded) -> Option<Duration> {
-        loaded.duration
+        loaded
+            .duration
+            .or_else(|| {
+                loaded
+                    .length
+                    .as_ref()
+                    .and_then(|length| length.get().copied())
+            })
+            .filter(|length| !length.is_zero())
     }
 
     async fn downloaded(&self, loaded: &Loaded) {
@@ -1609,6 +1672,32 @@ impl Fetch for WasmPlayback {
             decoder.try_seek(at).ok()?;
         }
         Some(SpeedSource::new(decoder, self.speed, self.control.clone()))
+    }
+
+    /// Opens the track at `at` from a download started near it when the main one is far from
+    /// there and the file is a format a seek can enter. Otherwise the decoder waits for the
+    /// main download to get there, as [`open`](Fetch::open) does.
+    fn open_near(
+        &self,
+        id: &str,
+        loaded: &Loaded,
+        at: Duration,
+    ) -> Option<(Self::Source, Duration)> {
+        let length = self.length(loaded);
+        let entered = loaded.leap.as_ref().zip(length).and_then(|(file, length)| {
+            file.enter(&loaded.stream, length, at, |reader| {
+                let decoder = ranged::forward(self.slug, id, reader)?;
+                Some(SpeedSource::new(decoder, self.speed, self.control.clone()))
+            })
+        });
+        entered.or_else(|| self.open(id, loaded, at).map(|source| (source, at)))
+    }
+
+    /// A seek opens a second decoder at its target when the file can be entered there, so one
+    /// past the download starts from a new ranged download rather than wait for the main one.
+    /// Without both a reach and the track's length, the running decoder moves as before.
+    fn reopen_to_seek(&self, loaded: &Loaded) -> bool {
+        loaded.leap.is_some() && self.length(loaded).is_some()
     }
 }
 
@@ -1701,6 +1790,7 @@ mod tests {
             quality: crate::Quality::High,
             control: Arc::new(crate::speed::SpeedControl::default()),
             speed: 1.0,
+            media: reqwest::Client::new(),
             shelf: None,
         };
 

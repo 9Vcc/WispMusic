@@ -21,6 +21,7 @@ pub mod order;
 pub mod output;
 pub mod plugins;
 pub mod progress;
+pub mod ranged;
 mod redact;
 mod sink;
 pub mod smart;
