@@ -28,7 +28,7 @@ Unicode true
 ; 兜底版本号：正常走 `cargo build-installer` 时由 xtask 用 -DAPP_VERSION=<Cargo.toml 的 version>
 ; 覆盖；这里只在直接手跑 makensis 时起作用。
 !ifndef APP_VERSION
-    !define APP_VERSION "0.2.5"
+    !define APP_VERSION "0.2.6"
 !endif
 !ifndef APP_VERSION4
     !define APP_VERSION4 "${APP_VERSION}.0"
