@@ -811,9 +811,10 @@ impl RenderOnce for Button {
             .px(padding)
             .rounded(radius)
             // Mid-resize the box is narrower or wider than what it holds, so the content keeps
-            // its own width from the leading edge and the box clips it as it grows. It leaves the
-            // pixel grid while it springs, so its edge glides instead of stepping a pixel at a
-            // time, and only its width keeps a fraction.
+            // its own width from the leading edge and the box clips it as it grows, all but a
+            // trailing icon, which rides the trailing edge so it stays put beside a button
+            // pinned there. It leaves the pixel grid while it springs, so its edge glides instead
+            // of stepping a pixel at a time, and only its width keeps a fraction.
             .when_some(resizing, |this, width| {
                 this.w(width)
                     .h(window.pixel_snap(height))
@@ -942,9 +943,20 @@ impl RenderOnce for Button {
                 None => this.child(
                     div()
                         .min_w_0()
-                        .truncate()
+                        .when_else(
+                            resizing.is_some(),
+                            |this| {
+                                this.overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .pixel_snap(true)
+                                    .pixel_snap_x(false)
+                            },
+                            |this| this.truncate(),
+                        )
                         .when(trailing.is_some() || detail.is_some(), |this| this.flex_1())
-                        .when(resizing.is_some(), |this| this.flex_none())
+                        .when(resizing.is_some() && trailing.is_none(), |this| {
+                            this.flex_none()
+                        })
                         .child(label),
                 ),
             })
