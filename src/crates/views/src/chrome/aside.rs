@@ -9,7 +9,7 @@ use gpui::accesskit::{Role, Toggled};
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, Context, Div, DragMoveEvent, Entity, ExternalPaths,
     FontWeight, Hsla, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    Render, ScrollHandle, ScrollStrategy, SharedString, Size, SpringConfig, SpringState, Task,
+    Render, ScrollHandle, SharedString, Size, SpringConfig, SpringState, StyledText, Task,
     UniformListScrollHandle, Window, canvas, div, ease_in_out, px, relative, size, svg,
     uniform_list,
 };
@@ -23,9 +23,9 @@ use state::{
 };
 use ui::{
     ActiveTheme as _, Avatar, Button, Card, DraggedPin, Edge, Glowing as _, Initials, Menu,
-    MenuItem, Motion, Motioned as _, PREFETCH_REACH, Pin, Pinnable as _, Popup, Scrollbar,
-    Scroller, Spot, Springs, Tails as _, Text, Vacancy, drop_gap, drop_marker, ease_out_cubic,
-    ease_out_expo, eyebrow, faint, mix, prefetch, snapped, vacant,
+    MenuItem, Motion, Motioned as _, PREFETCH_REACH, Perch, Pin, Pinnable as _, Popup, Scrollbar,
+    Scroller, Spot, Springs, Tails as _, Text, Tipped as _, Vacancy, drop_gap, drop_marker,
+    ease_out_cubic, ease_out_expo, eyebrow, faint, mix, prefetch, snapped, vacant,
 };
 use unicode_bidi::{BidiClass, Direction};
 
@@ -76,7 +76,6 @@ const PLAIN_LYRICS_GROWTH: f32 = 1.15;
 const LYRICS_FRAME: Size<Pixels> = size(px(1152.), px(648.));
 // the most a large window grows fullscreen lyrics by
 const LYRICS_FRAME_MOST: f32 = 2.;
-const PINNED_SHARE: f32 = 0.25;
 const PIN: f32 = 0.5;
 /// How many lyric rows above the vertical middle the sung line sits.
 const PIN_LIFT_LINES: f32 = 2.;
@@ -150,6 +149,8 @@ struct Sung {
     lane: Pixels,
     scripts: Option<RomanizationScripts>,
     theme: ui::Theme,
+    /// The colour of the sung letters, which are drawn over the line's own letters. It fades
+    /// out rather than towards the line's colour, so a finished line looks like every other.
     karaoke_tint: gpui::Hsla,
     lift: f32,
     from: gpui::Point<f32>,
@@ -212,6 +213,18 @@ struct SheetLayout {
     font: u64,
 }
 
+/// Where the last pin of the now-playing heading asked the queue to rest, kept until it lands.
+#[derive(Clone, Copy)]
+struct Pinned {
+    goal: Pixels,
+    /// How many rows the queue listed when the pin was last applied.
+    rows: usize,
+    /// The offset gpui settled on after that, or `None` before the list has been laid out again.
+    rested: Option<Pixels>,
+    /// The scrollbar's nudge count at the pin, which moves once the reader scrolls themselves.
+    nudges: u64,
+}
+
 #[derive(Clone)]
 struct ContextMenuState {
     track: Track,
@@ -262,6 +275,8 @@ pub(crate) struct Aside {
     /// again.
     queue_track: Option<String>,
     anchor: bool,
+    /// The last pin while it has not landed yet, cleared once it does.
+    queue_pin: Option<Pinned>,
     titled: bool,
     aiming: bool,
     rested: Option<Pixels>,
@@ -410,6 +425,7 @@ impl Aside {
             past_len: 0,
             queue_track: None,
             anchor: true,
+            queue_pin: None,
             titled: true,
             aiming: false,
             rested: None,
@@ -1758,11 +1774,7 @@ impl Aside {
                         _ => tint,
                     };
                     let sung = Sung {
-                        karaoke_tint: mix(
-                            accent,
-                            tint,
-                            primary_karaoke_fade(line, active, position),
-                        ),
+                        karaoke_tint: karaoke_tint(accent, line, active, position),
                         lift,
                         from: match hugs_end(line.voice, sung.mirrored) {
                             true => gpui::point(1., 0.5),
@@ -2335,39 +2347,76 @@ impl Aside {
             return;
         };
 
-        let viewport = self.scroll.0.borrow().base_handle.bounds().size.height;
-        if viewport <= px(0.) {
+        let handle = self.scroll.0.borrow().base_handle.clone();
+        if handle.bounds().size.height <= px(0.) {
             window.request_animation_frame();
             return;
         }
 
-        let above = Self::rows_above(viewport, window, cx);
-        self.scroll
-            .scroll_to_item_strict_with_offset(index, ScrollStrategy::Top, above);
+        let goal = Self::pinned_offset(index, window, cx);
+        handle.set_offset(gpui::point(handle.offset().x, -goal));
+        self.queue_pin = Some(Pinned {
+            goal,
+            rows: sections.len(),
+            rested: None,
+            nudges: self.scrollbar.read(cx).nudges(),
+        });
         self.anchor = false;
     }
 
-    /// How many rows `pin` keeps above the now-playing one, so it sits a quarter of the way down.
-    fn rows_above(viewport: Pixels, window: &Window, cx: &App) -> usize {
+    /// Applies the last pin again when rows arrive under it, as when the upcoming songs load
+    /// after the restored one and gpui clamped the pin short. It lets go once the pin lands or
+    /// the queue is scrolled away from where it rested.
+    fn settle_pin(&mut self, sections: &Sections, cx: &App) {
+        let Some(pinned) = self.queue_pin else {
+            return;
+        };
+        let handle = self.scroll.0.borrow().base_handle.clone();
+        let at = -handle.offset().y;
+        let moved = self.scrollbar.read(cx).nudges() != pinned.nudges
+            || pinned
+                .rested
+                .is_some_and(|rested| (at - rested).abs() > px(0.5));
+        if at >= pinned.goal - px(0.5) || moved {
+            self.queue_pin = None;
+            return;
+        }
+        self.queue_pin = Some(match sections.len() == pinned.rows {
+            true => Pinned {
+                rested: Some(at),
+                ..pinned
+            },
+            false => {
+                handle.set_offset(gpui::point(handle.offset().x, -pinned.goal));
+                Pinned {
+                    rows: sections.len(),
+                    rested: None,
+                    ..pinned
+                }
+            }
+        });
+    }
+
+    /// How far `pin` scrolls the queue so the previous song is the only history row left above
+    /// the now-playing heading. A queue without history stays at the top. gpui clamps the
+    /// offset when it lays the list out, so a queue too short to scroll stays where it fits.
+    fn pinned_offset(index: usize, window: &Window, cx: &App) -> Pixels {
         let row = snapped(cx.theme().metrics.list_row, window);
-        (viewport * PINNED_SHARE / row).round() as usize
+        row * index.saturating_sub(2) as f32
     }
 
     /// Where the queue rests once `pin` has placed the now-playing row, in scrolled pixels,
-    /// clamped the way gpui clamps the deferred scroll. Zero while nothing is playing, so a
-    /// recall falls back to the top, and None before the list has been laid out.
+    /// clamped the way gpui clamps the list. Zero while nothing is playing, so a recall falls
+    /// back to the top, and None before the list has been laid out.
     fn resting_offset(&self, sections: &Sections, window: &Window, cx: &App) -> Option<Pixels> {
         let handle = self.scroll.0.borrow().base_handle.clone();
-        let viewport = handle.bounds().size.height;
-        if viewport <= px(0.) {
+        if handle.bounds().size.height <= px(0.) {
             return None;
         }
         let Some(index) = sections.current_index() else {
             return Some(Pixels::ZERO);
         };
-        let row = snapped(cx.theme().metrics.list_row, window);
-        let above = Self::rows_above(viewport, window, cx);
-        let goal = row * index.saturating_sub(above) as f32;
+        let goal = Self::pinned_offset(index, window, cx);
         Some(goal.clamp(Pixels::ZERO, handle.max_offset().y))
     }
 
@@ -2501,6 +2550,9 @@ impl Render for Aside {
             self.queue_track = queue_track;
             self.anchor = true;
         }
+        if self.tab == SideTab::Queue {
+            self.settle_pin(&sections, cx);
+        }
         if self.anchor && self.tab == SideTab::Queue {
             self.pin(&sections, window, cx);
         }
@@ -2584,12 +2636,19 @@ impl Render for Aside {
                                             true => Pixels::ZERO,
                                             false => px(FADE * 0.5),
                                         };
-                                        this.fade_edges(px(FADE * 0.5), under)
+                                        let scrolled =
+                                            -self.scroll.0.borrow().base_handle.offset().y
+                                                > px(0.5);
+                                        let over = match scrolled {
+                                            true => cx.theme().metrics.pad * 2.,
+                                            false => Pixels::ZERO,
+                                        };
+                                        this.fade_edges(over, under)
                                     })
                                     .child(
                                         self.rows(listing, sections.clone(), cx)
                                             .px_2()
-                                            .pt(px(FADE * 0.5))
+                                            .pt(cx.theme().metrics.pad)
                                             .track_scroll(&self.scroll)
                                             .size_full(),
                                     ),
@@ -2639,6 +2698,8 @@ fn track_place(sections: &Sections, position: QueuePosition) -> (usize, usize) {
 
 fn source_link(name: SharedString, to: Destination, cx: &App) -> impl IntoElement {
     let theme = *cx.theme();
+    let text = StyledText::new(name.clone());
+    let layout = text.layout().clone();
 
     div()
         .id("queue-source")
@@ -2654,7 +2715,8 @@ fn source_link(name: SharedString, to: Destination, cx: &App) -> impl IntoElemen
         .cursor_pointer()
         .hover(|style| style.underline())
         .link(to)
-        .child(name)
+        .child(text)
+        .tip_clipped(name, layout, Perch::Above)
         .glowed_text(theme.muted_foreground, theme.foreground)
 }
 
@@ -2700,11 +2762,7 @@ pub(crate) fn verse(
         lane: look.lane,
         scripts: look.scripts,
         theme: *theme,
-        karaoke_tint: mix(
-            theme.foreground,
-            tint,
-            primary_karaoke_fade(line, look.active, position),
-        ),
+        karaoke_tint: karaoke_tint(theme.foreground, line, look.active, position),
         lift: 1.,
         from: match hugs_end(line.voice, mirrored) {
             true => gpui::point(1., 0.5),
@@ -3808,6 +3866,18 @@ fn primary_karaoke_fade(
     line.sung_end().map_or(0., |end| {
         progress_between(end, end + Motion::Control.span(), position)
     })
+}
+
+/// The colour of a line's sung letters at `position`, drawn over the line's own letters. A lit
+/// layer in the line's translucent colour would double it, so it fades out instead and a
+/// finished line looks like every other.
+fn karaoke_tint(
+    base: Hsla,
+    line: &music::LyricsLine,
+    line_active: bool,
+    position: std::time::Duration,
+) -> Hsla {
+    base.opacity(1. - primary_karaoke_fade(line, line_active, position))
 }
 
 fn background_line_singing(

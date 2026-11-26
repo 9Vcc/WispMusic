@@ -129,6 +129,7 @@ pub(crate) fn rising_volume<V: VolumeHost>(
                         .when(frosted, Button::frosted)
                         .small()
                         .icon(volume_icon(level))
+                        .snapping()
                         // No tooltip: it would sit over the slider rising from the same spot,
                         // so the button carries its name for screen readers alone.
                         .name(match muted {
