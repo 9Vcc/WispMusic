@@ -71,10 +71,10 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
     if let Some(session) = cx.try_global::<MiniSession>().copied() {
         let alive = session
             .mini
-            .update(cx, |_, window, _| surface(window))
+            .update(cx, |_, window, cx| surface(window, cx))
             .is_ok();
         if alive {
-            hide_native(window);
+            hide_native(window, cx);
             return;
         }
         cx.remove_global::<MiniSession>();
@@ -139,7 +139,7 @@ pub(crate) fn enter(window: &mut Window, cx: &mut App) {
         main,
         mini: opened.into(),
     });
-    hide_native(window);
+    hide_native(window, cx);
 }
 
 /// Shows and focuses the mini player when it exists. The tray uses this while mini mode is on.
@@ -149,7 +149,7 @@ pub fn reveal(cx: &mut App) -> bool {
     };
     let alive = session
         .mini
-        .update(cx, |_, window, _| surface(window))
+        .update(cx, |_, window, cx| surface(window, cx))
         .is_ok();
     if !alive {
         cx.remove_global::<MiniSession>();
@@ -169,7 +169,7 @@ pub fn dismiss(cx: &mut App) -> bool {
         .ok();
     session
         .main
-        .update(cx, |_, window, _| surface(window))
+        .update(cx, |_, window, cx| surface(window, cx))
         .is_ok()
 }
 
@@ -177,7 +177,10 @@ fn reveal_main(cx: &mut App) {
     let Some(session) = cx.try_global::<MiniSession>().copied() else {
         return;
     };
-    session.main.update(cx, |_, window, _| surface(window)).ok();
+    session
+        .main
+        .update(cx, |_, window, cx| surface(window, cx))
+        .ok();
 }
 
 fn leave(window: &mut Window, cx: &mut App) {
@@ -197,36 +200,56 @@ fn hwnd(window: &Window) -> Option<*mut std::ffi::c_void> {
 }
 
 #[cfg(target_os = "windows")]
-fn hide_native(window: &mut Window) {
+fn hide_native(window: &mut Window, cx: &App) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    // ShowWindow runs the window procedure inline: it fires WM_SHOWWINDOW, and hiding
+    // or showing a window shuffles activation, whose handlers borrow the app again.
+    // While an input event is being dispatched the app is already borrowed, so the
+    // frame request those messages trigger fails with "RefCell already borrowed".
+    // The call goes to a foreground task instead, which runs at the message loop
+    // where nothing holds the borrow. The handle travels as an address because an
+    // HWND is not Send; tray_menu uses the same trick.
     if let Some(handle) = hwnd(window) {
-        unsafe {
-            ShowWindow(handle, SW_HIDE);
-        }
+        let hwnd = handle as usize;
+        cx.spawn(async move |_| {
+            let handle = hwnd as windows_sys::Win32::Foundation::HWND;
+            unsafe {
+                ShowWindow(handle, SW_HIDE);
+            }
+        })
+        .detach();
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn hide_native(window: &mut Window) {
+fn hide_native(window: &mut Window, _cx: &App) {
     window.minimize_window();
 }
 
 #[cfg(target_os = "windows")]
-fn show_native(window: &mut Window) {
+fn show_native(window: &mut Window, cx: &App) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOW, SetForegroundWindow, ShowWindow};
+    // Same re-entrancy as hide_native. The task also keeps its place ahead of the
+    // activation dance activate_window queues right behind it: both go through the
+    // same foreground executor, in spawn order.
     if let Some(handle) = hwnd(window) {
-        unsafe {
-            ShowWindow(handle, SW_SHOW);
-            SetForegroundWindow(handle);
-        }
+        let hwnd = handle as usize;
+        cx.spawn(async move |_| {
+            let handle = hwnd as windows_sys::Win32::Foundation::HWND;
+            unsafe {
+                ShowWindow(handle, SW_SHOW);
+                SetForegroundWindow(handle);
+            }
+        })
+        .detach();
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn show_native(_window: &mut Window) {}
+fn show_native(_window: &mut Window, _cx: &App) {}
 
-fn surface(window: &mut Window) {
-    show_native(window);
+fn surface(window: &mut Window, cx: &App) {
+    show_native(window, cx);
     window.activate_window();
     window.refresh();
 }
@@ -764,7 +787,7 @@ impl MiniPlayer {
                                     .small()
                                     .icon("icons/x.svg")
                                     .tooltip_above("mini-close")
-                                    .on_click(|_, window, _| hide_native(window)),
+                                    .on_click(|_, window, cx| hide_native(window, cx)),
                             ),
                     ),
             )

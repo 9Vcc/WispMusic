@@ -1,4 +1,5 @@
 use router::{Destination, Link, navigate};
+use std::time::Duration;
 use ui::ActiveTheme as _;
 use ui::Tails as _;
 use ui::Tipped as _;
@@ -259,9 +260,17 @@ impl PlayerBar {
             .icon("icons/picture-in-picture.svg")
             .tooltip_above("player-mini")
             // Opening the mini window borrows the app, which cannot happen while this press is
-            // still being dispatched, so the window opens once the event is over.
+            // still being dispatched. The next foreground task runs after the event has unwound.
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.defer(cx, |window, cx| crate::shells::mini::enter(window, cx))
+                let main = window.window_handle();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                    main.update(cx, |_, window, cx| crate::shells::mini::enter(window, cx))
+                        .ok();
+                })
+                .detach();
             })
             .into_any_element()
     }

@@ -108,8 +108,16 @@ pub fn install(main: AnyWindowHandle, cx: &mut App) {
     cx.set_global(Installed);
     let settings = Wisp::global(cx).settings.clone();
     cx.observe(&settings, |_, cx| {
-        // The setting can be changed from this window, which is already on the update stack.
-        cx.defer(sync);
+        // The setting can be changed from this window, which is already on the update stack,
+        // and opening a window during input dispatch borrows the app twice. The next foreground
+        // task runs after the event has unwound.
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1))
+                .await;
+            cx.update(sync);
+        })
+        .detach();
     })
     .detach();
     sync(cx);
