@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    Context, NavigationDirection, Pixels, Render, ScrollWheelEvent, SpringState, Window, div,
+    Context, NavigationDirection, Pixels, Render, ScrollEvent, SpringState, Window, div,
     point, px, svg,
 };
 use ui::{ActiveTheme as _, Springs, ease_out_cubic, mix, motion, paced};
@@ -64,7 +64,7 @@ impl SwipeCue {
     /// the arrow while one is under the fingers.
     pub fn follow(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

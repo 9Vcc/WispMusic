@@ -5,7 +5,7 @@ use gpui::accesskit::{Role, Toggled};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, Pixels, Point, Render, ScrollHandle,
-    ScrollWheelEvent, SharedString, WeakEntity, Window, div, linear_color_stop, linear_gradient,
+    ScrollEvent, SharedString, WeakEntity, Window, div, linear_color_stop, linear_gradient,
     point, px, relative,
 };
 
@@ -660,7 +660,7 @@ impl ArtistView {
 
     fn release_scroll(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1366,7 +1366,7 @@ impl Render for ArtistView {
             .px(inset)
             .pt(inset)
             .pb(inset)
-            .on_scroll_wheel(cx.listener(Self::release_scroll))
+            .on_scroll(cx.listener(Self::release_scroll))
             .child(
                 div()
                     .relative()

@@ -7,7 +7,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyView, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, ScrollWheelEvent, SharedString, SpringConfig, SpringState, Task,
+    Pixels, Point, Render, ScrollEvent, SharedString, SpringConfig, SpringState, Task,
     TextShadow,
 };
 use gpui::{Div, ElementId, Window, anchored, canvas, deferred, div, phi, point, px, svg};
@@ -2301,7 +2301,7 @@ impl Render for FullscreenView {
                 },
             ))
             // A trackpad reports fingers that only touch it as a scroll that moves nothing.
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 if event.delta.pixel_delta(window.line_height()) != Point::default() {
                     if !this.awake {
                         cx.show_cursor();

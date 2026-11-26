@@ -6,7 +6,7 @@ use gpui::prelude::*;
 use gpui::{
     AbsoluteLength, Anchor, AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, DefiniteLength,
     Div, ElementId, Entity, FocusHandle, Focusable as _, Global, Interactivity, Length,
-    MouseButton, MouseClickEvent, MouseDownEvent, Pixels, Point, ScrollWheelEvent, SharedString,
+    MouseButton, MouseClickEvent, MouseDownEvent, Pixels, Point, ScrollEvent, SharedString,
     Size, Stateful, StyleRefinement, Window, anchored, deferred, div, phi, point, px, svg,
 };
 
@@ -1160,7 +1160,7 @@ impl RenderOnce for Menu {
                     .flex_col()
                     .overflow_y_scroll()
                     .track_scroll(scrollbar.read(cx).scroll())
-                    .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
+                    .on_scroll(move |event: &ScrollEvent, window, cx| {
                         if event.delta.precise() {
                             return;
                         }

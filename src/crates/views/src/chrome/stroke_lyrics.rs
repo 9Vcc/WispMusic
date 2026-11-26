@@ -346,14 +346,6 @@ pub(crate) struct StrokeCell {
     pub(crate) outline: Option<Hsla>,
 }
 
-impl IntoElement for StrokeCell {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for StrokeCell {
     type RequestLayoutState = ();
     type PrepaintState = ();

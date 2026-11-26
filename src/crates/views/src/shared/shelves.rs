@@ -2,7 +2,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Axis, Context, Div, ElementId, Entity, EntityId, FontWeight, Pixels, Point,
-    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, WeakEntity, Window, div, point, px,
+    ScrollHandle, ScrollEvent, SharedString, Stateful, WeakEntity, Window, div, point, px,
 };
 use std::rc::Rc;
 
@@ -397,9 +397,9 @@ impl Shelves {
                     .overflow_x_scroll()
                     .restrict_scroll_to_axis()
                     .track_scroll(&handle)
-                    .on_scroll_wheel({
+                    .on_scroll({
                         let scroll = handle.clone();
-                        move |event: &ScrollWheelEvent, window, cx| {
+                        move |event: &ScrollEvent, window, cx| {
                             ui::hold_swipe(event, &scroll, cx);
                             if !sideways(event) {
                                 return;
@@ -685,7 +685,7 @@ impl Rail {
                     .overflow_x_scroll()
                     .restrict_scroll_to_axis()
                     .track_scroll(&self.scroll)
-                    .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
+                    .on_scroll(move |event: &ScrollEvent, window, cx| {
                         ui::hold_swipe(event, &scrolled, cx);
                         if !sideways(event) {
                             return;
@@ -836,7 +836,7 @@ fn slot(kind: &'static str, place: usize) -> ElementId {
 
 /// Whether a wheel event should glide a rail. Only a notched wheel moving sideways does, since a
 /// trackpad scrolls the rail itself and a vertical notch belongs to the page.
-fn sideways(event: &ScrollWheelEvent) -> bool {
+fn sideways(event: &ScrollEvent) -> bool {
     !event.delta.precise() && event.delta.pixel_delta(px(1.)).x != Pixels::ZERO
 }
 
