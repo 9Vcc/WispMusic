@@ -26,7 +26,7 @@ use state::{
 use ui::{
     ActiveTheme as _, Button, Card, Deck, FilterChange, LEADING, Mode, Pin, Pinnable, Popovers,
     Popup, Scrollbar, Scroller, Sort, SortAxis, TableDelegate, TableEvent, TableSource, TableState,
-    Text, Vacancy, Viewport, heading, quantize, runtime, scrolled, snapped, table,
+    Text, Vacancy, Viewport, heading, runtime, scrolled, snapped, table,
 };
 
 use crate::shared::album_grid::{AlbumTiles, CardGrid, TileLook};
@@ -640,8 +640,15 @@ impl LibraryView {
 
     /// The viewport of a table that opens the page with no header above it. `lead` is the space
     /// the page leaves above the table.
-    fn viewport(scroll: &ScrollHandle, lead: Pixels, window: &Window, cx: &App) -> Viewport {
-        quantize(scroll, window);
+    fn viewport(
+        scrollbar: &Entity<Scrollbar>,
+        lead: Pixels,
+        window: &Window,
+        cx: &App,
+    ) -> Viewport {
+        let scrollbar = scrollbar.read(cx);
+        scrollbar.quantize(window);
+        let scroll = scrollbar.scroll();
         let visible = scroll.bounds().size.height;
 
         Viewport::measured(scrolled(scroll) - lead, visible, window).covered(Chrome::bottom(cx))
@@ -1208,12 +1215,12 @@ impl Render for LibraryView {
         let framed = page::framed(window, cx);
         if mode == Mode::List {
             self.table(self.section).claim(cx);
-            let scroll = self.scrollbar.read(cx).scroll().clone();
+            let bar = &self.scrollbar;
             let viewport = match (self.section.listing(), framed) {
-                (true, true) => page::past_border(page::viewport(&scroll, inset, window, cx)),
-                (true, false) => page::viewport(&scroll, inset, window, cx),
-                (false, true) => page::past_border(Self::viewport(&scroll, inset, window, cx)),
-                (false, false) => Self::viewport(&scroll, Pixels::ZERO, window, cx),
+                (true, true) => page::past_border(page::viewport(bar, inset, window, cx)),
+                (true, false) => page::viewport(bar, inset, window, cx),
+                (false, true) => page::past_border(Self::viewport(bar, inset, window, cx)),
+                (false, false) => Self::viewport(bar, Pixels::ZERO, window, cx),
             };
             self.table(self.section).set_viewport(viewport, cx);
         }
@@ -1251,6 +1258,7 @@ impl Render for LibraryView {
             (section, Mode::List) if section.listing() => {
                 Scroller::new("library-page", &self.scrollbar)
                     .bottom_inset(crate::chrome::Chrome::bottom(cx))
+                    .top_inset(page::below_head(window, cx))
                     .px(crate::chrome::Chrome::margin(window, cx))
                     .pt(inset)
                     .pb(inset)
@@ -1261,6 +1269,7 @@ impl Render for LibraryView {
             }
             (_, Mode::List) => Scroller::new("library-page", &self.scrollbar)
                 .bottom_inset(crate::chrome::Chrome::bottom(cx))
+                .top_inset(page::below_head(window, cx))
                 .px(crate::chrome::Chrome::margin(window, cx))
                 .when(framed, |this| this.pt(inset))
                 .pb(inset)

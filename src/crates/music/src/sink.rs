@@ -647,6 +647,10 @@ mod tests {
             meter: Meter::default(),
             analyzer: Analyzer::default(),
         };
-        (player, chain.apply(queue, format.clone(), false), format)
+        (
+            player,
+            chain.apply(queue, format.clone(), 48_000, false),
+            format,
+        )
     }
 }

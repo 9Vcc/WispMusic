@@ -36,6 +36,7 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::Win32::UI::Controls::{
     HIMAGELIST, ILC_COLOR32, ImageList_Create, ImageList_Destroy, ImageList_ReplaceIcon,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, ITaskbarList3, RemoveWindowSubclass, SetWindowSubclass, TBPF_NOPROGRESS,
     TBPF_NORMAL, TBPF_PAUSED, THB_BITMAP, THB_FLAGS, THB_TOOLTIP, THBF_DISABLED, THBF_ENABLED,
@@ -206,7 +207,7 @@ impl ThumbBar {
         cx.observe(&settings, |this, _, cx| this.publish(cx))
             .detach();
 
-        let shown = shown(cx);
+        let shown = shown(cx, bar.hwnd);
         bar.show(&shown);
         let progress = progress(cx);
         bar.mark(progress);
@@ -229,7 +230,7 @@ impl ThumbBar {
             self.tick(cx);
         }
 
-        let shown = shown(cx);
+        let shown = shown(cx, self.bar.hwnd);
         if shown == self.shown {
             return;
         }
@@ -560,9 +561,16 @@ fn glyph(name: &str, look: Look) -> Option<HICON> {
     };
     // Pack SVGs are stroked and filled with `currentColor`, which has no meaning
     // outside a document; give it one before parsing.
-    let source = std::str::from_utf8(bytes)
+    let mut source = std::str::from_utf8(bytes)
         .ok()?
         .replace("currentColor", colour);
+    // Thin skip strokes blur at taskbar size, so they are thickened. Iconoir and
+    // Solar stroke at 1.5 and Lucide at 2, while Remix fills its glyphs.
+    if name.starts_with("skip") {
+        source = source
+            .replace("stroke-width=\"1.5\"", "stroke-width=\"2.25\"")
+            .replace("stroke-width=\"2\"", "stroke-width=\"2.75\"");
+    }
 
     let tree = resvg::usvg::Tree::from_str(&source, &resvg::usvg::Options::default()).ok()?;
     let size = look.size.max(1) as u32;
@@ -643,7 +651,7 @@ fn icon(rgba: &[u8], size: u32) -> Option<HICON> {
 }
 
 /// Reads what the toolbar should be showing right now.
-fn shown(cx: &App) -> Shown {
+fn shown(cx: &App, hwnd: HWND) -> Shown {
     let playback = Wisp::global(cx).playback.read(cx);
     let playing = matches!(
         playback.state(),
@@ -659,7 +667,7 @@ fn shown(cx: &App) -> Shown {
         next: t!("player-next").to_string(),
         playing,
         idle: playback.shown_track(cx).is_none(),
-        look: look(),
+        look: look(hwnd),
     }
 }
 
@@ -711,11 +719,18 @@ fn played(cx: &App) -> Progress {
     }
 }
 
-fn look() -> Look {
+/// The glyph size follows the window's own DPI, not the system DPI captured at
+/// launch, so a window on a scaled monitor is not stretched by the shell.
+fn look(hwnd: HWND) -> Look {
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let size = match dpi {
+        0 => unsafe { GetSystemMetrics(SM_CXSMICON) },
+        dpi => unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) },
+    };
     Look {
         pack: icons::active().id,
         light: light_theme(),
-        size: unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16),
+        size: size.max(16),
     }
 }
 

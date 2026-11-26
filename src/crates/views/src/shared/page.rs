@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use gpui::prelude::*;
-use gpui::{App, Div, Entity, Pixels, ScrollHandle, Window, div, px};
+use gpui::{App, Div, Entity, Pixels, Window, div, px};
 
 use state::{AppSettings, FilterValue, Playback};
 use ui::ActiveTheme as _;
 use ui::{
-    Filter, FilterChange, Listing, Table, TableSource, TableState, Viewport, quantize, scrolled,
+    Filter, FilterChange, Listing, Scrollbar, Table, TableSource, TableState, Viewport, scrolled,
 };
 
 use crate::chrome::Chrome;
@@ -198,6 +198,12 @@ pub(crate) fn bleed<S: TableSource>(table: Table<S>, framed: bool, cx: &App) -> 
         }))
 }
 
+/// How far below the top of a page holding a full-page table its scrollbar starts, which is
+/// under the table's head that sticks to the top of the page as it scrolls.
+pub(crate) fn below_head(window: &Window, cx: &App) -> Pixels {
+    ui::snapped(cx.theme().metrics.header, window)
+}
+
 /// Moves a viewport measured from a framed table's outer edge onto its rows, past the border.
 pub(crate) fn past_border(viewport: Viewport) -> Viewport {
     Viewport {
@@ -208,12 +214,14 @@ pub(crate) fn past_border(viewport: Viewport) -> Viewport {
 
 /// The viewport of a table below the page hero, with the band the player bar covers marked.
 pub(crate) fn viewport(
-    scroll: &ScrollHandle,
+    scrollbar: &Entity<Scrollbar>,
     inset: Pixels,
     window: &Window,
     cx: &App,
 ) -> Viewport {
-    quantize(scroll, window);
+    let scrollbar = scrollbar.read(cx);
+    scrollbar.quantize(window);
+    let scroll = scrollbar.scroll();
     let hero = scroll
         .bounds_for_item(0)
         .map(|bounds| bounds.size.height)
