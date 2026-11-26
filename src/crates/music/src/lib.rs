@@ -770,8 +770,11 @@ pub enum PlaybackEvent {
     Ended {
         id: Option<String>,
     },
+    /// Track `id` could not be loaded. `timed_out` says the host it came from never answered in
+    /// time, so the listener can be pointed at their connection rather than at the track.
     Unavailable {
         id: Option<String>,
+        timed_out: bool,
     },
     /// The provider turned the load down for now, as it does under a rate limit, so the same
     /// track may play after a wait.

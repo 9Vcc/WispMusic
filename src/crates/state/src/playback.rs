@@ -3881,7 +3881,7 @@ impl Playback {
                 self.state = PlaybackState::Loading;
                 log::warn!("playback: the provider went stale, waiting for a reconnect");
             }
-            BackendEvent::Unavailable { .. } => {
+            BackendEvent::Unavailable { timed_out, .. } => {
                 let failed = self.track.take();
                 let target = failed.as_ref().and_then(song_target);
                 let name = failed
@@ -3900,11 +3900,25 @@ impl Playback {
                 match exhausted {
                     true => {
                         log::warn!("playback: {FAILURE_LIMIT} tracks failed in a row, stopping");
-                        Toasts::show(Outcome::Failed, "toast-playback-stopped", cx);
+                        Toasts::show(
+                            Outcome::Failed,
+                            match timed_out {
+                                true => "toast-playback-timed-out",
+                                false => "toast-playback-stopped",
+                            },
+                            cx,
+                        );
                     }
-                    false => {
-                        Toasts::linked(Outcome::Failed, "toast-track-unplayable", name, target, cx)
-                    }
+                    false => Toasts::linked(
+                        Outcome::Failed,
+                        match timed_out {
+                            true => "toast-track-timed-out",
+                            false => "toast-track-unplayable",
+                        },
+                        name,
+                        target,
+                        cx,
+                    ),
                 }
                 cx.emit(PlaybackEvent::EndedPlayback);
                 match (exhausted || self.intent == Intent::Pause, self.repeat) {
