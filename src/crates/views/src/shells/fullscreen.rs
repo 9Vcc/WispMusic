@@ -446,6 +446,7 @@ impl FullscreenView {
     /// hidden pointer.
     fn rouse(&mut self, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        cx.show_cursor();
         self.stir(cx);
     }
 
@@ -2302,6 +2303,9 @@ impl Render for FullscreenView {
             // A trackpad reports fingers that only touch it as a scroll that moves nothing.
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 if event.delta.pixel_delta(window.line_height()) != Point::default() {
+                    if !this.awake {
+                        cx.show_cursor();
+                    }
                     this.poke(cx);
                 }
             }))
