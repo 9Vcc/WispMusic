@@ -450,7 +450,8 @@ fn cursor_over_unlock(_host: usize) -> bool {
 #[cfg(target_os = "windows")]
 fn set_click_through(window: &Window, on: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_TRANSPARENT,
+        GWL_EXSTYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_EX_TRANSPARENT,
     };
     let Some(handle) = hwnd(window) else {
         return;
@@ -463,6 +464,18 @@ fn set_click_through(window: &Window, on: bool) {
         };
         if style != wanted {
             SetWindowLongPtrW(handle, GWL_EXSTYLE, wanted);
+            // The routing the system keeps for the window follows a style change only once
+            // the frame is reapplied; without this the strip keeps taking clicks.
+            SetWindowPos(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            );
+            log::debug!("desktop-lyrics: click through {on}");
         }
     }
 }
