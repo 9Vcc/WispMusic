@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Bounds, Context, EntityId, FontWeight, Pixels, Window, canvas, div};
+use gpui::{AnyElement, App, Bounds, Context, EntityId, FontWeight, Pixels, Window, canvas, div};
 use ui::{ActiveTheme as _, Artwork, Levels, Text, Visualizer};
 
 use crate::screens::settings::{Layout, SettingsView};
@@ -140,6 +140,7 @@ pub(in crate::screens::settings) fn preview(
     view: &SettingsView,
     window: &mut Window,
     cx: &mut Context<SettingsView>,
+    owner: EntityId,
 ) -> Option<AnyElement> {
     let width = Layout::of(window, cx).width;
     let height = (width * ASPECT).round();
@@ -162,9 +163,9 @@ pub(in crate::screens::settings) fn preview(
         .shown()
         .then(|| state.levels.borrow_mut().step(Instant::now(), still));
     if levels.is_some() && !still && !state.armed.replace(true) {
-        cx.on_next_frame(window, |this, _, cx| {
+        cx.on_next_frame(window, move |this, _, cx| {
             this.previews.now_playing.armed.set(false);
-            cx.notify();
+            App::notify(cx, owner);
         });
     }
     // the peaks stop short of the artist line as in fullscreen, by a pad to suit the miniature
@@ -177,7 +178,6 @@ pub(in crate::screens::settings) fn preview(
             .map_or(theme.primary, |tint| theme.primary_of(tint)),
         None => theme.primary,
     };
-    let owner = cx.entity_id();
 
     Some(
         super::framed(

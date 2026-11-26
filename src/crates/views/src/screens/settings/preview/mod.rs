@@ -8,10 +8,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{App, Context, Div, EdgesRefinement, Entity, Pixels, SharedString, Task, Window, div};
+use gpui::{
+    App, Context, Div, EdgesRefinement, Entity, EntityId, Hsla, Pixels, Render, SharedString, Task,
+    WeakEntity, Window, div,
+};
 use i18n::t;
 use state::Wisp;
-use ui::ActiveTheme as _;
+use ui::{ActiveTheme as _, Theme};
 
 use super::SettingsView;
 use crate::shared::ambient::Ambient;
@@ -34,14 +37,56 @@ pub(super) struct Previews {
     pub(super) now_playing: now_playing::NowPlayingPreview,
     pub(super) lyrics: lyrics::LyricsPreview,
     pub(super) sound: sound::SoundPreview,
+    /// The Now playing preview as a view of its own, so its visualizer redraws without the page.
+    pub(super) now_playing_view: Entity<PreviewHost>,
     /// The ambient field the Now playing and Lyrics previews paint behind themselves, following
     /// the cover of the track they show.
     ambient: Entity<Ambient>,
+    /// The colour key of the ambient field last seen, so only a new palette redraws the page.
+    ambient_theme: Cell<Option<ThemeKey>>,
     /// A random number drawn each time settings open, which picks the track from history.
     seed: Cell<u64>,
     /// The track from history the previews show while nothing plays, kept from the moment it
     /// is picked until settings open again.
     picked: RefCell<Option<Sample>>,
+}
+
+type ThemeKey = (Hsla, Hsla, Hsla, Option<Hsla>, Option<Hsla>);
+
+fn theme_key(theme: &Theme) -> ThemeKey {
+    (
+        theme.background,
+        theme.foreground,
+        theme.primary,
+        theme.tint,
+        theme.tint_secondary,
+    )
+}
+
+/// Draws the Now playing preview as a view of its own, so the visualizer redrawing each frame
+/// leaves the settings page around it as it was.
+pub(super) struct PreviewHost {
+    settings: WeakEntity<SettingsView>,
+    owner: EntityId,
+}
+
+impl PreviewHost {
+    fn new(settings: &Entity<SettingsView>, cx: &mut Context<Self>) -> Self {
+        cx.observe(settings, |_, _, cx| cx.notify()).detach();
+        Self {
+            settings: settings.downgrade(),
+            owner: cx.entity_id(),
+        }
+    }
+}
+
+impl Render for PreviewHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let owner = self.owner;
+        self.settings
+            .update(cx, |view, cx| view.now_playing_preview(window, cx, owner))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
 }
 
 /// The track a preview shows, as much of it as the previews draw.
@@ -77,15 +122,27 @@ impl Previews {
         .detach();
 
         // the previews over the field take their colours from the cover it samples, so they
-        // redraw once that lands
+        // redraw once that lands; the field animates every frame, so only a new colour key
+        // reaches the page
         let ambient = cx.new(Ambient::framed);
-        cx.observe(&ambient, |_, _, cx| cx.notify()).detach();
+        cx.observe(&ambient, |this, ambient, cx| {
+            let key = theme_key(&ambient.read(cx).theme(cx));
+            if this.previews.ambient_theme.get() != Some(key) {
+                this.previews.ambient_theme.set(Some(key));
+                cx.notify();
+            }
+        })
+        .detach();
+        let view = cx.entity();
+        let now_playing_view = cx.new(|cx| PreviewHost::new(&view, cx));
 
         Self {
             now_playing: now_playing::NowPlayingPreview::new(cx),
             lyrics: lyrics::LyricsPreview::new(cx),
             sound: sound::SoundPreview::new(cx),
+            now_playing_view,
             ambient,
+            ambient_theme: Cell::new(None),
             seed: Cell::new(random()),
             picked: RefCell::new(None),
         }

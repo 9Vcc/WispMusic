@@ -5,8 +5,8 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Pixels, Render, ScrollHandle,
-    SharedString, Subscription, Task, Window, canvas, div, point, px,
+    AnyElement, App, Context, Div, ElementId, Entity, EntityId, FocusHandle, Pixels, Render,
+    ScrollHandle, SharedString, Subscription, Task, Window, canvas, div, point, px,
 };
 use i18n::{Language, t};
 use music::SignInPrompt;
@@ -699,10 +699,10 @@ impl SettingsView {
 
     /// The live preview above a page's first group, built and animated only while visible.
     fn preview(&self, page: SettingsPage, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !matches!(
-            page,
-            SettingsPage::NowPlaying | SettingsPage::Lyrics | SettingsPage::Sound
-        ) {
+        if page == SettingsPage::NowPlaying {
+            return Some(self.previews.now_playing_view.clone().into_any_element());
+        }
+        if !matches!(page, SettingsPage::Lyrics | SettingsPage::Sound) {
             return None;
         }
         let view = cx.entity();
@@ -710,9 +710,6 @@ impl SettingsView {
             self.lazy((page.id(), 1_usize), cx, move |this, window, cx| {
                 let previews = &this.previews;
                 match page {
-                    SettingsPage::NowPlaying => {
-                        preview::now_playing::preview(&previews.now_playing, this, window, cx)
-                    }
                     SettingsPage::Lyrics => {
                         preview::lyrics::preview(&previews.lyrics, this, window, cx)
                     }
@@ -730,6 +727,18 @@ impl SettingsView {
             })
             .into_any_element(),
         )
+    }
+
+    /// Draws the Now playing preview for its own host, so the visualizer redraws only itself.
+    fn now_playing_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        owner: EntityId,
+    ) -> AnyElement {
+        let state = &self.previews.now_playing;
+        preview::now_playing::preview(state, self, window, cx, owner)
+            .unwrap_or_else(|| div().into_any_element())
     }
 
     /// Every setting of every page that answers the query, best match first, with the page it
