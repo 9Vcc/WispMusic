@@ -450,20 +450,27 @@ fn cursor_over_unlock(_host: usize) -> bool {
 #[cfg(target_os = "windows")]
 fn set_click_through(window: &Window, on: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_EX_TRANSPARENT,
+        GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+        WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
     let Some(handle) = hwnd(window) else {
         return;
     };
     unsafe {
         let style = GetWindowLongPtrW(handle, GWL_EXSTYLE);
+        let through = (WS_EX_LAYERED | WS_EX_TRANSPARENT) as isize;
         let wanted = match on {
-            true => style | WS_EX_TRANSPARENT as isize,
-            false => style & !(WS_EX_TRANSPARENT as isize),
+            true => style | through,
+            false => style & !through,
         };
         if style != wanted {
             SetWindowLongPtrW(handle, GWL_EXSTYLE, wanted);
+            if on {
+                // A layered window only honours WS_EX_TRANSPARENT once its alpha has been
+                // set; the DirectComposition content still draws over it.
+                SetLayeredWindowAttributes(handle, 0, 255, LWA_ALPHA);
+            }
             // The routing the system keeps for the window follows a style change only once
             // the frame is reapplied; without this the strip keeps taking clicks.
             SetWindowPos(
