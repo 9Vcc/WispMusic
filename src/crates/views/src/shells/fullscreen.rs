@@ -1301,8 +1301,10 @@ impl FullscreenView {
             .small()
             .icon("icons/picture-in-picture.svg")
             .tooltip_above("player-mini")
+            // Opening the mini window borrows the app, which cannot happen while this press is
+            // still being dispatched, so the window opens once the event is over.
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                crate::shells::mini::enter(window, cx)
+                window.defer(cx, |window, cx| crate::shells::mini::enter(window, cx))
             })
             .into_any_element()
     }
