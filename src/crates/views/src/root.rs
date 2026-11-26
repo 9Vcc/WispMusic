@@ -33,7 +33,7 @@ use crate::shared::powerbar::{Powerbar, PowerbarEvent};
 use crate::shared::smart_playlist::SmartPlaylistEditor;
 use crate::shared::tag_editor::TagEditor;
 use crate::shared::tracks::{LIBRARY_COLUMNS, album_columns};
-use crate::shared::transport::{CoverAway, CoverFade, ShellSwap};
+use crate::shared::transport::{CoverAway, CoverFade, CoverRoom, ShellSwap};
 use crate::shared::typeface::{UI_FONT, ui_font};
 use crate::shells::Shell;
 use crate::shells::workspace::{Workspace, WorkspaceHeader};
@@ -1440,9 +1440,26 @@ impl Render for Root {
         // the frosted controls get their blur back while the fade finishes.
         let zooming = self.fullscreen_hidden(window, cx);
         let left = self.fullscreen_left(window, cx);
-        let away = zooming > 0. || left.is_some_and(|left| left > 0.);
+        let away = (zooming > 0. || left.is_some_and(|left| left > 0.))
+            && self.shells.fullscreen.read(cx).cover_flies(window);
         if cx.try_global::<CoverAway>().is_none_or(|was| was.0 != away) {
             cx.set_global(CoverAway(away));
+        }
+        // A player opening on its artwork tab below `Room::Wide` tucks the bar's cover away as
+        // it fades in, and one closing from there brings it back as it fades out, so the two
+        // bars never part while the title slides over the cover's place.
+        let room = match self.shells.fullscreen.read(cx).tucks_cover(window) {
+            false => 1.,
+            true => match self.view {
+                RootView::Fullscreen => zooming,
+                RootView::Workspace => left.map_or(1., |left| 1. - left),
+            },
+        };
+        if cx
+            .try_global::<CoverRoom>()
+            .is_none_or(|was| was.0 != room)
+        {
+            cx.set_global(CoverRoom(room));
         }
         let fade = 1. - zooming;
         if cx.try_global::<CoverFade>().is_none_or(|was| was.0 != fade) {

@@ -6,22 +6,34 @@ use i18n::t;
 use state::{Playback, Wisp};
 use ui::{ActiveTheme as _, MenuItem, Picker, Popovers};
 
-/// 弹层在按钮所属 Popovers 组里的 key。
-const KEY: &str = "playback-speed";
+/// The speeds the picker offers.
 const PRESETS: [f32; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
 pub(crate) struct SpeedButton {
     playback: Entity<Playback>,
     popovers: Popovers,
+    /// The picker's key, which tells a second copy of the button from the player bar's.
+    key: &'static str,
 }
 
 impl SpeedButton {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::named("playback-speed", cx)
+    }
+
+    /// Whether the speed picker is open, for a shell that keeps its chrome awake while it is.
+    pub(crate) fn open(&self) -> bool {
+        self.popovers.any()
+    }
+
+    /// A speed button under `key`, for a view that draws a copy of the player bar.
+    pub fn named(key: &'static str, cx: &mut Context<Self>) -> Self {
         let playback = Wisp::global(cx).playback.clone();
         cx.observe(&playback, |_, _, cx| cx.notify()).detach();
         Self {
             playback,
             popovers: Popovers::default(),
+            key,
         }
     }
 }
@@ -50,7 +62,7 @@ impl gpui::Render for SpeedButton {
             })
             .collect();
 
-        Picker::icon(KEY, &self.popovers, "icons/gauge.svg")
+        Picker::icon(self.key, &self.popovers, "icons/gauge.svg")
             .name(t!("speed-control"))
             .tooltip("speed-control")
             .tint(if (speed - 1.0).abs() < 0.001 {

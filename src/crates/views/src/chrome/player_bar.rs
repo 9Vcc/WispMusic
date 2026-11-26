@@ -6,7 +6,7 @@ use ui::Tipped as _;
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
+    AnyElement, App, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
     Render, SharedString, StyledText,
 };
 use gpui::{Window, deferred, div, px};
@@ -25,7 +25,8 @@ use crate::shared::marquee::{MarqueeState, marquee};
 use crate::shared::menus::ItemMenu;
 use crate::shared::pins::Pinned as _;
 use crate::shared::transport::{
-    COVER_FLIGHT, CoverAway, ShellSwap, climax, like, play_mode, transport, transport_controls,
+    COVER_FLIGHT, CoverAway, CoverRoom, ShellSwap, climax, like, play_mode, transport,
+    transport_controls,
 };
 use crate::shared::volume::{RisingVolume, VolumeHost, rising_volume};
 
@@ -51,6 +52,8 @@ const SEEK_FLOOR: f32 = 220.;
 const TITLE_ROOM: f32 = 1.4;
 /// The stacked bar's `gap_2` between its two rows, in rems.
 const STACK_GAP: f32 = 0.5;
+/// The gap between the cover and the title in a now playing row, in rems.
+const COVER_GAP: f32 = 0.75;
 
 /// How the bar draws its volume control.
 #[derive(Clone, Copy)]
@@ -96,6 +99,7 @@ impl PlayerBar {
         cx.observe(&climax, |_, _, cx| cx.notify()).detach();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe_global::<ShellSwap>(|_, cx| cx.notify()).detach();
+        cx.observe_global::<CoverRoom>(|_, cx| cx.notify()).detach();
 
         let me = cx.entity_id();
         let playlist_scrollbar = cx.new(|_| Scrollbar::inset().watching(me));
@@ -279,21 +283,58 @@ impl PlayerBar {
             .gap_3()
             .flex_1()
             .min_w_0()
-            .child(self.artwork(window, cx))
+            .child(Self::tuck(
+                self.artwork(window, cx),
+                Self::cover_room(cx),
+                window,
+                cx,
+            ))
             .when(room, |this| this.child(self.track_details(false, cx)))
     }
 
-    /// The playing cover keeps its album link and context menu in every layout.
-    fn artwork(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// How much room the cover takes beside the title right now, which [`CoverRoom`] sets.
+    fn cover_room(cx: &App) -> f32 {
+        cx.try_global::<CoverRoom>()
+            .map_or(1., |room| room.0.clamp(0., 1.))
+    }
+
+    /// Tucks the cover that starts a now playing row away by `room`. It keeps its size and spot
+    /// and fades, while what follows it slides over its place, so a cover a flight targets never
+    /// changes its bounds. With no room left it answers no pointer either.
+    fn tuck(
+        cover: gpui::Stateful<gpui::Div>,
+        room: f32,
+        window: &Window,
+        cx: &App,
+    ) -> gpui::Stateful<gpui::Div> {
+        if room >= 1. {
+            return cover;
+        }
+        let taken = Self::cover_side(window, cx) + window.rem_size() * COVER_GAP;
+        cover
+            .mr(Pixels::ZERO - taken * (1. - room))
+            .opacity(room)
+            .when(room <= 0., |this| this.invisible())
+    }
+
+    /// How big the playing cover draws at this width.
+    fn cover_side(window: &Window, cx: &App) -> Pixels {
         let theme = cx.theme();
-        let layout = self.settings.read(cx).player_bar_layout();
-        let artwork = ui::snapped(
-            match layout == PlayerBarLayout::Compact && !Self::stacked(window, layout) {
-                true => theme.metrics.thumb,
-                false => theme.metrics.row,
-            },
-            window,
-        );
+        let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
+        let side = match layout == PlayerBarLayout::Compact && !Self::stacked(window, layout) {
+            true => theme.metrics.thumb,
+            false => theme.metrics.row,
+        };
+        ui::snapped(side, window)
+    }
+
+    /// The playing cover keeps its album link and context menu in every layout.
+    fn artwork(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let artwork = Self::cover_side(window, cx);
         let away = cx.try_global::<CoverAway>().is_some_and(|away| away.0);
         let shown = self.playback.read(cx).shown_track(cx);
         let track = shown.as_ref();

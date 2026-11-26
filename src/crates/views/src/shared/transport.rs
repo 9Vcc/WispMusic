@@ -26,6 +26,14 @@ pub(crate) struct CoverFade(pub(crate) f32);
 
 impl Global for CoverFade {}
 
+/// How much room the player bar's cover takes beside the title, from 1 where it shows to 0 where
+/// the title has slid over its place. Below `Room::Wide` the fullscreen player's artwork tab
+/// tucks it away, since its big cover shows the same art, and the player bar under the player
+/// tucks its own along while the player opens and closes, so the two never part.
+pub(crate) struct CoverRoom(pub(crate) f32);
+
+impl Global for CoverRoom {}
+
 /// Which way the fullscreen player is moving between the shells, if it is. The player bar's
 /// fullscreen button and the player's leave button share one spot, so while the player moves
 /// the button of the shell it moves to paints above the fade and the other paints nothing.
