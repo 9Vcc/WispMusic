@@ -252,6 +252,16 @@ fn hide_frame(_window: &Window) {}
 #[cfg(target_os = "windows")]
 static MOVING: AtomicBool = AtomicBool::new(false);
 
+/// Set while the strip is locked, and while its unlock bubble may take a click. The window
+/// proc reads both in `WM_NCHITTEST`: a locked strip answers `HTTRANSPARENT` so a click falls
+/// through to whatever is behind it, and only the bubble takes clicks itself. gpui answers the
+/// hit test with `HTCAPTION` on its drag areas, which starts a native move Windows runs on its
+/// own, so the lock has to answer before gpui does.
+#[cfg(target_os = "windows")]
+static LOCKED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static LOCK_CLICKABLE: AtomicBool = AtomicBool::new(false);
+
 #[cfg(target_os = "windows")]
 fn moving() -> bool {
     MOVING.load(Ordering::Relaxed)
@@ -297,12 +307,18 @@ unsafe extern "system" fn frame_subclass(
 ) -> isize {
     use windows_sys::Win32::UI::Shell::DefSubclassProc;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-        WM_NCCALCSIZE,
+        HTCLIENT, HTTRANSPARENT, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ENTERSIZEMOVE,
+        WM_EXITSIZEMOVE, WM_NCCALCSIZE, WM_NCHITTEST,
     };
 
     unsafe {
         match message {
+            WM_NCHITTEST if LOCKED.load(Ordering::Relaxed) => {
+                match LOCK_CLICKABLE.load(Ordering::Relaxed) {
+                    true => HTCLIENT as isize,
+                    false => HTTRANSPARENT as isize,
+                }
+            }
             WM_ENTERSIZEMOVE => {
                 MOVING.store(true, Ordering::Relaxed);
                 DefSubclassProc(handle, message, wparam, lparam)
@@ -2392,6 +2408,8 @@ fn interlude_dots(font: f32, accent: Hsla, phase: f32) -> AnyElement {
 #[cfg(target_os = "windows")]
 impl Drop for DesktopLyric {
     fn drop(&mut self) {
+        LOCKED.store(false, Ordering::Relaxed);
+        LOCK_CLICKABLE.store(false, Ordering::Relaxed);
         if self.forwarding {
             stop_move_forwarding();
         }
@@ -2427,7 +2445,10 @@ impl Render for DesktopLyric {
                     false => stop_move_forwarding(),
                 }
             }
-            let through = locked && !(self.unlock_hot || self.over_unlock);
+            let clickable = locked && (self.unlock_hot || self.over_unlock);
+            LOCKED.store(locked, Ordering::Relaxed);
+            LOCK_CLICKABLE.store(clickable, Ordering::Relaxed);
+            let through = locked && !clickable;
             if self.click_through != Some(through) {
                 self.click_through = Some(through);
                 set_click_through(window, through);
