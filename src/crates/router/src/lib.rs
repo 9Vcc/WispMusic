@@ -86,7 +86,6 @@ impl NavEntry {
             Self::Pins => "nav-pinned",
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,6 +452,16 @@ pub fn trail(cx: &App) -> Entity<Navigation> {
 
 pub fn navigate(destination: Destination, cx: &mut App) {
     trail(cx).update(cx, |navigation, cx| navigation.go(destination, cx));
+}
+
+/// Opens search with `query` already filled in.
+pub fn search_for(query: impl Into<SharedString>, cx: &mut App) {
+    trail(cx).update(cx, |navigation, cx| navigation.open_search(query, cx));
+}
+
+/// Takes the query search should show, once.
+pub fn take_search(cx: &mut App) -> Option<SharedString> {
+    trail(cx).update(cx, |navigation, _| navigation.take_search())
 }
 
 /// Replaces the current destination so Back and Forward do not revisit a page that disappeared.

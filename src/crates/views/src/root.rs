@@ -1216,6 +1216,11 @@ impl Root {
                 genre.into()
             }
             Destination::Search => {
+                if let Some(query) = router::take_search(cx) {
+                    self.screens
+                        .search
+                        .update(cx, |search, cx| search.search_for(&query, cx));
+                }
                 self.screens.genres.update(cx, |genres, cx| genres.load(cx));
                 self.screens.search.clone().into()
             }
@@ -1477,10 +1482,7 @@ impl Render for Root {
                 RootView::Workspace => left.map_or(1., |left| 1. - left),
             },
         };
-        if cx
-            .try_global::<CoverRoom>()
-            .is_none_or(|was| was.0 != room)
-        {
+        if cx.try_global::<CoverRoom>().is_none_or(|was| was.0 != room) {
             cx.set_global(CoverRoom(room));
         }
         let fade = 1. - zooming;
@@ -1657,9 +1659,7 @@ impl Render for Root {
             .when_some(radius, |this, radius| {
                 this.rounded(radius).overflow_hidden()
             })
-            .when(normal_ground, |this| {
-                this.bg(ui::page_wash(&theme))
-            })
+            .when(normal_ground, |this| this.bg(ui::page_wash(&theme)))
             .text_color(theme.foreground)
             .capture_any_mouse_down(cx.listener(
                 |this, event: &gpui::MouseDownEvent, window, cx| {

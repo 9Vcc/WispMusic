@@ -1,4 +1,4 @@
-use gpui::{Context, EventEmitter};
+use gpui::{Context, EventEmitter, SharedString};
 
 use crate::{Destination, SettingsPage};
 
@@ -11,6 +11,8 @@ pub struct Navigation {
     at: usize,
     /// The settings destination last on show, which opening settings again returns to.
     last_settings: Option<Destination>,
+    /// A query the search page should take as soon as it is on show.
+    search: Option<SharedString>,
 }
 
 impl EventEmitter<NavigationEvent> for Navigation {}
@@ -21,7 +23,22 @@ impl Navigation {
             trail: vec![start],
             at: 0,
             last_settings: None,
+            search: None,
         }
+    }
+
+    /// Opens search with `query` already in the field.
+    pub fn open_search(&mut self, query: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.search = Some(query.into());
+        match self.current() == Destination::Search {
+            true => cx.notify(),
+            false => self.go(Destination::Search, cx),
+        }
+    }
+
+    /// Takes the query search should show, once.
+    pub fn take_search(&mut self) -> Option<SharedString> {
+        self.search.take()
     }
 
     pub fn current(&self) -> Destination {
