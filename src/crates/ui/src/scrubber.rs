@@ -1,5 +1,4 @@
 use crate::metrics::Text;
-use crate::motion::{Springs, Sprung};
 use crate::theme::ActiveTheme as _;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -21,8 +20,6 @@ const LIFT: Pixels = px(12.);
 const STEP: f32 = 0.05;
 /// The smallest a thumb that grows as a layer is drawn, since a layer cannot scale to nothing.
 const LEAST_SCALE: f32 = 0.01;
-/// How close an animated fraction has to be before it lands without another frame.
-const FRACTION_REST: f32 = 0.0001;
 
 type Slide = Box<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 type Release = Box<dyn Fn(&MouseUpEvent, &mut Window, &mut App) + 'static>;
@@ -51,7 +48,6 @@ impl Render for Grab {
 pub struct ScrubberState {
     id: SharedString,
     bounds: Rc<Cell<Bounds<Pixels>>>,
-    dragging: Rc<Cell<bool>>,
 }
 
 impl ScrubberState {
@@ -59,7 +55,6 @@ impl ScrubberState {
         Self {
             id: id.into(),
             bounds: Rc::new(Cell::new(Bounds::default())),
-            dragging: Rc::new(Cell::new(false)),
         }
     }
 
@@ -102,7 +97,6 @@ pub struct Scrubber {
     base: Stateful<Div>,
     id: SharedString,
     bounds: Rc<Cell<Bounds<Pixels>>>,
-    dragging: Rc<Cell<bool>>,
     fraction: f32,
     filled: Hsla,
     empty: Hsla,
@@ -124,8 +118,6 @@ pub struct Scrubber {
     /// Whether the line and thumb lay out off the device pixel grid, for a frame where their size
     /// animates.
     off_grid: bool,
-    /// Whether value changes glide to their new fraction instead of jumping.
-    smooth: bool,
     on_move: Option<Slide>,
     on_release: Option<Release>,
 }
@@ -136,7 +128,6 @@ impl Scrubber {
             base: div().id(ElementId::Name(state.id.clone())),
             id: state.id.clone(),
             bounds: state.bounds.clone(),
-            dragging: state.dragging.clone(),
             fraction: fraction.clamp(0., 1.),
             filled: gpui::white(),
             empty: gpui::black(),
@@ -152,7 +143,6 @@ impl Scrubber {
             thickness: 1.,
             thumb_scale: 1.,
             off_grid: false,
-            smooth: false,
             on_move: None,
             on_release: None,
         }
@@ -178,12 +168,6 @@ impl Scrubber {
     /// off at rest, where the grid keeps their edges crisp.
     pub fn off_grid(mut self, off: bool) -> Self {
         self.off_grid = off;
-        self
-    }
-
-    /// Glides the thumb and fill when the value changes outside a drag.
-    pub fn smooth(mut self, smooth: bool) -> Self {
-        self.smooth = smooth;
         self
     }
 
@@ -283,7 +267,7 @@ impl Styled for Scrubber {
 }
 
 impl RenderOnce for Scrubber {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let pad = cx.theme().metrics.pad;
         let pin = thumb(pad);
         let reach = hit(pad);
@@ -297,7 +281,6 @@ impl RenderOnce for Scrubber {
             mut base,
             id,
             bounds,
-            dragging,
             fraction,
             filled,
             empty,
@@ -313,30 +296,9 @@ impl RenderOnce for Scrubber {
             thickness,
             thumb_scale,
             off_grid,
-            smooth,
             on_move,
             on_release,
         } = self;
-        let fraction = match smooth {
-            true => {
-                let target = fraction;
-                let fraction = window.use_keyed_state(
-                    (ElementId::Name(id.clone()), "smooth-fraction"),
-                    cx,
-                    |_, _| Sprung::at(target),
-                );
-                fraction.update(cx, |fraction, cx| match dragging.get() {
-                    true => {
-                        fraction.jump(target);
-                        target
-                    }
-                    false => {
-                        fraction.follow(target, Springs::RESPONSIVE, FRACTION_REST, window, cx)
-                    }
-                })
-            }
-            false => fraction,
-        };
         let line = track(pad) * thickness;
         let layered = off_grid && thumb_scale != 1.;
         let dot = match layered {
@@ -359,7 +321,6 @@ impl RenderOnce for Scrubber {
         let state = Rc::new(ScrubberState {
             id: id.clone(),
             bounds: bounds.clone(),
-            dragging: dragging.clone(),
         });
         let on_move = on_move.map(Rc::new);
         let on_release = on_release.map(Rc::new);
@@ -382,12 +343,10 @@ impl RenderOnce for Scrubber {
         let dragged = {
             let on_move = on_move.clone();
             let mine = id.clone();
-            let dragging = dragging.clone();
             move |event: &DragMoveEvent<Grab>, window: &mut Window, cx: &mut App| {
                 if event.drag(cx).0 != mine {
                     return;
                 }
-                dragging.set(true);
                 if let Some(handler) = on_move.as_ref() {
                     handler(&at(&state, event.event.position), window, cx);
                 }
@@ -411,13 +370,9 @@ impl RenderOnce for Scrubber {
             }
         };
 
-        let released = {
-            let dragging = dragging.clone();
-            move |event: &MouseUpEvent, window: &mut Window, cx: &mut App| {
-                dragging.set(false);
-                if let Some(handler) = on_release.as_ref() {
-                    handler(event, window, cx);
-                }
+        let released = move |event: &MouseUpEvent, window: &mut Window, cx: &mut App| {
+            if let Some(handler) = on_release.as_ref() {
+                handler(event, window, cx);
             }
         };
 

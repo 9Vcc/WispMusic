@@ -461,7 +461,6 @@ impl SettingsView {
                     .w(theme.metrics.cover)
                     .child(
                         Scrubber::new(&self.opacity, value)
-                            .smooth(true)
                             .name(t!("settings-opacity"))
                             .value(t!("settings-opacity-value", percent = percent))
                             .colors(theme.progress_bar, theme.muted, theme.foreground)
