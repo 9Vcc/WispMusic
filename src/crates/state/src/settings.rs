@@ -425,6 +425,8 @@ struct Values {
     lyrics_prefer_word_synced: bool,
     karaoke_lyrics: bool,
     blur_lyrics: bool,
+    /// Whether lyrics without timing scroll on their own over the length of the song.
+    scroll_plain_lyrics: bool,
     /// Multiplier on the blur of background lyrics, 1.0 being the default strength.
     lyrics_blur_amount: f32,
     fade_lyrics: bool,
@@ -768,6 +770,7 @@ impl Default for Values {
             lyrics_prefer_word_synced: true,
             karaoke_lyrics: true,
             blur_lyrics: true,
+            scroll_plain_lyrics: true,
             lyrics_blur_amount: 1.,
             fade_lyrics: true,
             edge_feather_lyrics: true,
@@ -1412,6 +1415,10 @@ impl AppSettings {
 
     pub fn blur_lyrics(&self) -> bool {
         self.values.blur_lyrics
+    }
+
+    pub fn scroll_plain_lyrics(&self) -> bool {
+        self.values.scroll_plain_lyrics
     }
 
     pub fn lyrics_blur_amount(&self) -> f32 {
@@ -2210,6 +2217,11 @@ impl AppSettings {
 
     pub fn set_blur_lyrics(&mut self, blur: bool, cx: &mut Context<Self>) {
         self.values.blur_lyrics = blur;
+        self.schedule_save(cx);
+    }
+
+    pub fn set_scroll_plain_lyrics(&mut self, scroll: bool, cx: &mut Context<Self>) {
+        self.values.scroll_plain_lyrics = scroll;
         self.schedule_save(cx);
     }
 
