@@ -10,6 +10,7 @@ settings-player-bar-layout = 布局
 settings-player-bar-layout-detail = 排列歌曲信息、播放控件和进度条
 settings-player-bar-classic = 经典
 settings-player-bar-compact = 紧凑
+settings-player-bar-compact-needs-bar = 悬浮胶囊已经有紧凑的高度，关闭悬浮胶囊后即可使用
 settings-player-bar-centered = 居中
 settings-player-bar-minimal = 极简
 settings-player-bar-island = 悬浮胶囊

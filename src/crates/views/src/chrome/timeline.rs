@@ -59,6 +59,9 @@ pub(crate) struct Timeline {
     /// with both clocks above it. `None` outside the island, where the clocks stand at either end
     /// of the bar.
     spread: Option<f32>,
+    /// Whether the row leaves no room over the line for the bubble's usual height, so it rests
+    /// on the thumb instead.
+    low: bool,
 }
 
 /// What a position report can change on the timeline: the seconds both clocks read, and how
@@ -94,14 +97,17 @@ impl Timeline {
             scale: 1.,
             drawn: None,
             spread: None,
+            low: false,
         }
     }
 
     /// Draws the seek bar the island's way when `spread` is set, `None` for the clocks at either
-    /// end. It redraws only when that changes.
-    pub fn spread(&mut self, spread: Option<f32>, cx: &mut Context<Self>) {
-        if self.spread != spread {
+    /// end. `low` rests the bubble on the thumb, for a row with no room over the line. It
+    /// redraws only when either changes.
+    pub fn spread(&mut self, spread: Option<f32>, low: bool, cx: &mut Context<Self>) {
+        if self.spread != spread || self.low != low {
             self.spread = spread;
+            self.low = low;
             cx.notify();
         }
     }
@@ -264,6 +270,11 @@ impl Render for Timeline {
             }
             None => (1., theme.foreground, 1., false),
         };
+        // In a low row the bubble's bottom meets the thumb's top, as low as it goes without
+        // covering it, which keeps it clear of the row's top edge.
+        let lift = self
+            .low
+            .then(|| theme.metrics.pad * (TRACK * thickness + THUMB * dot) / 2.);
 
         div()
             .id("player-seek")
@@ -306,6 +317,7 @@ impl Render for Timeline {
                         .enabled(seekable)
                         .ticks(ticks)
                         .when_some(bubble, |this, (at, text)| this.bubble(at, text))
+                        .when_some(lift, |this, lift| this.lift(lift))
                         .on_move(cx.listener(|this, fraction: &f32, _, cx| {
                             this.pending = Some(*fraction);
                             cx.notify();

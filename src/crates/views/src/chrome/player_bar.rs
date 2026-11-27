@@ -954,8 +954,10 @@ impl Render for PlayerBar {
                 None
             }
         };
+        // The compact row is too low for the seek bar's bubble to stand its usual height over it.
+        let low = layout == PlayerBarLayout::Compact && !stacked;
         self.timeline
-            .update(cx, |timeline, cx| timeline.spread(opened, cx));
+            .update(cx, |timeline, cx| timeline.spread(opened, low, cx));
         let seek = self.timeline.clone();
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -1196,38 +1198,40 @@ impl Render for PlayerBar {
                 // transport: only prev/play/next take part in centring, and the key is placed
                 // one gap past the next button's right edge.
                 let flame = px(ICON_BUTTON) * 1.5 + window.rem_size();
+                let transport = div()
+                    .relative()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .when(floating, |this| this.flex_1().items_center())
+                    .child(transport_controls(&self.playback, cx))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(gpui::relative(0.5))
+                            .ml(flame)
+                            .top_0()
+                            .bottom_0()
+                            .flex()
+                            .items_center()
+                            .child(climax(&self.playback, false, cx)),
+                    );
+                let column = div().flex().flex_col().items_center().flex_none().w(middle);
+                let column = match floating {
+                    // In the island the transport stands in the middle of the room over the
+                    // slim line rather than right on it, clear of the line and the pill's top
+                    // alike.
+                    true => column
+                        .h_full()
+                        .pb(theme.metrics.pad * ISLAND_INSET)
+                        .child(transport)
+                        .child(seek),
+                    false => column.gap_1().child(transport).child(seek),
+                };
                 base.items_center()
                     .gap_4()
                     .child(self.now_playing(show_track, window, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap_1()
-                            .flex_none()
-                            .w(middle)
-                            .child(
-                                div()
-                                    .relative()
-                                    .w_full()
-                                    .flex()
-                                    .justify_center()
-                                    .child(transport_controls(&self.playback, cx))
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left(gpui::relative(0.5))
-                                            .ml(flame)
-                                            .top_0()
-                                            .bottom_0()
-                                            .flex()
-                                            .items_center()
-                                            .child(climax(&self.playback, false, cx)),
-                                    ),
-                            )
-                            .child(seek),
-                    )
+                    .child(column)
                     .child(
                         div()
                             .flex()
