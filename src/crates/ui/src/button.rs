@@ -118,6 +118,8 @@ pub struct Button {
     /// The colour of the status dot over the icon's top left corner, `None` for no dot.
     status: Option<Hsla>,
     backgroundless: bool,
+    /// Whether the selected fill is left to an external indicator.
+    selection_backgroundless: bool,
     hoverless: bool,
     frosted: bool,
     /// Whether the button keeps its size when pressed.
@@ -166,6 +168,7 @@ impl Button {
             indicator: false,
             status: None,
             backgroundless: false,
+            selection_backgroundless: false,
             hoverless: false,
             frosted: false,
             steady: false,
@@ -365,6 +368,12 @@ impl Button {
         self
     }
 
+    /// Leaves the selected fill to an external indicator, keeping hover feedback.
+    pub fn selection_backgroundless(mut self) -> Self {
+        self.selection_backgroundless = true;
+        self
+    }
+
     pub fn hoverless(mut self) -> Self {
         self.hoverless = true;
         self
@@ -498,6 +507,7 @@ impl RenderOnce for Button {
             indicator,
             status,
             backgroundless,
+            selection_backgroundless,
             hoverless,
             frosted,
             steady,
@@ -828,9 +838,10 @@ impl RenderOnce for Button {
             .when(small, |this| this.text_size(theme.text(Text::Label)))
             .when_some(weight, |this, weight| this.font_weight(weight))
             .when_some(palette.background, |this, background| this.bg(background))
-            .when(selected && !backgroundless, |this| {
-                this.bg(selected_background)
-            })
+            .when(
+                selected && !backgroundless && !selection_backgroundless,
+                |this| this.bg(selected_background),
+            )
             .when_some(palette.border, |this, border| {
                 this.border_1().border_color(border)
             })
@@ -1043,7 +1054,10 @@ impl RenderOnce for Button {
         button.style().refine(&overrides);
         // The glow goes on last, over whatever fill the variant and the caller chose.
         let rest = solid_fill(&overrides)
-            .or_else(|| (selected && !backgroundless).then_some(selected_background))
+            .or_else(|| {
+                (selected && !backgroundless && !selection_backgroundless)
+                    .then_some(selected_background)
+            })
             .or(palette.background);
         let button = match glow_color.and_then(|fill| glow_fill(rest, fill, glow)) {
             Some(color) => button.bg(color),

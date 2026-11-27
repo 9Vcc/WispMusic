@@ -1438,7 +1438,7 @@ impl Render for Root {
                     .flex()
                     .flex_col()
                     .size_full()
-                    .bg(ui::page_wash(&theme))
+                    .bg(theme.background)
                     .when_some(radius, |this, radius| {
                         this.rounded(radius).overflow_hidden()
                     })
@@ -1633,6 +1633,19 @@ impl Render for Root {
             .child(self.theme_invite.clone())
             .child(self.powerbar.clone());
         let shell = shell.opacity(ui_alpha);
+        let normal_ground = !ambient && !opening && !grounded;
+        let splash_cover = self
+            .splash
+            .as_ref()
+            .filter(|splash| !normal_ground && !splash.read(cx).done())
+            .map(|_| {
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(theme.background)
+                    .opacity(1. - ui_alpha)
+                    .when_some(radius, |this, radius| this.rounded(radius))
+            });
 
         let root = div()
             .relative()
@@ -1644,7 +1657,7 @@ impl Render for Root {
             .when_some(radius, |this, radius| {
                 this.rounded(radius).overflow_hidden()
             })
-            .when(!ambient && !opening && !grounded, |this| {
+            .when(normal_ground, |this| {
                 this.bg(ui::page_wash(&theme))
             })
             .text_color(theme.foreground)
@@ -1728,6 +1741,7 @@ impl Render for Root {
             .when(ambient && !opening, |this| this.child(self.ambient.clone()))
             .children(leaving)
             .children(arriving)
+            .when_some(splash_cover, |this, cover| this.child(cover))
             // The sign-in screen fills the whole window, under the bar.
             .when(show_sign_in, |this| {
                 this.child(
