@@ -109,6 +109,7 @@ enum Slot {
     Karaoke,
     KaraokeCoverColor,
     BlurLyrics,
+    ScrollPlainLyrics,
     LyricsBlurAmount,
     FadeLyrics,
     EdgeFeatherLyrics,
@@ -1089,6 +1090,10 @@ impl SettingsView {
                 t!("settings-blur-lyrics"),
                 t!("settings-blur-lyrics-detail"),
             ),
+            Slot::ScrollPlainLyrics => (
+                t!("settings-scroll-plain-lyrics"),
+                t!("settings-scroll-plain-lyrics-detail"),
+            ),
             Slot::LyricsBlurAmount => (
                 t!("settings-lyrics-blur-amount"),
                 t!("settings-lyrics-blur-amount-detail"),
@@ -1314,6 +1319,7 @@ impl SettingsView {
             Slot::DesktopLyricsStrokeScale => self.desktop_lyrics_stroke_scale_row(cx),
             Slot::DesktopLyricsFont => self.desktop_lyrics_font_row(cx),
             Slot::BlurLyrics => self.blur_lyrics_row(cx),
+            Slot::ScrollPlainLyrics => self.scroll_plain_lyrics_row(cx),
             Slot::LyricsBlurAmount => self.lyrics_blur_amount_row(cx),
             Slot::FadeLyrics => self.fade_lyrics_row(cx),
             Slot::EdgeFeatherLyrics => self.edge_feather_lyrics_row(cx),
