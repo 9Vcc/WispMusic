@@ -47,11 +47,8 @@ arc-swap = "1"
 anyhow = "1.0"
 ardftsrc = "0.4.4"
 async-trait = "0.1"
-aes = "0.8"
 base64 = "0.23"
 bytes = "1"
-cbc = { version = "0.1", features = ["alloc", "block-padding"] }
-cc = "1"
 clap = { version = "4", default-features = false, features = [
     "std",
     "help",
@@ -67,7 +64,6 @@ deunicode = "1.6"
 env_logger = "0.11"
 fastrand = "2.5"
 futures = "0.3"
-gethostname = "1.1"
 fluent-bundle = "0.16"
 gpui = { git = "https://github.com/sonorahq/gpui", rev = "6adab7008c1be45154ccb302cc7a2d5d123aa449" }
 gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "6adab7008c1be45154ccb302cc7a2d5d123aa449", features = [
@@ -75,7 +71,6 @@ gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "6adab7008c1be
     "wayland",
     "x11",
 ] }
-http = "1.5"
 winresource = "0.1"
 x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
 zip = { version = "4.6", default-features = false, features = ["deflate"] }
@@ -136,7 +131,6 @@ lofty = "0.25"
 log = "0.4"
 md-5 = "0.11"
 minisign-verify = "0.3"
-num-bigint = "0.4"
 moka = { version = "0.12", features = ["future", "sync"] }
 mpris-server = "0.11"
 notify = "8.2"
@@ -212,12 +206,7 @@ rustls = { version = "0.23", default-features = false, features = [
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 semver = "1"
-serde-saphyr = { version = "2.1", default-features = false, features = [
-    "deserialize",
-] }
-sha1 = "0.11"
 sha2 = "0.11"
-smallvec = { version = "1.16", features = ["union"] }
 souvlaki = "0.9"
 sys-locale = "0.3"
 symphonia = { version = "0.5.5", default-features = false, features = [
@@ -234,7 +223,6 @@ unicode-segmentation = "1.13"
 walkdir = "2"
 
 percent-encoding = "2.3"
-protobuf = "3"
 pulseaudio = "0.3.2"
 tokio = { version = "1.54", features = [
     "rt-multi-thread",
@@ -245,10 +233,6 @@ tokio = { version = "1.54", features = [
     "process",
     "sync",
     "time",
-] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = [
-    "connect",
-    "rustls-tls-native-roots",
 ] }
 
 [patch.crates-io]

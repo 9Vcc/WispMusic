@@ -8,7 +8,6 @@ license.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 paths.workspace = true
-log.workspace = true
 rusqlite.workspace = true
 
 [lints]

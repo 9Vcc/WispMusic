@@ -7028,7 +7028,6 @@ version = "0.2.6"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
- "log",
  "paths",
  "rusqlite",
 ]
