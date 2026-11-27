@@ -99,7 +99,7 @@ pub use input::{
     Backspace, BackspaceToStart, BackspaceWord, Copy, Cut, Delete, DeleteToEnd, DeleteWord,
     Dismiss, End, Home, INPUT_CONTEXT, Input, Left, Paste, Right, SelectAll, SelectEnd, SelectHome,
     SelectLeft, SelectRight, SelectWordLeft, SelectWordRight, ShowCharacterPalette, Space,
-    WordLeft, WordRight, focus_fallback, refresh_primary_paste, release_focus,
+    WordLeft, WordRight, focus_after_frame, focus_fallback, refresh_primary_paste, release_focus,
     set_focus_fallback, single_line,
 };
 pub use kbd::Kbd;

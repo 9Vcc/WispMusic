@@ -303,7 +303,13 @@ impl MenuSearch {
         let own = self.input.read(cx).focus_handle(cx);
         let before = window.focused(cx).filter(|focus| *focus != own);
         *self.restore.borrow_mut() = Some(before);
-        window.defer(cx, move |window, cx| window.focus(&own, cx));
+        // This runs while the frame draws, so focus after it unless the menu has already closed.
+        let restore = self.restore.clone();
+        window.defer(cx, move |window, cx| {
+            if restore.borrow().is_some() {
+                window.focus(&own, cx);
+            }
+        });
     }
 
     /// Empties the field and returns focus to where it was before `hold`. Without that, focus

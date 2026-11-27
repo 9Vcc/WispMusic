@@ -89,9 +89,9 @@ impl Shelves {
     }
 
     /// Draws loading rows through the page edges, with their headings inside the content inset.
-    pub(crate) fn pending(&self, width: Pixels, cx: &App) -> Vec<AnyElement> {
+    pub(crate) fn pending(&self, width: Pixels, window: &Window, cx: &App) -> Vec<AnyElement> {
         let theme = *cx.theme();
-        let layout = CardGrid::layout(width);
+        let layout = CardGrid::layout(width, window);
 
         (0..PENDING)
             .map(|shelf| {
@@ -204,12 +204,12 @@ impl Shelves {
         let head = head(window, cx) + HEADING_GAP;
         let body = match mode {
             Mode::Grid if self.filled => {
-                let layout = CardGrid::layout(width);
+                let layout = CardGrid::layout(width, window);
                 let rows = section.items.len().div_ceil(layout.columns);
                 let tile = Card::tile_height(layout.card, window, cx);
                 tile * rows as f32 + RAIL_GAP * rows.saturating_sub(1) as f32
             }
-            Mode::Grid => Card::tile_height(CardGrid::layout(width).card, window, cx),
+            Mode::Grid => Card::tile_height(CardGrid::layout(width, window).card, window, cx),
             Mode::List => {
                 let lanes = lanes(width);
                 let rows = section.items.len().min(lanes * ROWS).div_ceil(lanes);
@@ -274,7 +274,7 @@ impl Shelves {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let layout = CardGrid::layout(width);
+        let layout = CardGrid::layout(width, window);
         let inset = cx.theme().metrics.inset;
         let rows = section
             .items
@@ -330,7 +330,7 @@ impl Shelves {
         let Some(section) = sections.get(place) else {
             return div().into_any_element();
         };
-        let layout = CardGrid::layout(width);
+        let layout = CardGrid::layout(width, window);
         let (handle, glide) = self.rails[place].clone();
         let crowded = section.items.len() > layout.columns;
         let feed = sections.clone();

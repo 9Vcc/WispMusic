@@ -916,7 +916,7 @@ impl LibraryView {
     fn pending_cards(&self, window: &Window, cx: &App) -> AnyElement {
         let inset = cx.theme().metrics.inset;
         let room = cells::content_width(window, page::reserved(inset), cx);
-        let layout = CardGrid::layout(room);
+        let layout = CardGrid::layout(room, window);
         let gap = deck_gap(window);
         let tile = Card::tile_height(layout.card, window, cx);
         let rows = (window.viewport_size().height / (tile + gap))
@@ -935,7 +935,7 @@ impl LibraryView {
                     .px(inset)
                     .gap(gap)
                     .children((0..rows).map(|row| {
-                        CardGrid::new(room).children((0..layout.columns).map(move |column| {
+                        CardGrid::new(layout).children((0..layout.columns).map(move |column| {
                             Card::skeleton(("library-pending", row * layout.columns + column))
                                 .tile(layout.card)
                                 .when(circle, Card::circle)
@@ -950,7 +950,7 @@ impl LibraryView {
         let theme = *cx.theme();
         let inset = theme.metrics.inset;
         let room = cells::content_width(window, page::reserved(inset), cx);
-        let layout = CardGrid::layout(room);
+        let layout = CardGrid::layout(room, window);
         let columns = layout.columns;
         let card = layout.card;
 
@@ -960,9 +960,10 @@ impl LibraryView {
         let heading = head_height(window, cx);
         let depth = (scrolled(&scroll) - inset).max(Pixels::ZERO);
 
-        let repacked = self.card_columns != columns
-            || (self.card_tile - tile).abs() >= px(0.5)
-            || (self.card_heading - heading).abs() >= px(0.5);
+        // Any change in a row's height counts, since a slow resize grows every row above the
+        // top by less than a pixel per frame and the deck would drift by their sum.
+        let repacked =
+            self.card_columns != columns || self.card_tile != tile || self.card_heading != heading;
         let anchor = (repacked && self.card_columns != 0 && !self.cards_dirty)
             .then(|| {
                 let heights = deck_heights(&self.card_rows, self.card_tile, self.card_heading);
@@ -1051,7 +1052,7 @@ impl LibraryView {
                             }
                             DeckRow::Cards(cards) => {
                                 let row = match section {
-                                    Section::Songs => CardGrid::new(room)
+                                    Section::Songs => CardGrid::new(layout)
                                         .children(cards.iter().filter_map(|&(display, row)| {
                                             view.read(cx).track_card(display, row, card, cx)
                                         }))
@@ -1060,15 +1061,15 @@ impl LibraryView {
                                         let looks = view.read(cx).album_looks(cards, card, cx);
                                         tiles
                                             .borrow_mut()
-                                            .row(room, tile, looks, &playback, cx)
+                                            .row(layout, tile, looks, &playback, cx)
                                             .into_any_element()
                                     }
-                                    Section::Playlists => CardGrid::new(room)
+                                    Section::Playlists => CardGrid::new(layout)
                                         .children(cards.iter().filter_map(|&(display, row)| {
                                             view.read(cx).playlist_card(display, row, card, cx)
                                         }))
                                         .into_any_element(),
-                                    Section::Artists => CardGrid::new(room)
+                                    Section::Artists => CardGrid::new(layout)
                                         .children(cards.iter().filter_map(|&(display, row)| {
                                             view.read(cx).artist_card(display, row, card, cx)
                                         }))

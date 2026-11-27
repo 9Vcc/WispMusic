@@ -1889,7 +1889,7 @@ impl Render for SettingsView {
             taken || sign_in_for.is_some() || theme_delete.is_some() || plugin_install.is_some();
         match (dialog, self.grabbed) {
             (true, false) => {
-                window.focus(&self.focus, cx);
+                ui::focus_after_frame(&self.focus, window, cx);
                 self.grabbed = true;
             }
             (false, true) => self.grabbed = false,
