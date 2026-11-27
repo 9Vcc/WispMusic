@@ -33,9 +33,9 @@ use bytes::Bytes;
 use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom as _, SystemRandom};
 use ring::{hkdf, hmac};
-use tokio::sync::watch;
-
 use sound::stream::Source;
+use tempfile::NamedTempFile;
+use tokio::sync::watch;
 
 /// How much of a track one sealed chunk holds. Big enough that the tags cost nothing, small
 /// enough that a damaged chunk is found long before the decoder needs it.
@@ -55,9 +55,6 @@ const ABANDONED: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long a lookup made before the vault has its key waits for it. Reading the keychain takes
 /// milliseconds, so this only runs out while the keychain is prompting or stuck.
 const UNLOCK_WAIT: Duration = Duration::from_secs(5);
-
-/// Tells apart the temporary files of two recordings running at once in one process.
-static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// Answers the facts a provider keeps beside a track once the whole track has arrived, or
 /// `None` when the provider cannot vouch that it has.
@@ -395,17 +392,11 @@ impl Shelf {
             .fill(&mut salt)
             .map_err(|_| anyhow!("cannot draw a salt"))?;
         let key = self.key(prk, &salt)?;
-        let temporary = folder.join(format!(
-            ".{name}.{}.{}",
-            std::process::id(),
-            WRITES.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut file = private_file(&temporary)?;
+        let mut file = NamedTempFile::new_in(&folder).context("cannot stage the entry")?;
         file.write_all(&salt).context("cannot start the entry")?;
         Ok(Some(Pending {
             cache: self.vault.clone(),
             path,
-            temporary,
             name,
             file,
             key,
@@ -559,9 +550,8 @@ struct Pending {
     cache: Arc<Vault>,
     /// Where the sealed entry goes.
     path: PathBuf,
-    temporary: PathBuf,
     name: String,
-    file: File,
+    file: NamedTempFile,
     /// Seals every chunk and the facts.
     key: LessSafeKey,
     /// Answers the provider's facts once the whole track is in. Taken when the entry is kept.
@@ -621,8 +611,11 @@ impl Pending {
         self.file.write_all(&facts)?;
         self.file.write_all(&sealed.to_le_bytes())?;
         self.file.flush()?;
-        let size = self.file.metadata()?.len();
-        fs::rename(&self.temporary, &self.path).context("cannot move the entry into place")?;
+        let size = self.file.as_file().metadata()?.len();
+        self.file
+            .persist(&self.path)
+            .map_err(io::Error::from)
+            .context("cannot move the entry into place")?;
         log::debug!(
             "vault: kept a track, {:.1} MiB",
             size as f64 / (1024.0 * 1024.0)
@@ -645,13 +638,6 @@ impl Pending {
         self.buffer.clear();
         self.index += 1;
         Ok(())
-    }
-}
-
-impl Drop for Pending {
-    fn drop(&mut self) {
-        // Once the entry is in place the temporary name is gone and this finds nothing.
-        fs::remove_file(&self.temporary).ok();
     }
 }
 
@@ -731,17 +717,6 @@ fn evict(root: &Path, room: u64) -> u64 {
         }
     }
     total
-}
-
-/// A new file readable and writable by the owner alone.
-fn private_file(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options
-        .open(path)
-        .with_context(|| format!("cannot create {}", path.display()))
 }
 
 /// Wisp's vault folder, `$XDG_CACHE_HOME/wisp/vault`.

@@ -4426,6 +4426,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sound",
+ "tempfile",
  "tokio",
  "wisp-plugin-api",
 ]
@@ -9450,6 +9451,7 @@ dependencies = [
  "sha2 0.11.1",
  "state",
  "storage",
+ "tempfile",
  "tokio",
  "tray-icon",
  "ui",

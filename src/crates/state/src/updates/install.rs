@@ -1,3 +1,5 @@
+#[cfg(not(target_os = "windows"))]
+use std::mem::DropGuard;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -47,14 +49,20 @@ impl Install {
     /// Puts the downloaded asset in place of the running copy and arranges for the new one to
     /// start once this process has quit, which the caller does right after. Blocks on disk work
     /// and, on macOS, on `hdiutil`.
-    pub(super) fn apply(&self, download: &Path) -> Result<()> {
+    pub(super) fn apply(&self, download: tempfile::TempPath) -> Result<()> {
         match self {
             #[cfg(target_os = "windows")]
-            Self::Setup => setup(download),
+            Self::Setup => {
+                let installer = download
+                    .keep()
+                    .map_err(std::io::Error::from)
+                    .context("cannot keep the installer")?;
+                setup(&installer)
+            }
             #[cfg(target_os = "macos")]
-            Self::Bundle(bundle) => swap_bundle(download, bundle),
+            Self::Bundle(bundle) => swap_bundle(&download, bundle),
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            Self::AppImage(image) => swap_image(download, image),
+            Self::AppImage(image) => swap_image(&download, image),
             Self::Managed => anyhow::bail!("a package manager updates this copy of wisp"),
         }
     }
@@ -154,12 +162,16 @@ fn swap_bundle(image: &Path, bundle: &Path) -> Result<()> {
     .context("cannot open the disk image")?;
 
     let staged = bundle.with_file_name(".Wisp.app.update");
-    let copied = remove(&staged).and_then(|()| {
-        run(Command::new("/usr/bin/ditto")
-            .arg(mount.path().join("Wisp.app"))
-            .arg(&staged))
-        .context("cannot copy the new version off the disk image")
+    remove(&staged)?;
+    let staged = DropGuard::new(staged, |staged| {
+        if let Err(error) = remove(&staged) {
+            log::warn!("updates: cannot clean up the partial bundle: {error:#}");
+        }
     });
+    let copied = run(Command::new("/usr/bin/ditto")
+        .arg(mount.path().join("Wisp.app"))
+        .arg(&*staged))
+    .context("cannot copy the new version off the disk image");
     if let Err(error) = run(Command::new("/usr/bin/hdiutil")
         .args(["detach", "-quiet"])
         .arg(mount.path()))
@@ -167,15 +179,22 @@ fn swap_bundle(image: &Path, bundle: &Path) -> Result<()> {
         log::warn!("updates: cannot eject the disk image: {error:#}");
     }
     copied?;
-    std::fs::remove_file(image).ok();
 
     let retired = bundle.with_file_name(".Wisp.app.old");
     remove(&retired)?;
     std::fs::rename(bundle, &retired).context("cannot move the old version aside")?;
-    if let Err(error) = std::fs::rename(&staged, bundle) {
-        std::fs::rename(&retired, bundle).ok();
+    let retired = DropGuard::new(retired, |retired: std::path::PathBuf| {
+        if let Err(error) = std::fs::rename(&retired, bundle) {
+            log::error!(
+                "updates: cannot restore the old version from {}: {error}",
+                retired.display()
+            );
+        }
+    });
+    if let Err(error) = std::fs::rename(&*staged, bundle) {
         return Err(error).context("cannot put the new version in place");
     }
+    let retired = DropGuard::dismiss(retired);
     if let Err(error) = remove(&retired) {
         log::warn!("updates: cannot delete the old version: {error:#}");
     }
@@ -189,11 +208,13 @@ fn swap_image(download: &Path, image: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let staged = image.with_file_name(".wisp-update.AppImage");
-    std::fs::copy(download, &staged).context("cannot copy the new AppImage beside the old")?;
-    std::fs::remove_file(download).ok();
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+    let staged = DropGuard::new(staged, |staged| {
+        std::fs::remove_file(staged).ok();
+    });
+    std::fs::copy(download, &*staged).context("cannot copy the new AppImage beside the old")?;
+    std::fs::set_permissions(&*staged, std::fs::Permissions::from_mode(0o755))
         .context("cannot make the new AppImage executable")?;
-    std::fs::rename(&staged, image).context("cannot put the new AppImage in place")?;
+    std::fs::rename(&*staged, image).context("cannot put the new AppImage in place")?;
     let mut start = Command::new(image);
     for variable in ["APPDIR", "APPIMAGE", "ARGV0", "OWD"] {
         start.env_remove(variable);

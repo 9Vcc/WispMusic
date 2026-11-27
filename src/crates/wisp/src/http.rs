@@ -1,9 +1,8 @@
 use std::fs::{self, FileTimes, OpenOptions};
 use std::future::Future;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,7 +18,8 @@ const CACHE_BYTES: u64 = 128 * 1024 * 1024;
 const CACHE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const CACHE_SWEEP: Duration = Duration::from_secs(60 * 60);
 
-static TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEMP_FILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 type Sent = Pin<Box<dyn Future<Output = Result<Response<AsyncBody>>> + Send>>;
 
@@ -55,7 +55,8 @@ impl Client {
             handle.spawn_blocking(move || with_cache(&cache, |cache| cache.sweep()));
         }
         Self {
-            inner: reqwest::Client::builder().dns_resolver(music::dns::dns())
+            inner: reqwest::Client::builder()
+                .dns_resolver(music::dns::dns())
                 .user_agent(USER_AGENT)
                 .build()
                 .unwrap_or_default(),
@@ -224,20 +225,13 @@ impl DiskCache {
 
         let path = self.path(url);
         let previous = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-        let key = key(url);
-        let temporary = self.root.join(format!(
-            ".{key}.tmp-{}-{}",
-            std::process::id(),
-            TEMP_FILE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, bytes))
-            .and_then(|()| fs::rename(&temporary, &path));
+        let written = (|| {
+            let mut file = tempfile::NamedTempFile::new_in(&self.root)?;
+            file.write_all(bytes)?;
+            file.persist(&path)?;
+            std::io::Result::Ok(())
+        })();
         if let Err(error) = written {
-            fs::remove_file(&temporary).ok();
             log::debug!("artwork: cannot write a disk cache entry: {error}");
             return;
         }
@@ -327,6 +321,7 @@ fn read(body: AsyncBody) -> Result<Option<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     struct Temporary(PathBuf);
 

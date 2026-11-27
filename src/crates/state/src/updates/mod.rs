@@ -2,9 +2,9 @@ mod build;
 mod install;
 
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::mem::DropGuard;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -12,6 +12,7 @@ use gpui::{Context, Entity, SharedString, Subscription, Task};
 use i18n::t;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use tokio::task::AbortHandle;
 
 use crate::{AppSettings, Io, join};
 use install::Install;
@@ -322,9 +323,7 @@ impl Updates {
                 let manual = std::mem::take(&mut this.manual_check);
                 match found {
                     Ok(Some(release)) => {
-                        if !manual
-                            && this.dismissed.as_deref() == Some(release.version.as_str())
-                        {
+                        if !manual && this.dismissed.as_deref() == Some(release.version.as_str()) {
                             return;
                         }
                         if manual {
@@ -377,20 +376,16 @@ impl Updates {
         let installed = version.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
             let cancelled = cancel.clone();
-            let fetched = join(io.spawn(async move {
-                download(
+            let install = io.spawn(async move {
+                let path = download(
                     &http, &package, &sha256, &signature, &version, &progress, &cancel,
                 )
-                .await
-            }))
-            .await;
-            if cancelled.load(Ordering::Relaxed) {
-                return;
-            }
-            let applied = match fetched {
-                Ok(path) => join(io.spawn_blocking(move || Install::current().apply(&path))).await,
-                Err(error) => Err(error),
-            };
+                .await?;
+                tokio::task::spawn_blocking(move || Install::current().apply(path)).await?
+            });
+            let _abandon =
+                DropGuard::new(install.abort_handle(), |handle: AbortHandle| handle.abort());
+            let applied = join(install).await;
             if cancelled.load(Ordering::Relaxed) {
                 return;
             }
@@ -590,7 +585,7 @@ async fn download(
     version: &str,
     progress: &AtomicU32,
     cancel: &AtomicBool,
-) -> Result<PathBuf> {
+) -> Result<tempfile::TempPath> {
     let mut response = http
         .get(&package.url)
         .header("User-Agent", AGENT)
@@ -601,15 +596,11 @@ async fn download(
         .context("the update is missing")?;
     let total = response.content_length().filter(|total| *total > 0);
 
-    // Each attempt writes its own file, so a dismissed download cannot land in the file a
-    // check started since writes.
-    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
-    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "wisp-{version}-{attempt}-{}",
-        package.name
-    ));
-    let mut file = std::fs::File::create(&path).context("cannot keep the update")?;
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("wisp-{version}-"))
+        .suffix(&format!("-{}", package.name))
+        .tempfile_in(std::env::temp_dir())
+        .context("cannot keep the update")?;
     let mut hasher = Sha256::new();
     let mut received = 0u64;
     while let Some(chunk) = response.chunk().await.context("cannot read the update")? {
@@ -624,7 +615,6 @@ async fn download(
         hasher.update(&chunk);
         file.write_all(&chunk).context("cannot keep the update")?;
     }
-    drop(file);
     if cancel.load(Ordering::Relaxed) {
         anyhow::bail!("the update was cancelled");
     }
@@ -638,15 +628,13 @@ async fn download(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     if checksum != expected {
-        std::fs::remove_file(&path).ok();
         anyhow::bail!("the update does not match its checksum");
     }
-    let bytes = std::fs::read(&path).context("cannot read the update for verification")?;
+    let bytes = std::fs::read(file.path()).context("cannot read the update for verification")?;
     if !signed(&bytes, signature) {
-        std::fs::remove_file(&path).ok();
         anyhow::bail!("the update is not signed by the updater key");
     }
-    Ok(path)
+    Ok(file.into_temp_path())
 }
 
 /// Whether `offered` on `channel` should replace the running build. Within the running build's

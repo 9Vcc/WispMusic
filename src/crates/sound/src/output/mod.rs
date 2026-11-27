@@ -28,6 +28,9 @@ mod output_hog;
 mod output_host;
 mod output_rate;
 
+#[cfg(windows)]
+use std::mem::DropGuard;
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
@@ -729,36 +732,24 @@ pub fn raise_decoder_priority() {
 /// the new default opens every time. A thread already in an apartment, such as the UI thread,
 /// stays in it.
 #[cfg(windows)]
-struct Apartment {
-    /// Whether this thread's call initialized COM, so it has to uninitialize it on exit.
-    entered: bool,
-}
-
-#[cfg(windows)]
-impl Apartment {
-    fn enter() {
-        thread_local! {
-            static APARTMENT: Apartment = Apartment {
-                entered: unsafe {
-                    windows::Win32::System::Com::CoInitializeEx(
-                        None,
-                        windows::Win32::System::Com::COINIT_MULTITHREADED,
-                    )
+fn enter_apartment() {
+    thread_local! {
+        static APARTMENT: DropGuard<bool, fn(bool)> = DropGuard::new(
+            unsafe {
+                windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_MULTITHREADED,
+                )
+            }
+            .is_ok(),
+            |entered| {
+                if entered {
+                    unsafe { windows::Win32::System::Com::CoUninitialize() };
                 }
-                .is_ok(),
-            };
-        }
-        APARTMENT.with(|_| {});
+            },
+        );
     }
-}
-
-#[cfg(windows)]
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        if self.entered {
-            unsafe { windows::Win32::System::Com::CoUninitialize() };
-        }
-    }
+    APARTMENT.with(|_| {});
 }
 
 impl Sample {
@@ -1464,11 +1455,11 @@ fn forget_gone(host: &cpal::Host) {
 }
 
 /// The host Wisp plays through. On Windows the calling thread joins COM's multithreaded
-/// apartment first, see `Apartment`.
+/// apartment first, see `enter_apartment`.
 #[cfg(not(target_os = "linux"))]
 fn host() -> cpal::Host {
     #[cfg(windows)]
-    Apartment::enter();
+    enter_apartment();
     cpal::default_host()
 }
 
