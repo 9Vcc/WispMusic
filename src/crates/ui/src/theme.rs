@@ -61,6 +61,9 @@ const UNBLURRED_CARD_HOVER: f32 = 0.82;
 /// it holds the least and still lands in the same place.
 const SURFACE_FLOOR: f32 = 0.2;
 const HEADER_FLOOR: f32 = 0.15;
+/// What the chrome's edges keep once the window is fully see-through. The fills they part
+/// are gone by then, so a faint line is all that still shows where the sheet lies.
+const EDGE_FLOOR: f32 = 0.2;
 
 /// How much of a fill's alpha survives on a see-through window before the
 /// slider takes its share. A surface reads denser than its own alpha because the
@@ -939,6 +942,8 @@ impl Theme {
 
         self.background = veil(self.background, opacity, 0.);
         self.sidebar = veil(self.sidebar, opacity, 0.);
+        self.sidebar_border = veil(self.sidebar_border, opacity, EDGE_FLOOR);
+        self.title_bar_border = veil(self.title_bar_border, opacity, EDGE_FLOOR);
 
         for surface in [
             &mut self.sidebar_accent,

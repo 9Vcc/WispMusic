@@ -1639,7 +1639,8 @@ impl Render for Root {
             .flex()
             .font(self.font(cx))
             .flex_col()
-            .size_full()
+            .w(ui::snapped(viewport.width, window))
+            .h(ui::snapped(viewport.height, window))
             .when_some(radius, |this, radius| {
                 this.rounded(radius).overflow_hidden()
             })
