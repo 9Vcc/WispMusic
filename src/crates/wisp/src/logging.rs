@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use env_logger::{Env, Logger, Target};
-use log::{Log, Metadata, Record};
+use log::{Level, Log, Metadata, Record};
 
 const CONSOLE: &str = "warn,symphonia=error,lofty=error";
 const DISK: &str = "warn,symphonia=error,lofty=error,wisp=debug,wisp::memory=info,ui=debug,music=debug,state::home=debug,state::library=debug,state::lyrics=debug,state::playback=info,webview=debug";
@@ -98,6 +98,16 @@ impl Write for Capped {
     }
 }
 
+/// Whether a record is the expected noise from probing a broken system font.
+fn probe_noise(metadata: &Metadata) -> bool {
+    views::probing_typefaces()
+        && matches!(metadata.level(), Level::Error | Level::Warn)
+        && matches!(
+            metadata.target(),
+            "gpui_windows::direct_write" | "gpui::text_system"
+        )
+}
+
 /// Passes every record on with [`music::redact`] applied to its message, so neither the terminal
 /// nor the file Wisp asks people to attach to a bug report carries a token, an account name or
 /// the home folder. This covers the lines other crates write as well as Wisp's own.
@@ -105,11 +115,11 @@ struct Redacted(Box<dyn Log>);
 
 impl Log for Redacted {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        self.0.enabled(metadata)
+        !probe_noise(metadata) && self.0.enabled(metadata)
     }
 
     fn log(&self, record: &Record) {
-        if !self.0.enabled(record.metadata()) {
+        if probe_noise(record.metadata()) || !self.0.enabled(record.metadata()) {
             return;
         }
         let text = record.args().to_string();

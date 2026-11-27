@@ -45,9 +45,14 @@ pub(crate) fn draws(text: &TextSystem, family: &str) -> bool {
     PROBING.store(true, Ordering::Relaxed);
     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let id = text.resolve_font(&requested);
+        // A missing or broken family resolves to a fallback and still has usable metrics. The
+        // picker must offer only families DirectWrite actually selected, not that fallback.
+        let direct = text
+            .get_font_for_id(id)
+            .is_some_and(|font| font.family == requested.family);
         let bounds = text.bounding_box(id, px(16.));
         let width = f32::from(bounds.size.width);
-        width.is_finite() && width > 0.
+        direct && width.is_finite() && width > 0.
     }));
     PROBING.store(false, Ordering::Relaxed);
     answer.unwrap_or(false)
@@ -149,7 +154,16 @@ mod tests {
 
     fn bundled() -> Arc<TextSystem> {
         let platform = gpui_platform::current_platform(false);
-        Arc::new(TextSystem::new(platform.text_system()))
+        let text = Arc::new(TextSystem::new(platform.text_system()));
+        text.add_fonts(vec![std::borrow::Cow::Borrowed(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/fonts/AlibabaPuHuiTi-3-65-Medium.ttf"
+            ))
+            .as_slice(),
+        )])
+        .unwrap();
+        text
     }
 
     /// The family the app draws itself in has to survive the probe, or the picker would leave out
@@ -190,18 +204,18 @@ mod tests {
         );
     }
 
-    /// A name DirectWrite knows nothing about resolves to the fallback face, which draws. The
-    /// probe must not read that as broken, or it would throw away every unfamiliar name.
+    /// An unfamiliar family that only resolves through the system fallback is not offered as a
+    /// real choice in the typeface picker.
     #[test]
-    fn an_unknown_family_falls_back_rather_than_failing() {
-        assert!(draws(&bundled(), "No Such Family Zzz 12345"));
+    fn an_unknown_family_is_not_offered_as_drawable() {
+        assert!(!draws(&bundled(), "No Such Family Zzz 12345"));
     }
 
     /// The probe leaves the flag clear whether it passed or caught a panic, so an unrelated crash
     /// later still gets its backtrace written.
     #[test]
     fn the_probe_clears_its_flag() {
-        assert!(draws(&bundled(), "No Such Family Zzz 12345"));
+        assert!(!draws(&bundled(), "No Such Family Zzz 12345"));
         assert!(!probing());
     }
 }
