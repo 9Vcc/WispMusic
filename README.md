@@ -64,7 +64,7 @@
 │   │   └── embed/              # 构建期资源嵌入
 │   ├── assets/
 │   │   ├── fonts/              # 内嵌字体与字体许可
-│   │   ├── icons/              # Lucide、Iconoir、Remix、Solar 等
+│   │   ├── icons/              # Lucide、Iconoir、Material、MingCute、Phosphor、Remix、Solar、Tabler
 │   │   ├── i18n/               # en-US 与 zh-CN Fluent 文案
 │   │   ├── themes/             # Wisp、Catppuccin、Gruvbox 等主题
 │   │   ├── windows/            # Windows 图标与资源
@@ -197,8 +197,8 @@ AGPL-3.0 or later 分发。GPL-3.0 第 13 条允许这种组合许可方式，GP
 第三方组件遵循各自许可证，包括 MIT、Apache-2.0、BSD、ISC、MPL-2.0、CC0、CC BY 4.0、SIL OFL 等。
 完整 crate 清单、版权声明与许可全文见 [THIRD-PARTY.md](./THIRD-PARTY.md)。
 
-内嵌字体与图标包括 Inter、阿里巴巴普惠体 3.0、Lucide、Iconoir、Remix Icon、Solar Icon Set、
-Simple Icons 与 Tabler Icons；使用或再分发时应遵守其对应许可。
+内嵌字体与图标包括 Inter、阿里巴巴普惠体 3.0、Lucide、Iconoir、Material Symbols、MingCute、
+Phosphor、Remix Icon、Solar Icon Set、Simple Icons 与 Tabler Icons；使用或再分发时应遵守其对应许可。
 
 ### 内容、商标与免责声明
 

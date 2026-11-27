@@ -26,8 +26,12 @@ The binary embeds:
   （Regular 单字重）。
 - Lucide icons — ISC License, `assets/icons/lucide/LICENSE`
 - Iconoir — MIT License, `assets/icons/iconoir/LICENSE`
+- Material Symbols Rounded — Apache License 2.0, `assets/icons/material/LICENSE`
+- MingCute Icon 3.1.0 — Apache License 2.0, `assets/icons/mingcute/LICENSE`
+- Phosphor Icons 2.1.1, Regular — MIT License, `assets/icons/phosphor/LICENSE`
 - Remix Icon 4.8.0 — Apache License 2.0, `assets/icons/remix/LICENSE`
 - Solar Icon Set, Linear style — CC BY 4.0 by 480 Design, `assets/icons/solar/LICENSE`
+- Tabler Icons 3.35.0 — MIT License, `assets/icons/tabler/LICENSE`
 - Simple Icons brand marks — CC0 1.0, `assets/icons/common/LICENSE`
 - Tabler Icons login marks — MIT License, `assets/icons/common/TABLER-LICENSE`
 - 汉字笔画数据（运行时按字从 `hanzi-writer-data@2.0.1` 拉取，源自 Make Me a Hanzi）—
