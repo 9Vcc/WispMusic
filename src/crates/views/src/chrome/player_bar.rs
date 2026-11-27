@@ -15,8 +15,8 @@ use i18n::t;
 use input::{ToggleLyrics, ToggleQueue};
 use state::{AppSettings, Playback, PlayerBarIsland, PlayerBarLayout, Queue, SideTab, Wisp};
 use ui::{
-    Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Perch, Pinnable, Popup, Room,
-    Scrollbar, Sprung,
+    Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Menu, MenuItem, Perch, Pinnable,
+    Popover, Popovers, Popup, Room, Scrollbar, Sprung,
 };
 
 use crate::chrome::SpeedButton;
@@ -118,6 +118,8 @@ pub(crate) struct PlayerBar {
     span: Option<Pixels>,
     /// Whether the pointer rests on the bar, which holds a floating island where it stands.
     held: bool,
+    /// The menu that holds the controls a narrow bar cannot show.
+    more: Popovers,
 }
 
 /// Says that the pointer came to rest on the bar or left it. The workspace holds a floating
@@ -177,6 +179,7 @@ impl PlayerBar {
             dwell: None,
             span: None,
             held: false,
+            more: Popovers::default(),
         }
     }
 
@@ -374,20 +377,84 @@ impl PlayerBar {
             .small()
             .icon("icons/picture-in-picture.svg")
             .tooltip_above("player-mini")
-            // Opening the mini window borrows the app, which cannot happen while this press is
-            // still being dispatched. The next foreground task runs after the event has unwound.
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                let main = window.window_handle();
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(1))
-                        .await;
-                    main.update(cx, |_, window, cx| crate::shells::mini::enter(window, cx))
-                        .ok();
-                })
-                .detach();
-            })
+            .on_mouse_down(MouseButton::Left, |_, window, cx| enter_mini(window, cx))
             .into_any_element()
+    }
+
+    /// The button that opens the controls a narrow bar leaves out. The menu is rebuilt each
+    /// frame, so it follows the side panels and the current track.
+    fn more_button(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let button = Button::new("player-more")
+            .ghost()
+            .small()
+            .icon("icons/ellipsis.svg")
+            .tooltip_above("common-more");
+        let items = self.more_items(window, cx);
+        Popover::new("player-more", self.more.clone())
+            .button(button)
+            .menu(
+                Menu::new("player-more-menu")
+                    .name(i18n::lookup("common-more", None))
+                    .items(items),
+            )
+            .commands()
+            .into_any_element()
+    }
+
+    fn more_items(&self, window: &Window, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let (side, lyrics, open, tab, fm, desktop) = {
+            let settings = self.settings.read(cx);
+            (
+                SidebarRight::available(window),
+                settings.lyrics_enabled(),
+                settings.sidebar_right_open(),
+                settings.sidebar_right_tab(),
+                self.playback.read(cx).fm_session(),
+                settings.desktop_lyrics(),
+            )
+        };
+        let mut items = Vec::new();
+        if side && lyrics {
+            items.push(
+                MenuItem::new("player-more-lyrics", i18n::lookup("lyrics-title", None))
+                    .icon("icons/mic-vocal.svg")
+                    .selected(open && tab == SideTab::Lyrics)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(ToggleLyrics), cx);
+                    }),
+            );
+        }
+        if side && !fm {
+            items.push(
+                MenuItem::new("player-more-queue", i18n::lookup("queue-title", None))
+                    .icon("icons/list-music.svg")
+                    .selected(open && tab == SideTab::Queue)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(ToggleQueue), cx);
+                    }),
+            );
+        }
+        if lyrics {
+            items.push(
+                MenuItem::new(
+                    "player-more-desktop-lyrics",
+                    i18n::lookup("player-desktop-lyrics", None),
+                )
+                .icon("icons/monitor.svg")
+                .selected(desktop)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_desktop_lyrics(!desktop, cx);
+                    });
+                })),
+            );
+        }
+        items.push(
+            MenuItem::new("player-more-mini", i18n::lookup("player-mini", None))
+                .icon("icons/picture-in-picture.svg")
+                .on_click(|_, window, cx| enter_mini(window, cx)),
+        );
+        items
     }
 
     fn now_playing(
@@ -915,10 +982,13 @@ impl Render for PlayerBar {
         let height = Self::height(window, cx);
         let lyrics = self.settings.read(cx).lyrics_enabled();
         let show_track = span.fits(Room::Snug);
+        // A narrow bar keeps the transport, playback mode, volume and fullscreen, and puts the
+        // panel, desktop-lyrics and mini-player controls in one more menu.
+        let overflowing = !Chrome::room(window, cx).fits(Room::Wide);
         let fm = self.playback.read(cx).fm_session();
         let sides = match SidebarRight::available(window) {
-            true => Some(self.side_buttons(cx)),
-            false => None,
+            true if !overflowing => Some(self.side_buttons(cx)),
+            _ => None,
         };
         // Equal wings keep the title centered along the window's foot. A floating pill has to
         // keep the right-hand tools whole, so there the middle gives way instead.
@@ -926,12 +996,16 @@ impl Render for PlayerBar {
             true => usize::from(lyrics) + usize::from(!fm),
             false => 0,
         };
-        let wing_controls = 5. + if lyrics { 1. } else { 0. };
+        let shown_lyrics = lyrics && !overflowing;
+        let wing_controls = 5. + if shown_lyrics { 1. } else { 0. };
         let centered_wing = theme.metrics.control * wing_controls + theme.metrics.pad * 3.;
         // 变速控件始终可用。
         let picker = true;
         // [wisp] 播放模式键排在音量左侧，也算一颗音量前的图标按钮；mini 键同理。
-        let tools = 2 + usize::from(picker) + usize::from(lyrics) + side_tools;
+        let tools = 2 + usize::from(picker) + usize::from(shown_lyrics) + side_tools;
+        if !overflowing {
+            self.more.close();
+        }
         let buttons = div()
             .flex()
             .flex_none()
@@ -1071,8 +1145,11 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
-                        .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                        .child(self.mini_button())
+                        .when(shown_lyrics, |this| {
+                            this.child(self.desktop_lyrics_button(cx))
+                        })
+                        .when(!overflowing, |this| this.child(self.mini_button()))
+                        .when(overflowing, |this| this.child(self.more_button(window, cx)))
                         .child(self.fullscreen_button(cx)),
                 ),
             (false, PlayerBarLayout::Centered) => base
@@ -1128,8 +1205,11 @@ impl Render for PlayerBar {
                         .child(buttons)
                         .child(play_mode(&self.playback, false, cx))
                         .child(self.sound(cx))
-                        .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                        .child(self.mini_button())
+                        .when(shown_lyrics, |this| {
+                            this.child(self.desktop_lyrics_button(cx))
+                        })
+                        .when(!overflowing, |this| this.child(self.mini_button()))
+                        .when(overflowing, |this| this.child(self.more_button(window, cx)))
                         .child(self.fullscreen_button(cx)),
                 ),
             (false, PlayerBarLayout::Minimal) => {
@@ -1187,8 +1267,11 @@ impl Render for PlayerBar {
                             .child(buttons)
                             .child(play_mode(&self.playback, false, cx))
                             .child(self.sound(cx))
-                            .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                            .child(self.mini_button())
+                            .when(shown_lyrics, |this| {
+                                this.child(self.desktop_lyrics_button(cx))
+                            })
+                            .when(!overflowing, |this| this.child(self.mini_button()))
+                            .when(overflowing, |this| this.child(self.more_button(window, cx)))
                             .child(self.fullscreen_button(cx)),
                     )
             }
@@ -1204,8 +1287,11 @@ impl Render for PlayerBar {
                 .child(buttons)
                 .child(play_mode(&self.playback, false, cx))
                 .child(self.sound(cx))
-                .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                .child(self.mini_button())
+                .when(shown_lyrics, |this| {
+                    this.child(self.desktop_lyrics_button(cx))
+                })
+                .when(!overflowing, |this| this.child(self.mini_button()))
+                .when(overflowing, |this| this.child(self.more_button(window, cx)))
                 .child(self.fullscreen_button(cx)),
             // The two sides share what the middle leaves them evenly, so the transport and the
             // seek bar stay centred. `classic` works out how wide the middle is and how the
@@ -1269,8 +1355,11 @@ impl Render for PlayerBar {
                             .child(buttons)
                             .child(play_mode(&self.playback, false, cx))
                             .child(self.sound(cx))
-                            .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                            .child(self.mini_button())
+                            .when(shown_lyrics, |this| {
+                                this.child(self.desktop_lyrics_button(cx))
+                            })
+                            .when(!overflowing, |this| this.child(self.mini_button()))
+                            .when(overflowing, |this| this.child(self.more_button(window, cx)))
                             .child(self.fullscreen_button(cx)),
                     )
             }
@@ -1294,4 +1383,18 @@ impl Render for PlayerBar {
             .relative()
             .when_some(context_menu, |this, menu| this.child(menu))
     }
+}
+
+/// Enters the mini player after the current press unwinds, since opening a window borrows the
+/// app while the event is still being dispatched.
+fn enter_mini(window: &mut Window, cx: &mut App) {
+    let main = window.window_handle();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(1))
+            .await;
+        main.update(cx, |_, window, cx| crate::shells::mini::enter(window, cx))
+            .ok();
+    })
+    .detach();
 }
