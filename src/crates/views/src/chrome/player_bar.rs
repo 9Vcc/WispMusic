@@ -35,6 +35,8 @@ const SEEK_MAX: f32 = 560.;
 /// How wide a small icon button draws: `SMALL_INSET` on each side of a 16 px icon. Every button
 /// on the classic bar's right side is one.
 const ICON_BUTTON: f32 = 32.;
+/// The icon inside one of those buttons.
+const ICON_GLYPH: f32 = 16.;
 /// The classic bar's spacing in rems: its `px_5` at either end, its `gap_4` between the three
 /// columns, the right side's `gap_2` between its groups, the `gap_1` between the panel buttons
 /// and the volume group's `gap_1` between the mute button and the slider.
@@ -714,10 +716,13 @@ impl PlayerBar {
     }
 
     /// The island's pill height and the clear space the bar keeps around it, above and below as
-    /// on the sheet's sides. The pill holds the cover with the seek line under it and no more.
+    /// on the sheet's sides. The pill holds the cover or the title and artist lines, whichever is
+    /// taller, with the slim seek line under it and no more.
     pub(crate) fn island(cx: &App) -> (Pixels, Pixels) {
-        let metrics = cx.theme().metrics;
-        let pill = metrics.thumb + metrics.pad * (LINE_DROP + ISLAND_INSET) * 2.;
+        let theme = cx.theme();
+        let metrics = theme.metrics;
+        let lines = (theme.text(ui::Text::Body) + theme.text(ui::Text::Small)) * ui::LEADING;
+        let pill = metrics.thumb.max(lines) + metrics.pad * (LINE_DROP + ISLAND_INSET) * 2.;
         (pill, metrics.pad * ISLAND_CLEAR)
     }
 
@@ -725,6 +730,12 @@ impl PlayerBar {
     /// so the first and last buttons sit as far from the edge as from the top and bottom.
     fn island_pad(pill: Pixels, cx: &App) -> Pixels {
         (pill - cx.theme().metrics.control) / 2.
+    }
+
+    /// The padding before the cover that starts the island's pill: as far in as the icon of the
+    /// button that ends the pill, so the two ends mirror each other.
+    fn island_lead(pill: Pixels, cx: &App) -> Pixels {
+        Self::island_pad(pill, cx) + px(ICON_BUTTON - ICON_GLYPH) / 2.
     }
 
     /// The narrowest the island's pill draws: every control around a middle that keeps room for
@@ -744,7 +755,8 @@ impl PlayerBar {
         // Speed and the panel buttons form one tightly spaced group. The four gaps to the
         // remaining controls use the wider spacing of the island's tools row.
         let right = row(tools as f32, TOOL_GAP) + rem * SIDE_GAP * 4.;
-        Self::island_pad(pill, cx) * 2.
+        Self::island_lead(pill, cx)
+            + Self::island_pad(pill, cx)
             + row(4., SIDE_GAP)
             + rem * ISLAND_GAP * 2.
             + cx.theme().metrics.cover * ISLAND_MIDDLE
@@ -866,6 +878,9 @@ impl Render for PlayerBar {
         let radius: Option<Pixels> = None;
         let floating = Self::floating(window, cx);
         let (pill, clear) = Self::island(cx);
+        let pill = ui::snapped(pill, window);
+        let pad = ui::snapped(Self::island_pad(pill, cx), window);
+        let lead = ui::snapped(Self::island_lead(pill, cx), window);
 
         let base = div()
             .id("player-bar")
@@ -878,7 +893,6 @@ impl Render for PlayerBar {
                 true => this
                     .h(pill)
                     .max_w(px(ISLAND_MAX))
-                    .px_5()
                     .when_else(
                         theme.radius == px(0.),
                         |this| this.rounded_none(),
@@ -1019,8 +1033,9 @@ impl Render for PlayerBar {
                         .items_center()
                         .gap(rems(ISLAND_GAP))
                         .w_full()
-                        .h(ui::snapped(pill, window))
-                        .px(Self::island_pad(pill, cx))
+                        .h(pill)
+                        .pl(lead)
+                        .pr(pad)
                         .child(
                             div()
                                 .flex_none()
@@ -1034,7 +1049,9 @@ impl Render for PlayerBar {
                                 .flex_col()
                                 .flex_1()
                                 .min_w_0()
-                                .justify_center()
+                                .h_full()
+                                .justify_end()
+                                .pb(theme.metrics.pad * ISLAND_INSET)
                                 .child(
                                     div()
                                         .flex()
