@@ -895,7 +895,7 @@ impl SearchView {
         };
 
         let refused = matches!(hit, Hit::Song(track) if !track.playable);
-        hit_card(hit, place, compact, current, cx.theme())
+        hit_card(hit, place, compact, current, cx)
             // 面板容器自己也有 on_click（关面板），GPUI 的 click 自顶向下分派——
             // 行内先拦住冒泡，否则容器先把面板关了，行的打开动作就被吞掉。
             .when(opens(hit) && !refused, |card| {
@@ -978,7 +978,7 @@ impl SearchView {
         };
 
         let me = cx.entity().downgrade();
-        let card = Card::new("best", title)
+        let card = cards::marked_local(Card::new("best", title), marks_local(hit, cx))
             .art(theme.metrics.cover * 0.45)
             .cover(cover(hit))
             .when(matches!(hit, Hit::Song(track) if track.paid), |card| {
@@ -1042,11 +1042,12 @@ impl SearchView {
         )
     }
 
-    /// The page search shows in place of its results. Nothing here works without the network,
-    /// so the No connection state covers the whole screen the moment it is gone, and a failed
-    /// search or a failed browse shows its own reason otherwise. Asking again is the retry,
-    /// since neither loader counts a failure as served.
+    /// The page search shows in place of its results. Local hits remain useful without the
+    /// network, so the No connection state only covers the screen when a search has no results.
     fn failure(&self, asked: bool, gutter: Pixels, cx: &Context<Self>) -> Option<AnyElement> {
+        if asked && !self.search.read(cx).hits().is_empty() {
+            return None;
+        }
         let offline = Network::lost(cx);
         let (id, reason, retry) = match asked {
             true => {
@@ -1481,13 +1482,9 @@ fn meta(hit: &Hit, compact: bool) -> SharedString {
 /// The card for one hit, shared by the search page and the quick search so a hit looks and
 /// links the same in both. `compact` is the mixed list, where the subtitle leads with the kind
 /// and a song names its album. The caller decides what a press and the play button do.
-pub(crate) fn hit_card(
-    hit: &Hit,
-    place: usize,
-    compact: bool,
-    current: bool,
-    theme: &Theme,
-) -> Card {
+pub(crate) fn hit_card(hit: &Hit, place: usize, compact: bool, current: bool, cx: &App) -> Card {
+    let theme = cx.theme();
+    let local = marks_local(hit, cx);
     let meta = subtitle(hit, place, compact, theme);
     let card = match hit {
         Hit::Song(track) => Card::new(("song", place), track.name.clone())
@@ -1523,11 +1520,18 @@ pub(crate) fn hit_card(
             .underline(),
     };
 
-    card.meta(meta)
+    cards::marked_local(card, local)
+        .meta(meta)
         .when_some(hit.pin(), Pinnable::pin)
         .when(compact, Card::tucked)
         // The mixed list tags each row with its kind, which the card's name leaves out.
         .when(compact, |card| card.aria_description(noun(hit.kind())))
+}
+
+/// Whether `hit` carries the local file badge. A local hit does unless the session plays local
+/// files alone, when every hit is local and the badge would tell nothing apart.
+fn marks_local(hit: &Hit, cx: &App) -> bool {
+    Wisp::global(cx).session.read(cx).client().is_some() && hit.id().is_some_and(music::is_local_id)
 }
 
 /// The line under a hit's name, where every artist, owner and album links to its page.

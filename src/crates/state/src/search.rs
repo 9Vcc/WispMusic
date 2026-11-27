@@ -222,7 +222,15 @@ impl Search {
     ) -> Self {
         cx.subscribe(&session, |this, _, event, cx| match event {
             SessionEvent::SignedOut => {
-                this.forget_results();
+                this.task = None;
+                this.faces = None;
+                this.served = None;
+                this.linked = None;
+                this.catalog.clear();
+                this.portraits.clear();
+                this.loading = false;
+                this.error = None;
+                this.rank(cx);
                 cx.notify();
             }
             SessionEvent::SignedIn => {
@@ -283,22 +291,9 @@ impl Search {
         self.error.as_deref()
     }
 
-    fn forget_results(&mut self) {
-        self.task = None;
-        self.faces = None;
-        self.query.clear();
-        self.served = None;
-        self.matching.clear();
-        self.linked = None;
-        self.catalog.clear();
-        self.portraits.clear();
-        self.hits.clear();
-        self.loading = false;
-        self.error = None;
-    }
-
     /// Debounces text searches and resolves active-provider links into metadata and name searches.
-    /// Changing the query cancels pending work and signing out clears the results.
+    /// Changing the query cancels pending work; signing out drops streaming results and keeps
+    /// local ones.
     pub fn ask(&mut self, query: &str, cx: &mut Context<Self>) {
         let query = query.trim().to_owned();
         let answered = self.loading || self.served.as_deref() == Some(query.as_str());
@@ -454,23 +449,41 @@ impl Search {
             return;
         }
 
-        let Some(client) = self.session.read(cx).browsing_client() else {
-            return;
-        };
+        let session = self.session.read(cx);
+        let batches: Vec<_> = [Shelf::Streaming, Shelf::Local]
+            .into_iter()
+            .filter_map(|shelf| {
+                let ids: Vec<String> = wanted
+                    .iter()
+                    .filter(|id| Shelf::of(id) == shelf)
+                    .cloned()
+                    .collect();
+                let client = session.client_of(shelf).filter(|_| !ids.is_empty())?;
+                Some((client, ids))
+            })
+            .collect();
 
         let io = self.io.clone();
-        let asked = wanted.clone();
         self.faces = Some(cx.spawn(async move |this, cx| {
-            let found = join(io.spawn(async move { client.artist_images(wanted).await })).await;
+            let mut answered = Vec::new();
+            for (client, wanted) in batches {
+                let asked = wanted.clone();
+                let found = join(io.spawn(async move { client.artist_images(wanted).await })).await;
+                if let Ok(found) = found {
+                    answered.push((asked, found));
+                }
+            }
+            if answered.is_empty() {
+                return;
+            }
 
             this.update(cx, |this, cx| {
-                let Ok(found) = found else {
-                    return;
-                };
-                for id in asked {
-                    this.portraits.entry(id).or_default();
+                for (asked, found) in answered {
+                    for id in asked {
+                        this.portraits.entry(id).or_default();
+                    }
+                    this.portraits.extend(found);
                 }
-                this.portraits.extend(found);
                 this.rank(cx);
             })
             .ok();
@@ -487,11 +500,12 @@ impl Search {
 
         self.hits = {
             let held = self.library.read(cx);
-            let state = held.state(Shelf::Streaming);
-            rank(
-                state.tracks(),
-                state.albums(),
-                state.playlists(),
+            let streaming = held.state(Shelf::Streaming);
+            let local = held.state(Shelf::Local);
+            rank_shelves(
+                &[streaming.tracks(), local.tracks()],
+                &[streaming.albums(), local.albums()],
+                &[streaming.playlists(), local.playlists()],
                 &self.catalog,
                 &self.portraits,
                 query,
@@ -574,6 +588,25 @@ pub(crate) fn rank(
     portraits: &HashMap<String, String>,
     asked: &str,
 ) -> Vec<Hit> {
+    rank_shelves(
+        &[library],
+        &[albums],
+        &[playlists],
+        catalog,
+        portraits,
+        asked,
+    )
+}
+
+/// The hits for `asked`, best first, across every shelf the search page shows.
+fn rank_shelves(
+    library: &[&[Track]],
+    albums: &[&[Album]],
+    playlists: &[&[Playlist]],
+    catalog: &Catalog,
+    portraits: &HashMap<String, String>,
+    asked: &str,
+) -> Vec<Hit> {
     let query = Query::new(asked);
     if query.terms.is_empty() {
         return Vec::new();
@@ -613,7 +646,7 @@ pub(crate) fn matching(
     .collect()
 }
 
-fn songs(library: &[Track], catalog: &[Track], query: &Query) -> Vec<Scored> {
+fn songs(library: &[&[Track]], catalog: &[Track], query: &Query) -> Vec<Scored> {
     let mut scored: Vec<Scored> = Vec::new();
 
     for (track, rank) in sources(library, catalog) {
@@ -646,8 +679,13 @@ fn songs(library: &[Track], catalog: &[Track], query: &Query) -> Vec<Scored> {
     capped(scored)
 }
 
-fn albums_of(albums: &[Album], library: &[Track], catalog: &Catalog, query: &Query) -> Vec<Scored> {
-    let saved = albums.iter().map(|album| {
+fn albums_of(
+    albums: &[&[Album]],
+    library: &[&[Track]],
+    catalog: &Catalog,
+    query: &Query,
+) -> Vec<Scored> {
+    let saved = albums.iter().copied().flatten().map(|album| {
         (
             &album.id,
             &album.name,
@@ -717,9 +755,13 @@ fn albums_of(albums: &[Album], library: &[Track], catalog: &Catalog, query: &Que
     capped(scored)
 }
 
-fn playlists_of(playlists: &[Playlist], catalog: &[Playlist], query: &Query) -> Vec<Scored> {
+fn playlists_of(playlists: &[&[Playlist]], catalog: &[Playlist], query: &Query) -> Vec<Scored> {
     let total = catalog.len();
-    let saved = playlists.iter().map(|playlist| (playlist, None));
+    let saved = playlists
+        .iter()
+        .copied()
+        .flatten()
+        .map(|playlist| (playlist, None));
     let found = catalog
         .iter()
         .enumerate()
@@ -760,15 +802,15 @@ fn playlists_of(playlists: &[Playlist], catalog: &[Playlist], query: &Query) -> 
 /// place, so they come after the found ones unless their name fits the query better. A plain video
 /// channel credited on a track or album is never offered as an artist.
 fn artists(
-    library: &[Track],
+    library: &[&[Track]],
     catalog: &Catalog,
-    albums: &[Album],
+    albums: &[&[Album]],
     portraits: &HashMap<String, String>,
     query: &Query,
 ) -> Vec<Scored> {
-    let mut tallies: Vec<(u32, u32, ArtistHit)> = Vec::new();
+    let mut tallies: Vec<(u32, u32, bool, ArtistHit)> = Vec::new();
 
-    let mut record = |artist: &ArtistRef, face: Option<&String>, score, popularity, mine| {
+    let mut record = |artist: &ArtistRef, face: Option<&String>, score, popularity, mine, local| {
         let name = &artist.name;
         let id = artist.id.clone();
         let cover = face
@@ -777,11 +819,11 @@ fn artists(
             .cloned();
         match tallies
             .iter_mut()
-            .find(|(_, _, current)| match (&current.id, &id) {
+            .find(|(_, _, held_local, current)| match (&current.id, &id) {
                 (Some(current), Some(incoming)) => current == incoming,
-                (None, _) | (_, None) => current.name == *name,
+                _ => current.name == *name && *held_local == local,
             }) {
-            Some((best, top, current)) => {
+            Some((best, top, _, current)) => {
                 *best = (*best).max(score);
                 *top = (*top).max(popularity);
                 current.saved += mine;
@@ -791,6 +833,7 @@ fn artists(
             None => tallies.push((
                 score,
                 popularity,
+                local,
                 ArtistHit {
                     name: name.clone(),
                     id,
@@ -812,7 +855,7 @@ fn artists(
             id: Some(found.id.clone()),
             channel: false,
         };
-        record(&artist, found.cover.as_ref(), score, 0, 0);
+        record(&artist, found.cover.as_ref(), score, 0, 0, false);
     }
     for (track, rank) in sources(library, &catalog.tracks) {
         for artist in track.artist_refs.iter().filter(|artist| !artist.channel) {
@@ -820,22 +863,23 @@ fn artists(
                 continue;
             };
             let mine = usize::from(rank.is_none());
-            record(artist, None, score, track.popularity, mine);
+            let local = track.id.as_deref().is_some_and(music::is_local_id);
+            record(artist, None, score, track.popularity, mine, local);
         }
     }
-    for album in albums {
+    for album in albums.iter().copied().flatten() {
         for artist in album.artist_refs.iter().filter(|artist| !artist.channel) {
             let Some(score) = favored(named(&artist.name, query), None) else {
                 continue;
             };
-            record(artist, None, score, 0, 0);
+            record(artist, None, score, 0, 0, music::is_local_id(&album.id));
         }
     }
 
     capped(
         tallies
             .into_iter()
-            .map(|(score, popularity, artist)| Scored {
+            .map(|(score, popularity, _, artist)| Scored {
                 score,
                 popularity,
                 hit: Hit::Artist(artist),
@@ -845,17 +889,22 @@ fn artists(
 }
 
 fn sources<'a>(
-    library: &'a [Track],
+    library: &'a [&'a [Track]],
     catalog: &'a [Track],
 ) -> impl Iterator<Item = (&'a Track, Option<u32>)> {
     let total = catalog.len();
 
-    library.iter().map(|track| (track, None)).chain(
-        catalog
-            .iter()
-            .enumerate()
-            .map(move |(at, track)| (track, Some(placed(at, total)))),
-    )
+    library
+        .iter()
+        .copied()
+        .flatten()
+        .map(|track| (track, None))
+        .chain(
+            catalog
+                .iter()
+                .enumerate()
+                .map(move |(at, track)| (track, Some(placed(at, total)))),
+        )
 }
 
 fn placed(at: usize, total: usize) -> u32 {
@@ -905,11 +954,14 @@ fn salvaged<T>(found: Result<Vec<T>>, kept: Vec<T>, trouble: &mut Vec<String>) -
     }
 }
 
-fn kept(library: &[Track], track: &Track) -> bool {
-    track
-        .id
-        .as_ref()
-        .is_some_and(|id| library.iter().any(|kept| kept.id.as_ref() == Some(id)))
+fn kept(library: &[&[Track]], track: &Track) -> bool {
+    track.id.as_ref().is_some_and(|id| {
+        library
+            .iter()
+            .copied()
+            .flatten()
+            .any(|kept| kept.id.as_ref() == Some(id))
+    })
 }
 
 fn score(value: &str, term: &str) -> u32 {
