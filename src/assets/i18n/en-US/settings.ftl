@@ -169,6 +169,8 @@ settings-blur-window-detail = Draw the window over a blurred desktop. Needs an o
 settings-font = Font size
 settings-font-detail = Base text size, everything else scales with it
 settings-font-value = { $size } px
+settings-row-size = Row height
+settings-row-size-detail = How tall the rows of song lists stand
 settings-font-smaller = Smaller text
 settings-font-larger = Larger text
 settings-startup = Start on
@@ -445,6 +447,11 @@ corners-square = Square
 corners-subtle = Subtle
 corners-rounded = Rounded
 corners-round = Round
+
+# row height
+row-size-compact = Compact
+row-size-regular = Regular
+row-size-spacious = Spacious
 
 # motion
 motion-system = System

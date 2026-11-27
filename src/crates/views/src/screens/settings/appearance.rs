@@ -7,10 +7,10 @@ use i18n::t;
 use state::{PageWidth, SYSTEM_FONT};
 use ui::{
     ActiveTheme as _, Button, Look, MAX_FONT, MAX_TRANSPARENCY, MIN_FONT, MenuItem, OptionCard,
-    Picker, Rounding, Scrubber, Theme, ThemeKind,
+    Picker, Rounding, RowSize, Scrubber, Theme, ThemeKind,
 };
 
-use super::rows::{Announced as _, chip, grid};
+use super::rows::{Announced as _, chip, grid, segmented};
 use super::{Group, SettingsView, Slot, TYPEFACES};
 use crate::shared::popups::matches_query;
 
@@ -25,6 +25,7 @@ const TYPEFACE_GUESS: usize = 24;
 const TYPEFACE_BATCH: usize = 3;
 /// The share of a thumbnail's width the centred page takes, leaving a margin either side.
 const CENTRED_SHARE: f32 = 0.6;
+const ROW_SIZE: &str = "row-size";
 
 impl SettingsView {
     pub(super) fn appearance_groups(&self, cx: &App) -> Vec<Group> {
@@ -35,8 +36,11 @@ impl SettingsView {
             Group::new("settings-icons", "icons/layout-grid.svg").cards(Slot::Icons),
             Group::new("settings-corners", "icons/maximize.svg").cards(Slot::Corners),
             Group::new("settings-page-width", "icons/columns-3.svg").cards(Slot::PageWidth),
-            Group::new("settings-group-text", "icons/text-select.svg")
-                .rows([Slot::Typeface, Slot::Font]),
+            Group::new("settings-group-text", "icons/text-select.svg").rows([
+                Slot::Typeface,
+                Slot::Font,
+                Slot::RowSize,
+            ]),
             Group::new("settings-group-window", "icons/panel-left-open.svg").rows(
                 [Slot::Opacity]
                     .into_iter()
@@ -314,6 +318,30 @@ impl SettingsView {
             .child(step("font-larger", "+", "settings-font-larger", 1.));
 
         self.row(t!("settings-font"), actions.into_any_element())
+    }
+
+    /// How tall table rows stand, one of three heights.
+    pub(super) fn row_size_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let look = self.look(cx);
+        let overrides = self.settings.read(cx).theme_overrides();
+
+        let choices = segmented(
+            ROW_SIZE,
+            RowSize::ALL.map(|rows| (rows, rows.label())),
+            look.rows,
+            cx.listener(move |this, rows: &RowSize, _, cx| {
+                let rows = *rows;
+                this.settings
+                    .update(cx, |settings, cx| settings.set_row_size(rows, cx));
+                Theme::set(Look { rows, ..look }, &overrides, cx);
+                cx.notify();
+            }),
+        );
+
+        self.row(
+            t!("settings-row-size"),
+            choices.name(t!("settings-row-size")).into_any_element(),
+        )
     }
 
     /// One card per icon pack, its thumbnail drawn with five of the pack's own glyphs.

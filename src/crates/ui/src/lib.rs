@@ -113,7 +113,7 @@ pub use lazy::Lazy;
 pub use level_meter::LevelMeter;
 pub use linger::{Linger, lingers};
 pub use menu::{MENU_CONTEXT, Menu, MenuItem, MenuSearch, SubmenuState, close_menu};
-pub use metrics::{LEADING, Metrics, Rounding, Text, snapped, tucked};
+pub use metrics::{LEADING, Metrics, Rounding, RowSize, Text, snapped, tucked};
 pub use modal::{Modal, corners};
 pub use motion::{
     Entrance, Fading, Glow, Glowed, Glowing, HoverFade, Motion, Motioned, PRESS_SCALE,
@@ -150,9 +150,9 @@ pub use swipe::{hold_swipe, swipe_pull, swiped};
 pub use switch::Switch;
 pub use table::{
     Activate, Cell, ColumnSpec, Deselect, Layout, Listing, MoveRowDown, MoveRowUp, Pending,
-    ROW_GROUP, Remove, RowMoves, SelectNext, SelectPrevious, Sort, Sorting, TABLE_CONTEXT, Table,
-    TableDelegate, TableEvent, TableSource, TableState, Toggle, Viewport, Width, clear_listing,
-    rank, show_listing, shown_listing, table,
+    ROW_GROUP, Remove, RowMoves, STACKED_LEADING, SelectNext, SelectPrevious, Sort, Sorting,
+    TABLE_CONTEXT, Table, TableDelegate, TableEvent, TableSource, TableState, Toggle, Viewport,
+    Width, clear_listing, rank, show_listing, shown_listing, table,
 };
 pub use tabs::{TabBar, Tabs};
 pub use theme::{

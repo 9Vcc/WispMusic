@@ -33,7 +33,8 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use storage::Database;
 use ui::{
-    Layout, Look, Mode, Pace, Pin, Rounding, Saver, Sorting, Stillness, ThemeKind, ThemeOverrides,
+    Layout, Look, Mode, Pace, Pin, Rounding, RowSize, Saver, Sorting, Stillness, ThemeKind,
+    ThemeOverrides,
 };
 
 use self::equalizer::Profile;
@@ -594,6 +595,8 @@ struct Appearance {
     player_bar_time_left: bool,
     icons: String,
     rounding: String,
+    /// How tall table rows stand, by its id. See `RowSize`.
+    row_size: String,
     /// How wide pages stretch on a wide window, by its id. See `PageWidth`.
     page_width: String,
     /// Whether the app paints its frosted treatments. The key kept its old name, which stood
@@ -976,6 +979,7 @@ impl Default for Appearance {
             player_bar_time_left: false,
             icons: icons::BASE.to_owned(),
             rounding: Rounding::Rounded.id().to_owned(),
+            row_size: RowSize::default().id().to_owned(),
             page_width: PageWidth::default().id().to_owned(),
             blur: true,
             blur_window: true,
@@ -1724,6 +1728,11 @@ impl AppSettings {
         &self.values.appearance.rounding
     }
 
+    /// How tall table rows stand. An unknown saved id reads as regular.
+    pub fn row_size(&self) -> RowSize {
+        RowSize::from_id(&self.values.appearance.row_size)
+    }
+
     /// How wide pages stretch on a wide window. An unknown saved id reads as centred.
     pub fn page_width(&self) -> PageWidth {
         PageWidth::from_id(&self.values.appearance.page_width)
@@ -1763,6 +1772,7 @@ impl AppSettings {
         Look {
             kind: ThemeKind::from_id(self.theme()),
             rounding: Rounding::from_id(self.rounding()),
+            rows: self.row_size(),
             font: self.font_size(),
             transparent: self.transparent(),
             transparency: self.transparency(),
@@ -2752,6 +2762,11 @@ impl AppSettings {
 
     pub fn set_rounding(&mut self, rounding: impl Into<String>, cx: &mut Context<Self>) {
         self.values.appearance.rounding = rounding.into();
+        self.schedule_save(cx);
+    }
+
+    pub fn set_row_size(&mut self, rows: RowSize, cx: &mut Context<Self>) {
+        self.values.appearance.row_size = rows.id().to_owned();
         self.schedule_save(cx);
     }
 

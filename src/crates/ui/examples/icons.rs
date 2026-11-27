@@ -137,6 +137,7 @@ fn main() {
                     kind: ThemeKind::Dark,
                     rounding: Rounding::Rounded,
                     font: 14.,
+                    rows: ui::RowSize::default(),
                     transparent: false,
                     transparency: 0.,
                     blur: false,

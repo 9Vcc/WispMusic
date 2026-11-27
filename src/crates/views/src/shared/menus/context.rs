@@ -48,6 +48,16 @@ impl Item {
         }
     }
 
+    /// The pin the item hauls when it is dragged, as its card or row does.
+    pub(crate) fn pin(&self) -> Option<Pin> {
+        match self {
+            Self::Album(album) => album.pin(),
+            Self::Playlist(playlist) => playlist.pin(),
+            Self::Artist(artist) => artist.pin(),
+            Self::Track(track) => track.pin(),
+        }
+    }
+
     /// The item's menu. A track's carries the playlist and artist submenus, whose state
     /// `menus` holds; the rest need only the playback.
     pub(crate) fn menu(

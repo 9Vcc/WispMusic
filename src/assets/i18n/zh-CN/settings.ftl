@@ -127,6 +127,8 @@ settings-blur-window-detail = 在模糊的桌面上绘制窗口。需要不透�
 settings-font = 字体大小
 settings-font-detail = 基础文字大小，其他所有内容随之缩放
 settings-font-value = { $size } px
+settings-row-size = 行高
+settings-row-size-detail = 歌曲列表每一行的高度
 settings-startup = 欢迎页
 settings-startup-detail = Wisp 启动时打开的页面
 settings-startup-animation = 启动动画
@@ -379,6 +381,11 @@ corners-square = 直角
 corners-subtle = 微圆
 corners-rounded = 圆角
 corners-round = 全圆
+
+# 行高
+row-size-compact = 紧凑
+row-size-regular = 标准
+row-size-spacious = 宽松
 
 # motion
 motion-system = 系统

@@ -10,7 +10,7 @@ use gpui::{
     AbsoluteLength, AnyElement, App, Context, Corners, Div, DragMoveEvent, Empty, Entity,
     EventEmitter, FocusHandle, Focusable, Global, Interactivity, MouseButton, MouseDownEvent,
     MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, StyleRefinement, TextAlign,
-    Window, actions, div, point, px, svg,
+    Window, actions, div, point, px, rems, svg,
 };
 
 use i18n::t;
@@ -20,7 +20,7 @@ use crate::drag::{Edge, drop_gap, drop_marker};
 use crate::filters::FilterChange;
 use crate::glass::{bar_surface, blurring, popover_surface};
 use crate::menu::{Menu, MenuItem};
-use crate::metrics::{snapped, text_width};
+use crate::metrics::{Metrics, Text, snapped, text_width};
 use crate::motion::Glowing as _;
 use crate::pin::{DraggedPin, Pin, Pinnable, Spot};
 use crate::popup::Popup;
@@ -53,13 +53,23 @@ const GRIP: Pixels = px(9.);
 /// from behind the head is already drawn rather than popping in as the head lifts.
 const OVERSCAN: usize = 2;
 const OVERSCAN_ABOVE: usize = 1;
-/// How tall a skeleton bar stands against its row.
+/// How tall a skeleton bar stands against a single-line row.
 const SKELETON_BAR: f32 = 0.3;
+/// How much of its text line a skeleton bar fills when the cell stacks two lines.
+const SKELETON_LINE: f32 = 0.8;
+/// How far the bar for the folded line under a title reaches against the title's bar.
+const SKELETON_UNDER: f32 = 0.6;
 /// How far a skeleton bar reaches across its cell, stepped by row and column so the column
 /// edges do not line up into a grid.
 const SKELETON_REACH: [f32; 5] = [0.6, 0.85, 0.45, 0.7, 0.55];
+/// The widest a skeleton bar's cell counts as, in body text ems, so a bar in a wide column stays
+/// about as long as the text that will replace it.
+const SKELETON_TEXT: f32 = 16.;
 
 pub const ROW_GROUP: &str = "table-row";
+/// The line height, in ems, of a title and of the folded line under it, tighter than body text
+/// so the two read as one entry.
+pub const STACKED_LEADING: f32 = 1.1;
 /// The list a row dragged within its own table names, so a drop on another row can tell it
 /// from a pin dragged in from elsewhere.
 const ROWS: &str = "table-rows";
@@ -84,6 +94,11 @@ pub struct Cell<F> {
     pub align: TextAlign,
     pub display: usize,
     pub row: usize,
+    /// The folded column this cell draws on a second line under its own value.
+    pub carries: Option<F>,
+    /// Whether the row folds a column under its title, so a text column can step down a size and
+    /// let the title lead.
+    pub stacked: bool,
 }
 
 impl<F> Cell<F> {
@@ -135,6 +150,12 @@ pub trait TableSource: 'static {
     fn cell(&self, cell: Cell<Self::Field>, cx: &mut App) -> AnyElement;
 
     fn picking(&self) -> bool {
+        false
+    }
+
+    /// Whether every row stands as tall as a stacked one, even when no column folded under the
+    /// title, so a row that names more under its title fits like its neighbours.
+    fn tall(&self) -> bool {
         false
     }
 
@@ -432,11 +453,27 @@ impl<S: TableSource> TableDelegate<S> {
         self.order.len()
     }
 
+    /// The fields the rows show, a folded one included, since it still draws under the title.
     fn visible(&self) -> Vec<S::Field> {
         self.columns
             .iter()
-            .map(|column| column.spec.field)
+            .flat_map(|column| {
+                [
+                    Some(column.spec.field),
+                    column.carries.map(|spec| spec.field),
+                ]
+            })
+            .flatten()
             .collect()
+    }
+
+    /// How tall a row stands, a little taller once a column folded under the title or the source
+    /// asks for tall rows.
+    fn row_height(&self, metrics: Metrics) -> Pixels {
+        match self.stacked() || self.source.tall() {
+            true => metrics.table_stack,
+            false => metrics.table_row,
+        }
     }
 
     fn relayout(&mut self, cx: &App) {
@@ -623,6 +660,11 @@ impl<S: TableSource> TableDelegate<S> {
         if self.anchor.is_some_and(|row| !self.marked.contains(&row)) {
             self.anchor = self.selected;
         }
+    }
+
+    /// Whether a column folded under the title, which makes every row two lines tall.
+    fn stacked(&self) -> bool {
+        self.columns.iter().any(|column| column.carries.is_some())
     }
 
     fn inner_width(&self, col_ix: usize) -> Pixels {
@@ -990,7 +1032,7 @@ impl<S: TableSource> TableState<S> {
         };
 
         let metrics = cx.theme().metrics;
-        let row = snapped(metrics.row, window);
+        let row = snapped(self.delegate.row_height(metrics), window);
         let head = snapped(metrics.header, window);
         let top = head + row * display as f32;
         let above = self.viewport.top + head;
@@ -1037,7 +1079,8 @@ impl<S: TableSource> TableState<S> {
         let theme = cx.theme();
         let first = self.viewport.first(head, row_height);
         let last = (first + self.viewport.rows(row_height)).min(count);
-        let bar = row_height * SKELETON_BAR;
+        let bar = theme.metrics.table_row * SKELETON_BAR;
+        let text = theme.text(Text::Body) * SKELETON_TEXT;
 
         (first..last)
             .map(|display| {
@@ -1059,12 +1102,14 @@ impl<S: TableSource> TableState<S> {
                             .enumerate()
                             .map(|(ix, column)| {
                                 let inner = self.delegate.inner_width(ix);
-                                let skeleton = match column.spec.width {
-                                    Width::Thumb => Skeleton::new().size(theme.metrics.thumb),
-                                    _ => Skeleton::new()
-                                        .w(inner
-                                            * SKELETON_REACH[(display + ix) % SKELETON_REACH.len()])
-                                        .h(bar),
+                                let reach = inner.min(text)
+                                    * SKELETON_REACH[(display + ix) % SKELETON_REACH.len()];
+                                let skeleton = match (column.spec.width, column.carries) {
+                                    (Width::Thumb, _) => {
+                                        Skeleton::new().size(theme.metrics.thumb).into_any_element()
+                                    }
+                                    (_, Some(_)) => stacked_skeleton(reach, cx),
+                                    _ => Skeleton::new().w(reach).h(bar).into_any_element(),
                                 };
                                 div()
                                     .w(inner + PADDING * 2.)
@@ -1149,6 +1194,7 @@ impl<S: TableSource> TableState<S> {
                 spec: column.spec,
                 width: *width,
                 floor: column.floor,
+                carries: column.carries,
             })
             .collect();
         let Some(widths) = stretch(&anchor, resize.column, to - resize.origin.get()) else {
@@ -1446,6 +1492,7 @@ impl<S: TableSource> TableState<S> {
                 let tail = display + 1 == count;
                 let selected = marked.contains(&row);
                 let playing = self.delegate.source.playing(row, cx);
+                let stacked = self.delegate.stacked();
                 let cells: Vec<AnyElement> = (0..self.delegate.columns.len())
                     .map(|ix| {
                         let column = &self.delegate.columns[ix];
@@ -1456,6 +1503,8 @@ impl<S: TableSource> TableState<S> {
                             align: column.spec.align,
                             display,
                             row,
+                            carries: column.carries.map(|spec| spec.field),
+                            stacked,
                         };
                         self.delegate.source.cell(cell, cx)
                     })
@@ -1594,6 +1643,8 @@ impl<S: TableSource> TableState<S> {
                     align: column.spec.align,
                     display,
                     row,
+                    carries: None,
+                    stacked: false,
                 };
                 cells.push(self.delegate.source.cell(cell, cx));
             }
@@ -1670,6 +1721,36 @@ fn radii(style: &StyleRefinement, rem: Pixels) -> Corners<Pixels> {
     }
 }
 
+/// A loading stand-in for a title with a folded line under it: two bars in lines as tall as the
+/// real ones, so the bars sit where the text will land.
+fn stacked_skeleton(reach: Pixels, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let under = theme.text(Text::Small) * STACKED_LEADING;
+    let line = |height: AbsoluteLength, bar: AbsoluteLength, width: Pixels| {
+        div()
+            .h(height)
+            .flex()
+            .items_center()
+            .child(Skeleton::new().w(width).h(bar))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap_1p5()
+        .child(line(
+            rems(STACKED_LEADING).into(),
+            rems(STACKED_LEADING * SKELETON_LINE).into(),
+            reach,
+        ))
+        .child(line(
+            under.into(),
+            (under * SKELETON_LINE).into(),
+            reach * SKELETON_UNDER,
+        ))
+        .into_any_element()
+}
+
 fn sort_icon(direction: Option<Sort>) -> &'static str {
     match direction {
         Some(Sort::Ascending) => "icons/chevron-up.svg",
@@ -1683,7 +1764,7 @@ impl<S: TableSource> Render for TableState<S> {
         self.delegate.measure(window, cx);
 
         let metrics = cx.theme().metrics;
-        let row = snapped(metrics.row, window);
+        let row = snapped(self.delegate.row_height(metrics), window);
         let head = snapped(metrics.header, window);
         let placeholders = self.placeholders(row, cx);
         let height = self.height(head, row, self.delegate.row_count().max(placeholders));
