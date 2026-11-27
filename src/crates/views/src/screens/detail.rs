@@ -587,11 +587,14 @@ impl DetailView {
         let id = detail.id()?.to_owned();
 
         let (target, saved, busy) = match detail.header()?.kind {
-            Collection::Album => (
-                Saveable::Album(detail.album()?.clone()),
-                library.read(cx).saved_album(&id),
-                library.read(cx).pending_album(&id),
-            ),
+            Collection::Album => {
+                let album = detail.album()?;
+                (
+                    Saveable::Album(album.clone()),
+                    library.read(cx).saved_album(&album.id),
+                    library.read(cx).pending_album(&album.id),
+                )
+            }
             Collection::Playlist => {
                 let known = library.read(cx).playlist(&id).cloned();
                 let playlist = known.clone().or_else(|| detail.playlist().cloned())?;
