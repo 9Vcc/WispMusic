@@ -32,6 +32,8 @@ use crate::shared::transport::{
 use crate::shared::volume::{RisingVolume, VolumeHost, rising_volume};
 
 const SEEK_MAX: f32 = 560.;
+/// The least room an island's classic middle keeps for its transport and slim seek line.
+const ISLAND_SEEK: f32 = 180.;
 /// How wide a small icon button draws: `SMALL_INSET` on each side of a 16 px icon. Every button
 /// on the classic bar's right side is one.
 const ICON_BUTTON: f32 = 32.;
@@ -911,27 +913,25 @@ impl Render for PlayerBar {
         let stacked = Self::stacked(window, layout);
         let transparent = self.settings.read(cx).player_bar_translucent();
         let height = Self::height(window, cx);
-        // Equal wings keep the title centered while reserving the original volume slider width.
         let lyrics = self.settings.read(cx).lyrics_enabled();
-        let wing_controls = 5. + if lyrics { 1. } else { 0. };
-        let centered_wing = theme.metrics.control * wing_controls + theme.metrics.pad * 3.;
         let show_track = span.fits(Room::Snug);
         let fm = self.playback.read(cx).fm_session();
         let sides = match SidebarRight::available(window) {
             true => Some(self.side_buttons(cx)),
             false => None,
         };
+        // Equal wings keep the title centered along the window's foot. A floating pill has to
+        // keep the right-hand tools whole, so there the middle gives way instead.
+        let side_tools = match sides.is_some() {
+            true => usize::from(lyrics) + usize::from(!fm),
+            false => 0,
+        };
+        let wing_controls = 5. + if lyrics { 1. } else { 0. };
+        let centered_wing = theme.metrics.control * wing_controls + theme.metrics.pad * 3.;
         // 变速控件始终可用。
         let picker = true;
         // [wisp] 播放模式键排在音量左侧，也算一颗音量前的图标按钮；mini 键同理。
-        let tools = 1
-            + usize::from(picker)
-            + 1
-            + usize::from(lyrics)
-            + match sides.is_some() {
-                true => usize::from(lyrics) + usize::from(!fm),
-                false => 0,
-            };
+        let tools = 2 + usize::from(picker) + usize::from(lyrics) + side_tools;
         let buttons = div()
             .flex()
             .flex_none()
@@ -1043,6 +1043,10 @@ impl Render for PlayerBar {
             ))
         });
 
+        // The seek bar's hit area stands taller than its line, which sits in the middle of it.
+        // In an island the surrounding rows overlap that extra height rather than grow the pill.
+        let overlap = theme.metrics.pad * (SEEK_HIT / 2. - LINE_DROP);
+        let opening = opened.unwrap_or_default().clamp(0., 1.);
         let content = match (stacked, layout) {
             (true, _) => base
                 .flex_col()
@@ -1094,14 +1098,28 @@ impl Render for PlayerBar {
                         .h_full()
                         .flex()
                         .flex_col()
-                        .justify_center()
-                        .child(self.track_details(true, cx).w_full())
-                        .child(div().flex_none().w_full().child(seek)),
+                        .map(|this| match floating {
+                            // The island's slim line keeps the inset under it that the other
+                            // layouts have, and the title and artist stand on it.
+                            true => this.justify_end().pb(theme.metrics.pad * ISLAND_INSET),
+                            false => this.justify_center(),
+                        })
+                        .child(self.track_details(true, cx).w_full().gap_0().when(
+                            floating,
+                            |this| {
+                                this.opacity(1. - opening)
+                                    .when(opening >= 1., |this| this.invisible())
+                            },
+                        ))
+                        .child(match floating {
+                            true => div().flex_none().w_full().my(-overlap).child(seek),
+                            false => div().flex_none().w_full().child(seek),
+                        }),
                 )
                 .child(
                     div()
-                        .flex_1()
-                        .min_w(centered_wing)
+                        .when(floating, |this| this.flex_none())
+                        .when(!floating, |this| this.flex_1().min_w(centered_wing))
                         .h_full()
                         .flex()
                         .items_center()
@@ -1216,17 +1234,25 @@ impl Render for PlayerBar {
                             .items_center()
                             .child(climax(&self.playback, false, cx)),
                     );
-                let column = div().flex().flex_col().items_center().flex_none().w(middle);
+                let column = div().flex().flex_col().items_center();
                 let column = match floating {
                     // In the island the transport stands in the middle of the room over the
                     // slim line rather than right on it, clear of the line and the pill's top
-                    // alike.
+                    // alike. The column takes what the title can spare, but never less than
+                    // the transport and its line need.
                     true => column
+                        .flex_1()
+                        .min_w(px(ISLAND_SEEK))
                         .h_full()
                         .pb(theme.metrics.pad * ISLAND_INSET)
                         .child(transport)
+                        .child(div().flex_none().w_full().my(-overlap).child(seek)),
+                    false => column
+                        .flex_none()
+                        .w(middle)
+                        .gap_1()
+                        .child(transport)
                         .child(seek),
-                    false => column.gap_1().child(transport).child(seek),
                 };
                 base.items_center()
                     .gap_4()
@@ -1235,8 +1261,8 @@ impl Render for PlayerBar {
                     .child(
                         div()
                             .flex()
-                            .flex_1()
-                            .min_w_0()
+                            .when(floating, |this| this.flex_none())
+                            .when(!floating, |this| this.flex_1().min_w_0())
                             .items_center()
                             .justify_end()
                             .gap_2()
