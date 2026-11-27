@@ -50,6 +50,8 @@ pub const LOCAL_TRACK_PREFIX: &str = "local:";
 pub const LOCAL_ALBUM_PREFIX: &str = "local-album:";
 pub const LOCAL_ARTIST_PREFIX: &str = "local-artist:";
 pub const LOCAL_PLAYLIST_PREFIX: &str = "local-playlist:";
+/// Names an artist a provider gave no id for, so a page can look the artist up before opening.
+pub const ARTIST_NAME_PREFIX: &str = "artist-name:";
 
 /// The most recommendations a provider hands one list of an album or artist page, so a
 /// rail never asks for or draws more than this many releases or artists.
@@ -57,6 +59,16 @@ pub const SUGGESTIONS: usize = 10;
 
 /// The duration tolerance for recognizing the same recording across releases.
 const SAME_SONG: Duration = Duration::from_secs(5);
+
+/// The placeholder id for an artist known only by name.
+pub fn artist_name_id(name: &str) -> String {
+    format!("{ARTIST_NAME_PREFIX}{name}")
+}
+
+/// The name inside a placeholder id, `None` for a real provider id.
+pub fn artist_name(id: &str) -> Option<&str> {
+    id.strip_prefix(ARTIST_NAME_PREFIX)
+}
 
 pub fn is_local_id(id: &str) -> bool {
     id.starts_with(LOCAL_TRACK_PREFIX)

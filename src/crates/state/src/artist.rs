@@ -9,6 +9,11 @@ use crate::{Io, Library, LibraryEvent, Session, SessionEvent, join};
 /// Signals that a local artist no longer has a page after the library changes.
 pub enum ArtistDetailEvent {
     Gone(String),
+    /// A name-only artist resolved to the provider's id, so the route can name the real page.
+    Resolved {
+        from: String,
+        to: String,
+    },
 }
 
 pub struct ArtistDetail {
@@ -133,12 +138,18 @@ impl ArtistDetail {
     }
 
     pub fn open(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.id.as_deref() == Some(id) && (self.loading || self.artist.is_some()) {
+        if self.id.as_deref() == Some(id)
+            && (self.loading || self.artist.is_some() || self.error.is_some())
+        {
             return;
         }
 
         self.clear();
         self.id = Some(id.to_owned());
+        if let Some(name) = music::artist_name(id) {
+            self.resolve(name.to_owned(), cx);
+            return;
+        }
 
         let Some(catalog) = self.session.read(cx).catalog(id) else {
             if music::is_local_id(id) {
@@ -167,7 +178,66 @@ impl ArtistDetail {
         };
         self.clear();
         self.id = Some(id.clone());
-        self.load(id, true, cx);
+        match music::artist_name(&id) {
+            Some(name) => self.resolve(name.to_owned(), cx),
+            None => self.load(id, true, cx),
+        }
+    }
+
+    /// Finds the provider's id for an artist named without one, then opens that page. A name
+    /// with no match leaves the page, as an id the provider no longer knows would.
+    fn resolve(&mut self, name: String, cx: &mut Context<Self>) {
+        self.loading = true;
+        cx.notify();
+
+        let client = self.session.read(cx).client();
+        let request = self.io.spawn({
+            let name = name.clone();
+            async move {
+                let client = client.ok_or_else(|| anyhow::anyhow!("no provider is signed in"))?;
+                client.search_artists(&name).await
+            }
+        });
+        self.request = Some(request.abort_handle());
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let found = join(request).await;
+
+            this.update(cx, |this, cx| {
+                if this.id.as_deref().and_then(music::artist_name) != Some(name.as_str()) {
+                    return;
+                }
+
+                this.loading = false;
+                this.request = None;
+                match crate::settled(found, cx) {
+                    Ok(artists) => {
+                        let at = artists
+                            .iter()
+                            .position(|artist| artist.name.eq_ignore_ascii_case(&name))
+                            .unwrap_or(0);
+                        match artists.get(at).map(|artist| artist.id.clone()) {
+                            Some(id) if !id.is_empty() => {
+                                let from = music::artist_name_id(&name);
+                                this.id = Some(id.clone());
+                                this.load(id.clone(), false, cx);
+                                cx.emit(ArtistDetailEvent::Resolved { from, to: id });
+                            }
+                            _ => {
+                                let id = music::artist_name_id(&name);
+                                this.clear();
+                                cx.emit(ArtistDetailEvent::Gone(id));
+                            }
+                        }
+                    }
+                    Err(reason) => {
+                        log::error!("artist: cannot resolve {name:?}: {reason}");
+                        this.error = Some(reason);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Fetches the artist's overview and fills the rest of the page once it lands. A `fresh`

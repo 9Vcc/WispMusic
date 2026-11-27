@@ -32,8 +32,6 @@ use crate::shared::transport::{
 use crate::shared::volume::{RisingVolume, VolumeHost, rising_volume};
 
 const SEEK_MAX: f32 = 560.;
-/// Marks an artist the provider gave no id for, so a click can search for the name instead.
-const ARTIST_SEARCH: &str = "artist-search:";
 /// The least room an island's classic middle keeps for its transport and slim seek line.
 const ISLAND_SEEK: f32 = 180.;
 /// How wide a small icon button draws: `SMALL_INSET` on each side of a 16 px icon. Every button
@@ -731,7 +729,7 @@ impl PlayerBar {
                             color,
                         )
                         .text_size(size)
-                        .on_click(open_artist)
+                        .on_click(|id, cx| navigate(Destination::Artist(id), cx))
                         .into_any_element()
                     },
                     cx,
@@ -748,7 +746,7 @@ impl PlayerBar {
                 .text_size(artists)
                 .justify_center()
                 .truncate()
-                .on_click(open_artist)
+                .on_click(|id, cx| navigate(Destination::Artist(id), cx))
                 .into_any_element(),
             ),
             _ => None,
@@ -1377,7 +1375,7 @@ impl Render for PlayerBar {
 }
 
 /// The artist links for a track. A provider that saved no artist refs at all still gets its
-/// names split out of the display line, so every named artist can be searched for.
+/// names split out of the display line, so every named artist opens a page.
 fn artist_links(track: &music::Track) -> Vec<InlineLink> {
     match track.artist_refs.is_empty() {
         false => track.artist_refs.iter().map(artist_link).collect(),
@@ -1386,36 +1384,26 @@ fn artist_links(track: &music::Track) -> Vec<InlineLink> {
             .split(['、', '/', ','])
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .map(search_artist)
+            .map(name_artist)
             .collect(),
     }
 }
 
 /// One artist of the playing track. A provider that names an artist without an id still gets a
-/// link, which searches for the name rather than opening an artist page it cannot address.
+/// link; the artist page resolves the name to a provider id before loading.
 fn artist_link(artist: &music::ArtistRef) -> InlineLink {
-    let value = artist.id.clone().map(SharedString::from).or_else(|| {
-        Some(SharedString::from(format!(
-            "{ARTIST_SEARCH}{}",
-            artist.name
-        )))
-    });
-    InlineLink::new(artist.name.clone(), value)
+    let id = match &artist.id {
+        Some(id) => SharedString::from(id.clone()),
+        None => SharedString::from(music::artist_name_id(&artist.name)),
+    };
+    InlineLink::new(artist.name.clone(), Some(id))
 }
 
-fn search_artist(name: &str) -> InlineLink {
+fn name_artist(name: &str) -> InlineLink {
     InlineLink::new(
         SharedString::from(name),
-        Some(SharedString::from(format!("{ARTIST_SEARCH}{name}"))),
+        Some(SharedString::from(music::artist_name_id(name))),
     )
-}
-
-/// Opens an artist page, or searches for an artist a provider left without an id.
-fn open_artist(id: SharedString, cx: &mut App) {
-    match id.strip_prefix(ARTIST_SEARCH) {
-        Some(name) => router::search_for(name, cx),
-        None => navigate(Destination::Artist(id), cx),
-    }
 }
 
 /// Enters the mini player after the current press unwinds, since opening a window borrows the

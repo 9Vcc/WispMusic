@@ -201,15 +201,23 @@ impl ArtistView {
             TableState::new(delegate, cx).follow(scroll)
         });
 
-        cx.subscribe(&detail, |_, _, event, cx| {
-            let state::ArtistDetailEvent::Gone(id) = event;
-            if router::trail(cx).read(cx).current()
-                == router::Destination::Artist(id.clone().into())
-            {
-                router::replace(
-                    router::Destination::Library(router::LibraryTab::Artists),
-                    cx,
-                );
+        cx.subscribe(&detail, |_, _, event, cx| match event {
+            state::ArtistDetailEvent::Gone(id) => {
+                if router::trail(cx).read(cx).current()
+                    == router::Destination::Artist(id.clone().into())
+                {
+                    router::replace(
+                        router::Destination::Library(router::LibraryTab::Artists),
+                        cx,
+                    );
+                }
+            }
+            state::ArtistDetailEvent::Resolved { from, to } => {
+                if router::trail(cx).read(cx).current()
+                    == router::Destination::Artist(from.clone().into())
+                {
+                    router::replace(router::Destination::Artist(to.clone().into()), cx);
+                }
             }
         })
         .detach();

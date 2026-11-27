@@ -1216,11 +1216,6 @@ impl Root {
                 genre.into()
             }
             Destination::Search => {
-                if let Some(query) = router::take_search(cx) {
-                    self.screens
-                        .search
-                        .update(cx, |search, cx| search.search_for(&query, cx));
-                }
                 self.screens.genres.update(cx, |genres, cx| genres.load(cx));
                 self.screens.search.clone().into()
             }
