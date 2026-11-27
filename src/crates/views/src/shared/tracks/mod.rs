@@ -11,8 +11,8 @@ use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis, RangeAxis, Unit};
 use crate::shared::menus::{ItemMenu, TrackColumns};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Entity, Hsla, InteractiveElement as _, IntoElement as _, SharedString,
-    Styled as _, WeakEntity,
+    AnyElement, App, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement as _,
+    SharedString, Styled as _, WeakEntity,
 };
 use music::{Arrival, Track};
 use router::Destination;
@@ -508,9 +508,12 @@ impl TrackSource {
         let library = library.clone();
         let source = self.provider.clone();
         let at = cell.row;
+        // Every album opens in the same screen, so a button keyed by its row would carry the
+        // last album's heart over and play a swap from it.
+        let key = (ElementId::from("toggle-liked-track"), id);
 
         Some(
-            Button::new(("toggle-liked-track", cell.row))
+            Button::new(key)
                 .ghost()
                 .backgroundless()
                 .small()

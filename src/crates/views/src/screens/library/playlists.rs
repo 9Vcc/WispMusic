@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis};
+use ui::{ActiveTheme as _, Filter, FilterChange, FlagAxis, RangeAxis, Unit};
 
 use gpui::{AnyElement, App, Entity, TextAlign};
 use i18n::t;
@@ -14,6 +14,8 @@ use crate::shared::cells::{self, DATE, NUMBER, TRAILING};
 use crate::shared::menus::playlist_menu;
 use crate::shared::pins::Pinned as _;
 use crate::shared::text::{folded, holds};
+
+use super::albums::stops;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlaylistField {
@@ -75,6 +77,8 @@ pub(super) struct PlaylistSource {
     library: Entity<Library>,
     playback: Entity<Playback>,
     owned: bool,
+    /// The span of track counts the Tracks filter keeps, or every playlist while it is unset.
+    tracks_span: Option<(f32, f32)>,
     /// The shelf the Local only or Streaming only filter keeps the playlists to.
     reach: Reach,
 }
@@ -85,6 +89,7 @@ impl PlaylistSource {
             library,
             playback,
             owned: false,
+            tracks_span: None,
             reach: Reach::default(),
         }
     }
@@ -112,6 +117,16 @@ impl PlaylistSource {
     fn playlists<'a>(&self, cx: &'a App) -> Joined<'a, Playlist> {
         blend::joined(self.library.read(cx), LibraryState::playlists)
     }
+
+    /// Every track count the playlists have, in order and without repeats. A playlist that
+    /// reports no tracks is left out, since most providers report zero when they do not know.
+    fn counts(&self, cx: &App) -> Vec<f32> {
+        stops(
+            self.playlists(cx)
+                .iter()
+                .map(|playlist| playlist.track_count as f32),
+        )
+    }
 }
 
 impl TableSource for PlaylistSource {
@@ -129,16 +144,37 @@ impl TableSource for PlaylistSource {
         self.playlists(cx).get(row).is_some_and(|playlist| {
             (!self.owned || playlist.owned)
                 && self.reach.keeps(&playlist.id)
+                && self.tracks_span.is_none_or(|(low, high)| {
+                    let count = playlist.track_count as f32;
+                    playlist.track_count > 0 && count >= low - 0.5 && count <= high + 0.5
+                })
                 && (holds(&playlist.name, query) || holds(&playlist.owner, query))
         })
     }
 
     fn filter_axes(&self, cx: &App) -> Vec<Filter> {
-        let mut axes = vec![Filter::Flag(FlagAxis {
+        let mut axes = Vec::new();
+        let counts = self.counts(cx);
+        if let (Some(first), Some(last)) = (counts.first(), counts.last()) {
+            let bounds = (*first, *last);
+            let value = self.tracks_span.unwrap_or(bounds);
+            axes.push(Filter::Range(
+                RangeAxis {
+                    key: "filter-tracks",
+                    label: t!("filter-tracks"),
+                    bounds,
+                    value,
+                    unit: Unit::Plain,
+                    values: Some(counts),
+                }
+                .clamped(),
+            ));
+        }
+        axes.push(Filter::Flag(FlagAxis {
             key: "filter-owned",
             label: t!("filter-owned"),
             on: self.owned,
-        })];
+        }));
         axes.extend(self.reach.axes(self.playlists(cx).mixed()));
         axes
     }
@@ -148,12 +184,17 @@ impl TableSource for PlaylistSource {
             return true;
         }
         match change {
+            FilterChange::Range("filter-tracks", value) => {
+                self.tracks_span = Some(value);
+                true
+            }
             FilterChange::Flag("filter-owned", value) => {
                 self.owned = value;
                 true
             }
             FilterChange::Reset => {
                 self.owned = false;
+                self.tracks_span = None;
                 self.reach = Reach::default();
                 true
             }
@@ -162,7 +203,7 @@ impl TableSource for PlaylistSource {
     }
 
     fn filtered(&self, _cx: &App) -> bool {
-        self.owned || self.reach.active()
+        self.owned || self.tracks_span.is_some() || self.reach.active()
     }
 
     fn playing(&self, row: usize, cx: &App) -> bool {

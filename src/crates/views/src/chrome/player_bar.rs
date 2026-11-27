@@ -61,6 +61,8 @@ const ISLAND_GAP: f32 = 1.25;
 const ISLAND_MIDDLE: f32 = 1.3;
 /// The widest the island's pill draws, in pixels.
 const ISLAND_MAX: f32 = 800.;
+/// The width of the line along the top of a see-through bar, the same as its `border_t_1`.
+const EDGE: Pixels = px(1.);
 /// How far the island keeps from the sheet's sides and the window's foot, in pads.
 const ISLAND_CLEAR: f32 = 1.5;
 /// How far below the cover the middle of the island's seek line stands, and as far again the
@@ -891,7 +893,17 @@ impl Render for PlayerBar {
                     .when(stacked, |this| this.py_2())
                     .when_some(radius, |this, radius| this.rounded_b(radius))
                     .when(transparent, |this| {
-                        this.border_t_1().border_color(theme.border)
+                        // gpui paints a border over children, so the line is a child drawn
+                        // before the content and cannot cut through the rising volume bubble.
+                        this.border_t_1().child(
+                            div()
+                                .absolute()
+                                .top(-EDGE)
+                                .left_0()
+                                .right_0()
+                                .h(EDGE)
+                                .bg(theme.border),
+                        )
                     }),
             })
             .when_else(

@@ -94,19 +94,20 @@ impl SearchPopup {
             return;
         }
         match open {
-            true => {
-                self.place(selected, cx);
-                let input = self.input.clone();
-                window.defer(cx, move |window, cx| {
-                    input.update(cx, |input, cx| input.focus(window, cx))
-                });
-            }
-            false => {
-                self.input.update(cx, |input, cx| input.set_text("", cx));
-                let restore = self.restore.clone();
-                window.defer(cx, move |window, cx| window.focus(&restore, cx));
-            }
+            true => self.place(selected, cx),
+            false => self.input.update(cx, |input, cx| input.set_text("", cx)),
         }
+        // Rendering can run after an earlier node claimed focus for this frame.
+        let popup = self.clone();
+        window.defer(cx, move |window, cx| {
+            if popup.open.get() != open {
+                return;
+            }
+            match open {
+                true => popup.input.update(cx, |input, cx| input.focus(window, cx)),
+                false => window.focus(&popup.restore, cx),
+            }
+        });
     }
 
     /// Moves the cursor to `selected` and scrolls it into view, for when the
