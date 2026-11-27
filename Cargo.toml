@@ -11,7 +11,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/9Vcc/WispMusic"
