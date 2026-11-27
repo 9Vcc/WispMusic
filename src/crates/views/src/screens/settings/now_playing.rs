@@ -3,10 +3,10 @@ use gpui::{AnyElement, App, Context, Pixels, Window, div, px, svg};
 use i18n::t;
 use state::{FullscreenControlsAutohide, SideTab};
 use ui::{
-    ActiveTheme as _, Levels, MenuItem, OptionCard, Picker, Switch, Visualizer, VisualizerStyle,
+    ActiveTheme as _, Levels, MenuItem, OptionCard, Picker, Visualizer, VisualizerStyle,
 };
 
-use super::rows::{Announced as _, grid, segmented};
+use super::rows::{Announced as _, chip, grid, segmented};
 use super::{Group, Row, SettingsView, Slot};
 
 /// How large the cross on the Off card draws.
@@ -60,36 +60,44 @@ impl SettingsView {
     /// so fullscreen tints from the artwork with the adaptive theme off as well.
     pub(super) fn ambient_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).ambient();
-
-        self.row(
-            t!("settings-ambient"),
-            Switch::new("ambient", on)
-                .name(t!("settings-ambient"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_ambient(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-ambient");
+        let control = chip(
+            "ambient-chip",
+            "icons/blend.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_ambient(!on, cx));
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn ambient_motion_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).ambient_motion();
         let disabled = !self.settings.read(cx).ambient();
-
-        Row::new(
-            t!("settings-ambient-motion"),
-            Switch::new("ambient-motion", on)
-                .name(t!("settings-ambient-motion"))
-                .disabled(disabled)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_ambient_motion(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-ambient-motion");
+        let control = chip(
+            "ambient-motion-chip",
+            "icons/play.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
         .disabled(disabled)
-        .into_any_element()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_ambient_motion(!on, cx));
+        }));
+
+        Row::new(title, control.into_any_element())
+            .disabled(disabled)
+            .into_any_element()
     }
 
     /// How the spectrum is drawn behind the fullscreen artwork, off included.
@@ -183,17 +191,21 @@ impl SettingsView {
 
     pub(super) fn visualizer_absolute_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).visualizer_absolute();
-
-        self.row(
-            t!("settings-visualizer-absolute"),
-            Switch::new("visualizer-absolute", on)
-                .name(t!("settings-visualizer-absolute"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_visualizer_absolute(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-visualizer-absolute");
+        let control = chip(
+            "visualizer-absolute-chip",
+            "icons/music-2.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_visualizer_absolute(!on, cx));
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn fullscreen_controls_autohide_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -222,17 +234,21 @@ impl SettingsView {
 
     pub(super) fn os_fullscreen_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).os_fullscreen();
-
-        self.row(
-            t!("settings-os-fullscreen"),
-            Switch::new("os-fullscreen", on)
-                .name(t!("settings-os-fullscreen"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_os_fullscreen(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-os-fullscreen");
+        let control = chip(
+            "os-fullscreen-chip",
+            "icons/maximize.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_os_fullscreen(!on, cx));
+        }));
+
+        self.row(title, control.into_any_element())
     }
 }
 

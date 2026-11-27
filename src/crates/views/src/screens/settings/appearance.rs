@@ -7,10 +7,10 @@ use i18n::t;
 use state::{PageWidth, SYSTEM_FONT};
 use ui::{
     ActiveTheme as _, Button, Look, MAX_FONT, MAX_TRANSPARENCY, MIN_FONT, MenuItem, OptionCard,
-    Picker, Rounding, Scrubber, Switch, Theme, ThemeKind,
+    Picker, Rounding, Scrubber, Theme, ThemeKind,
 };
 
-use super::rows::{Announced as _, grid};
+use super::rows::{Announced as _, chip, grid};
 use super::{Group, SettingsView, Slot, TYPEFACES};
 use crate::shared::popups::matches_query;
 
@@ -219,20 +219,24 @@ impl SettingsView {
     pub(super) fn blur_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let look = self.look(cx);
         let overrides = self.settings.read(cx).theme_overrides();
-
-        self.row(
-            t!("settings-blur"),
-            Switch::new("blur", look.blur)
-                .name(t!("settings-blur"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let blur = !look.blur;
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_blur(blur, cx));
-                    Theme::set(Look { blur, ..look }, &overrides, cx);
-                    cx.notify();
-                }))
-                .into_any_element(),
+        let title = t!("settings-blur");
+        let control = chip(
+            "blur-chip",
+            "icons/blend.svg",
+            title.clone(),
+            title.clone(),
+            look.blur,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let blur = !look.blur;
+            this.settings
+                .update(cx, |settings, cx| settings.set_blur(blur, cx));
+            Theme::set(Look { blur, ..look }, &overrides, cx);
+            cx.notify();
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     /// Asks the platform to blur the desktop behind a see-through window. It needs something to
@@ -241,28 +245,32 @@ impl SettingsView {
         let look = self.look(cx);
         let overrides = self.settings.read(cx).theme_overrides();
         let opaque = !look.transparent;
-
-        self.row(
-            t!("settings-blur-window"),
-            Switch::new("blur-window", look.blur_window && !opaque)
-                .name(t!("settings-blur-window"))
-                .disabled(opaque)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let blur_window = !look.blur_window;
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_blur_window(blur_window, cx));
-                    Theme::set(
-                        Look {
-                            blur_window,
-                            ..look
-                        },
-                        &overrides,
-                        cx,
-                    );
-                    cx.notify();
-                }))
-                .into_any_element(),
+        let title = t!("settings-blur-window");
+        let control = chip(
+            "blur-window-chip",
+            "icons/panel-left-open.svg",
+            title.clone(),
+            title.clone(),
+            look.blur_window && !opaque,
+            cx,
         )
+        .disabled(opaque)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let blur_window = !look.blur_window;
+            this.settings
+                .update(cx, |settings, cx| settings.set_blur_window(blur_window, cx));
+            Theme::set(
+                Look {
+                    blur_window,
+                    ..look
+                },
+                &overrides,
+                cx,
+            );
+            cx.notify();
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn font_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -367,13 +375,12 @@ impl SettingsView {
             .into_any_element()
     }
 
-    /// Two option cards, Centered and Wide. Each thumbnail is a window's content area with a page
-    /// drawn in it at the width that layout gives. The choice is saved on `AppSettings`, and
+    /// Two option cards, Centered and Wide. Each thumbnail is a miniature window with its page
+    /// drawn at the width that layout gives. The choice is saved on `AppSettings`, and
     /// `Chrome::page` reads it when the pages draw.
     pub(super) fn page_width_cards(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let chosen = self.settings.read(cx).page_width();
-        let rounding = self.look(cx).rounding;
-        let height = cx.theme().metrics.list_row * 1.6;
+        let height = cx.theme().metrics.list_row * 2.2;
         let count = PageWidth::ALL.len();
 
         grid(count as u16, window, cx)
@@ -390,7 +397,7 @@ impl SettingsView {
                                 count,
                             )
                             .thumb_height(height)
-                            .thumb(page_sketch(width, rounding, cx))
+                            .thumb(page_sketch(width, height, cx))
                             .label(i18n::lookup(width.key(), None))
                             .selected(width == chosen)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -474,31 +481,35 @@ impl SettingsView {
             )
         };
         let look = self.look(cx);
-
-        self.row(
-            t!("settings-adaptive"),
-            Switch::new("adaptive-theme", on)
-                .name(t!("settings-adaptive"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let adaptive = !on;
-                    let reset = adaptive && !neutral;
-                    let kind = match reset {
-                        true => ThemeKind::Dark,
-                        false => look.kind,
-                    };
-                    let overrides = this.settings.update(cx, |settings, cx| {
-                        settings.set_adaptive_theme(adaptive, cx);
-                        if reset {
-                            settings.set_theme(kind.id(), cx);
-                        }
-                        settings.theme_overrides()
-                    });
-                    if reset {
-                        Theme::fade(Look { kind, ..look }, &overrides, cx);
-                    }
-                }))
-                .into_any_element(),
+        let title = t!("settings-adaptive");
+        let control = chip(
+            "adaptive-theme-chip",
+            "icons/blend.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let adaptive = !on;
+            let reset = adaptive && !neutral;
+            let kind = match reset {
+                true => ThemeKind::Dark,
+                false => look.kind,
+            };
+            let overrides = this.settings.update(cx, |settings, cx| {
+                settings.set_adaptive_theme(adaptive, cx);
+                if reset {
+                    settings.set_theme(kind.id(), cx);
+                }
+                settings.theme_overrides()
+            });
+            if reset {
+                Theme::fade(Look { kind, ..look }, &overrides, cx);
+            }
+        }));
+
+        self.row(title, control.into_any_element())
     }
 }
 
@@ -553,27 +564,86 @@ pub(super) fn corner(rounding: Rounding, cx: &App) -> Div {
     )
 }
 
-/// A thumbnail of a wide window's content area with a page drawn across it. The centred page
-/// takes `CENTRED_SHARE` of the width and stands in the middle, the wide page takes all of it.
-fn page_sketch(width: PageWidth, rounding: Rounding, cx: &App) -> Div {
+/// A miniature window `height` tall: a sidebar on the left and a page of a title, a row of
+/// cards and three list lines in the content area. The centred page takes `CENTRED_SHARE` of the
+/// content area and stands in its middle with four cards, the wide page fills it with six.
+fn page_sketch(width: PageWidth, height: Pixels, cx: &App) -> Div {
     let theme = cx.theme();
-    let (share, left) = match width {
-        PageWidth::Centered => (CENTRED_SHARE, (1. - CENTRED_SHARE) / 2.),
-        PageWidth::Wide => (1., 0.),
+    let radius = theme.radius * 0.25;
+    let ink = theme.foreground.opacity(0.6);
+    let muted = theme.muted_foreground.opacity(0.4);
+    let pad = height * 0.12;
+    let gap = height * 0.08;
+    let line = height * 0.04;
+    let (share, cards) = match width {
+        PageWidth::Centered => (CENTRED_SHARE, 4),
+        PageWidth::Wide => (1., 6),
     };
 
-    div().size_full().relative().child(
-        div()
-            .absolute()
-            .top(relative(0.2))
-            .bottom(relative(0.2))
-            .left(relative(left))
-            .w(relative(share))
-            .rounded(rounding.radius())
-            .border_2()
-            .border_color(theme.muted_foreground)
-            .bg(theme.secondary),
-    )
+    let sidebar = div()
+        .flex_none()
+        .h_full()
+        .w(relative(0.16))
+        .flex()
+        .flex_col()
+        .gap(gap * 0.75)
+        .p(pad * 0.75)
+        .bg(theme.secondary)
+        .border_r_1()
+        .border_color(theme.border)
+        .children(
+            [0.9, 0.7, 0.8, 0.6]
+                .into_iter()
+                .map(|share| sketch_stroke(share, line, muted, radius)),
+        );
+
+    let page = div()
+        .w(relative(share))
+        .flex()
+        .flex_col()
+        .gap(gap)
+        .child(sketch_stroke(0.3, height * 0.06, ink, radius))
+        .child(div().flex().gap(gap * 0.75).children((0..cards).map(|_| {
+            div()
+                .flex_1()
+                .h(height * 0.28)
+                .rounded(radius)
+                .bg(theme.primary.opacity(0.3))
+        })))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(gap * 0.75)
+                .child(sketch_stroke(1., line, muted, radius))
+                .child(sketch_stroke(0.9, line, muted, radius))
+                .child(sketch_stroke(0.6, line, muted, radius)),
+        );
+
+    div()
+        .size_full()
+        .flex()
+        .bg(theme.background)
+        .child(sidebar)
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .flex()
+                .justify_center()
+                .px(pad)
+                .pt(pad)
+                .child(page),
+        )
+}
+
+/// A line of text in a sketch, `width` of its slot across and `thickness` tall.
+fn sketch_stroke(width: f32, thickness: Pixels, fill: Hsla, radius: Pixels) -> Div {
+    div()
+        .w(relative(width))
+        .h(thickness)
+        .rounded(radius)
+        .bg(fill)
 }
 
 /// `content` in the middle of a thumbnail.

@@ -827,6 +827,7 @@ impl Playback {
                     this.start_local_engine(playback, cx);
                 }
                 this.refresh_local_metadata(cx);
+                this.adopt(cx);
             }
         })
         .detach();
@@ -2918,7 +2919,7 @@ impl Playback {
         if !self.queue.read(cx).is_empty() {
             return;
         }
-        let Some(slug) = self.session.read(cx).provider_slug() else {
+        let Some(slug) = self.session.read(cx).playback_slug() else {
             return;
         };
         let Some(resume) = self

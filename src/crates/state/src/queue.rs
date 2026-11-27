@@ -72,7 +72,10 @@ impl Queue {
         cx.subscribe(&session, |this, _, event, cx| match event {
             SessionEvent::SignedOut => this.switch_provider(None, cx),
             SessionEvent::SignedIn => this.sync_provider(cx),
-            SessionEvent::LocalChanged => this.refresh_local(cx),
+            SessionEvent::LocalChanged => {
+                this.sync_provider(cx);
+                this.refresh_local(cx);
+            }
             SessionEvent::Reconnected | SessionEvent::WentOffline => {}
         })
         .detach();

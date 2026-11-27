@@ -12,7 +12,7 @@ use ui::{
     drop_gap, drop_marker, grip, tabular,
 };
 
-use super::rows::drill;
+use super::rows::{chip, drill};
 use super::{Group, SettingsView, Slot};
 
 /// A lyrics source being dragged within the priority list. It draws as a chip under the cursor
@@ -73,31 +73,39 @@ impl SettingsView {
 
     pub(super) fn lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).lyrics_enabled();
-
-        self.row(
-            t!("settings-lyrics"),
-            Switch::new("lyrics-enabled", on)
-                .name(t!("settings-lyrics"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_lyrics_enabled(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-lyrics");
+        let control = chip(
+            "lyrics-enabled-chip",
+            "icons/mic-vocal.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_lyrics_enabled(!on, cx));
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn desktop_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).desktop_lyrics();
-        self.row(
-            t!("settings-desktop-lyrics"),
-            Switch::new("desktop-lyrics", on)
-                .name(t!("settings-desktop-lyrics"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_desktop_lyrics(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-desktop-lyrics");
+        let control = chip(
+            "desktop-lyrics-chip",
+            "icons/monitor.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_desktop_lyrics(!on, cx));
+        }));
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn desktop_lyrics_cover_color_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -323,18 +331,22 @@ impl SettingsView {
 
     pub(super) fn word_synced_first_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).lyrics_word_synced_first();
-
-        self.row(
-            t!("settings-lyrics-word-synced-first"),
-            Switch::new("lyrics-word-synced-first", on)
-                .name(t!("settings-lyrics-word-synced-first"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.update(cx, |settings, cx| {
-                        settings.set_lyrics_word_synced_first(!on, cx)
-                    });
-                }))
-                .into_any_element(),
+        let title = t!("settings-lyrics-word-synced-first");
+        let control = chip(
+            "lyrics-word-synced-first-chip",
+            "icons/align-left.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings.update(cx, |settings, cx| {
+                settings.set_lyrics_word_synced_first(!on, cx)
+            });
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn panel_lyrics_size_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -624,17 +636,21 @@ impl SettingsView {
 
     pub(super) fn karaoke_lyrics_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.settings.read(cx).karaoke_lyrics();
-
-        self.row(
-            t!("settings-karaoke-lyrics"),
-            Switch::new("karaoke-lyrics", on)
-                .name(t!("settings-karaoke-lyrics"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings
-                        .update(cx, |settings, cx| settings.set_karaoke_lyrics(!on, cx));
-                }))
-                .into_any_element(),
+        let title = t!("settings-karaoke-lyrics");
+        let control = chip(
+            "karaoke-lyrics-chip",
+            "icons/mic-vocal.svg",
+            title.clone(),
+            title.clone(),
+            on,
+            cx,
         )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings
+                .update(cx, |settings, cx| settings.set_karaoke_lyrics(!on, cx));
+        }));
+
+        self.row(title, control.into_any_element())
     }
 
     pub(super) fn karaoke_cover_color_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -844,13 +860,19 @@ impl SettingsView {
             .gap_2()
             .when(on, |this| this.child(picker))
             .child(
-                Switch::new("romanized-lyrics", on)
-                    .name(t!("settings-romanized-lyrics"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.update(cx, |settings, cx| {
-                            settings.set_romanized_lyrics(!on, cx);
-                        });
-                    })),
+                chip(
+                    "romanized-lyrics-chip",
+                    "icons/languages.svg",
+                    t!("settings-romanized-lyrics"),
+                    t!("settings-romanized-lyrics"),
+                    on,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.update(cx, |settings, cx| {
+                        settings.set_romanized_lyrics(!on, cx);
+                    });
+                })),
             );
 
         self.row(t!("settings-romanized-lyrics"), action.into_any_element())

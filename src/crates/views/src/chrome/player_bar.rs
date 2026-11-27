@@ -8,19 +8,19 @@ use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
-    Render, SharedString, StyledText,
+    Render, SharedString, StyledText, Task,
 };
-use gpui::{Window, deferred, div, px};
+use gpui::{Window, deferred, div, px, rems};
 use i18n::t;
 use input::{ToggleLyrics, ToggleQueue};
 use state::{AppSettings, Playback, PlayerBarLayout, Queue, SideTab, Wisp};
 use ui::{
     Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Perch, Pinnable, Popup, Room,
-    Scrollbar,
+    Scrollbar, Sprung,
 };
 
 use crate::chrome::SpeedButton;
-use crate::chrome::timeline::Timeline;
+use crate::chrome::timeline::{Released, Timeline};
 use crate::chrome::{Chrome, SidebarRight};
 use crate::shared::marquee::{MarqueeState, marquee};
 use crate::shared::menus::ItemMenu;
@@ -55,6 +55,26 @@ const TITLE_ROOM: f32 = 1.4;
 const STACK_GAP: f32 = 0.5;
 /// The gap between the cover and the title in a now playing row, in rems.
 const COVER_GAP: f32 = 0.75;
+/// The island's `gap_5` between its transport, its middle and its tools, in rems.
+const ISLAND_GAP: f32 = 1.25;
+/// How far the island keeps from the sheet's sides and the window's foot, in pads.
+const ISLAND_CLEAR: f32 = 1.5;
+/// How far below the cover the middle of the island's seek line stands, and as far again the
+/// island's content runs on below it, in pads.
+const LINE_DROP: f32 = 0.5;
+/// The space inside the island above its content and below it, in pads.
+const ISLAND_INSET: f32 = 1.;
+/// How tall the seek bar's hit area stands, in pads, as `ui::Scrubber` lays it out. Its line
+/// sits in the middle of it.
+const SEEK_HIT: f32 = 3.;
+/// How long the pointer rests on the island's seek line before the line opens.
+const SEEK_DWELL: Duration = Duration::from_millis(40);
+/// How long the spring that opens and shuts the seek line takes, with the cover and title fading
+/// out and back as it goes, and how far it swells past open before it settles.
+const SEEK_SPRING: Duration = Duration::from_millis(420);
+const SEEK_BOUNCE: f32 = 0.2;
+/// How close to open or shut the seek line's spring has to come to count as landed.
+const SEEK_REST: f32 = 1e-3;
 
 /// How the bar draws its volume control.
 #[derive(Clone, Copy)]
@@ -77,6 +97,13 @@ pub(crate) struct PlayerBar {
     artist_marquee: MarqueeState,
     /// over the button where the bar has no room for one beside it.
     rising: RisingVolume,
+    /// How far the island's seek line has opened on its spring, 0 shut and 1 open with a little
+    /// swing past either end, and whether it is headed for open. It opens once the pointer has
+    /// rested on the line and shuts when it leaves.
+    seek_open: Sprung,
+    opening: bool,
+    /// The wait before the line opens, kept so the pointer leaving the line drops it.
+    dwell: Option<Task<()>>,
 }
 
 impl VolumeHost for PlayerBar {
@@ -106,6 +133,13 @@ impl PlayerBar {
         let playlist_scrollbar = cx.new(|_| Scrollbar::inset().watching(me));
         let speed = cx.new(SpeedButton::new);
         let timeline = cx.new(|cx| Timeline::new(playback.clone(), cx));
+        // Pointer hover is suspended during a drag, so where the pointer lets go is what says
+        // whether it is still on the seek line.
+        cx.subscribe(&timeline, |this, timeline, released: &Released, cx| {
+            let on_seek = timeline.read(cx).on_seek(released.0, cx);
+            this.aim_seek(on_seek, cx);
+        })
+        .detach();
 
         Self {
             playback,
@@ -117,6 +151,34 @@ impl PlayerBar {
             title_marquee: MarqueeState::new(),
             artist_marquee: MarqueeState::new(),
             rising: RisingVolume::new("volume-rise"),
+            seek_open: Sprung::at(0.),
+            opening: false,
+            dwell: None,
+        }
+    }
+
+    /// Opens the island's seek line once the pointer has rested on it for `SEEK_DWELL`, and shuts
+    /// it as soon as the pointer is off it, unless a drag on it is still going.
+    fn aim_seek(&mut self, on_seek: bool, cx: &mut Context<Self>) {
+        if on_seek {
+            if self.opening || self.dwell.is_some() {
+                return;
+            }
+            self.dwell = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SEEK_DWELL).await;
+                this.update(cx, |this, cx| {
+                    this.dwell = None;
+                    this.opening = true;
+                    cx.notify();
+                })
+                .ok();
+            }));
+            return;
+        }
+        self.dwell = None;
+        if self.opening && !self.timeline.read(cx).dragging() {
+            self.opening = false;
+            cx.notify();
         }
     }
 
@@ -140,9 +202,11 @@ impl PlayerBar {
         self.open_context_menu(track, position, cx);
     }
 
-    fn hover(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn hover(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.timeline
             .update(cx, |timeline, cx| timeline.hover(event.position, cx));
+        let on_seek = Self::floating(window, cx) && self.timeline.read(cx).over_seek();
+        self.aim_seek(on_seek, cx);
     }
 
     /// 音量控件与 Wisp 现版一致：只留一颗静音按钮，指针停在上面时升起竖向滑条。
@@ -332,7 +396,8 @@ impl PlayerBar {
     fn cover_side(window: &Window, cx: &App) -> Pixels {
         let theme = cx.theme();
         let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
-        let side = match layout == PlayerBarLayout::Compact && !Self::stacked(window, layout) {
+        let small = matches!(layout, PlayerBarLayout::Compact | PlayerBarLayout::Island);
+        let side = match small && !Self::stacked(window, layout) {
             true => theme.metrics.thumb,
             false => theme.metrics.row,
         };
@@ -622,7 +687,7 @@ impl PlayerBar {
     /// in the shared responsive layout. Only the whole window's width determines the choice.
     fn stacked(window: &Window, layout: PlayerBarLayout) -> bool {
         let room = match layout {
-            PlayerBarLayout::Centered => Room::Wide,
+            PlayerBarLayout::Centered | PlayerBarLayout::Island => Room::Wide,
             _ => Room::Roomy,
         };
         !Chrome::window_room(window).fits(room)
@@ -643,6 +708,27 @@ impl PlayerBar {
         ui::snapped((drop / 2.).max(Pixels::ZERO), window)
     }
 
+    /// The island's pill height and the clear space the bar keeps around it, above and below as
+    /// on the sheet's sides. The pill holds the cover with the seek line under it and no more.
+    pub(crate) fn island(cx: &App) -> (Pixels, Pixels) {
+        let metrics = cx.theme().metrics;
+        let pill = metrics.thumb + metrics.pad * (LINE_DROP + ISLAND_INSET) * 2.;
+        (pill, metrics.pad * ISLAND_CLEAR)
+    }
+
+    /// The padding inside the island's round ends, which centres a control's height on the curve
+    /// so the first and last buttons sit as far from the edge as from the top and bottom.
+    fn island_pad(pill: Pixels, cx: &App) -> Pixels {
+        (pill - cx.theme().metrics.control) / 2.
+    }
+
+    /// Whether the bar floats over the page as an island. The workspace then stands it over the
+    /// page and lets the page run under it to the window's foot.
+    pub(crate) fn floating(window: &Window, cx: &App) -> bool {
+        let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
+        layout == PlayerBarLayout::Island && !Self::stacked(window, layout)
+    }
+
     /// The height the workspace reserves, shared by the overlay's bottom scroll clearance.
     pub(crate) fn height(window: &Window, cx: &gpui::App) -> Pixels {
         let theme = *cx.theme();
@@ -650,6 +736,10 @@ impl PlayerBar {
         let height = match (Self::stacked(window, layout), layout) {
             (true, _) => theme.metrics.player_bar + theme.metrics.pad * 3.,
             (false, PlayerBarLayout::Compact) => theme.metrics.row + theme.metrics.pad * 2.,
+            (false, PlayerBarLayout::Island) => {
+                let (pill, gap) = Self::island(cx);
+                pill + gap * 2.
+            }
             _ => theme.metrics.player_bar,
         };
         ui::snapped(height, window)
@@ -693,12 +783,31 @@ impl Render for PlayerBar {
             .when(picker, |this| this.child(self.speed.clone()))
             .children(sides);
 
+        // Only the island has a seek line that opens. Another layout, or a window too narrow for the
+        // island, starts it shut the next time.
+        let opened = match Self::floating(window, cx) {
+            true => {
+                let spring = ui::spring(ui::paced(SEEK_SPRING).as_secs_f32(), SEEK_BOUNCE);
+                let target = f32::from(u8::from(self.opening));
+                Some(self.seek_open.follow(target, spring, SEEK_REST, window, cx))
+            }
+            false => {
+                self.opening = false;
+                self.dwell = None;
+                self.seek_open.jump(0.);
+                None
+            }
+        };
+        self.timeline
+            .update(cx, |timeline, cx| timeline.spread(opened, cx));
         let seek = self.timeline.clone();
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let radius = crate::chrome::window_radius(self.settings.read(cx), cx, window);
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let radius: Option<Pixels> = None;
+        let floating = Self::floating(window, cx);
+        let (pill, clear) = Self::island(cx);
 
         let base = div()
             .id("player-bar")
@@ -706,18 +815,32 @@ impl Render for PlayerBar {
             .aria_label(t!("settings-page-player-bar"))
             .flex()
             .w_full()
-            .h(height)
             .flex_none()
-            .px_5()
-            .when(stacked, |this| this.py_2())
-            .when_some(radius, |this, radius| this.rounded_b(radius))
+            .map(|this| match floating {
+                true => this
+                    .h(pill)
+                    .max_w(px(800.))
+                    .px_5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_md(),
+                false => this
+                    .h(height)
+                    .px_5()
+                    .when(stacked, |this| this.py_2())
+                    .when_some(radius, |this, radius| this.rounded_b(radius))
+                    .border_t_1()
+                    .border_color(theme.border),
+            })
             .when_else(
                 transparent,
                 |this| ui::bar_surface(this, cx).text_color(theme.popover_foreground),
-                |this| this.when(!theme.transparent, |this| this.bg(theme.secondary)),
+                |this| match floating {
+                    true => this.bg(theme.popover).text_color(theme.popover_foreground),
+                    false => this.when(!theme.transparent, |this| this.bg(theme.secondary)),
+                },
             )
-            .border_t_1()
-            .border_color(theme.border)
             .occlude()
             .on_mouse_move(cx.listener(Self::hover));
 
@@ -801,6 +924,85 @@ impl Render for PlayerBar {
                         .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
+            (false, PlayerBarLayout::Island) => {
+                let overlap = theme.metrics.pad * (SEEK_HIT / 2. - LINE_DROP);
+                div()
+                    .id("player-island")
+                    .flex()
+                    .w_full()
+                    .h(Self::height(window, cx))
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .px(clear)
+                    .child(
+                        base.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if !*hovered {
+                                this.aim_seek(false, cx);
+                                this.timeline.update(cx, |timeline, cx| timeline.leave(cx));
+                            }
+                        }))
+                        .flex()
+                        .items_center()
+                        .gap(rems(ISLAND_GAP))
+                        .w_full()
+                        .h(ui::snapped(pill, window))
+                        .px(Self::island_pad(pill, cx))
+                        .child(
+                            div()
+                                .flex_none()
+                                .child(transport(&self.playback, false, cx)),
+                        )
+                        .child(
+                            // The seek bar runs under the cover and the title both. Opening it
+                            // fades them out and puts its clocks in their place.
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(rems(COVER_GAP))
+                                        .opacity((1. - opened.unwrap_or_default()).clamp(0., 1.))
+                                        // Opacity leaves the row under the pointer, so once it
+                                        // has faded all the way it is hidden for good measure and
+                                        // a click on the clocks cannot reach its links.
+                                        .when(opened.is_some_and(|open| open >= 1.), |this| {
+                                            this.invisible()
+                                        })
+                                        .child(self.artwork(window, cx))
+                                        .child(
+                                            self.track_details(false, cx)
+                                                .gap_0()
+                                                .flex_1()
+                                                .min_w_0(),
+                                        ),
+                                )
+                                // The seek bar's hit area stands taller than its line, which sits
+                                // in the middle of it. The row overlaps the cover's row and the
+                                // pill's inset by as much on either side, so in the flow it takes
+                                // only `LINE_DROP` above the line's middle and as much below.
+                                .child(div().flex_none().w_full().my(-overlap).child(seek)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_2()
+                                .child(buttons)
+                                .child(play_mode(&self.playback, false, cx))
+                                .child(self.sound(cx))
+                                .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
+                                .child(self.mini_button())
+                                .child(self.fullscreen_button(cx)),
+                        ),
+                    )
+            }
             (false, PlayerBarLayout::Compact) => base
                 .items_center()
                 .gap_3()

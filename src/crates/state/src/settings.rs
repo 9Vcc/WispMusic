@@ -317,8 +317,7 @@ pub const LYRICS_SOURCES: [&str; 3] = [LOCAL, "Kugou", "NetEase"];
 /// [wisp] 唯一流媒体 provider 的 slug。
 const NETEASE: &str = "netease";
 /// [wisp] 本地文件的 provider slug，与 `LocalProvider::slug()` 一致；它不进 providers 列表，
-/// 但设置里可以选它作为启动页。
-#[cfg(test)]
+/// 也不代表启动会话，旧设置里的这个值需要迁移掉。
 const LOCAL_PROVIDER: &str = "local";
 
 /// A pin together with the provider it belongs to. The pin is flattened so the stored JSON
@@ -501,16 +500,19 @@ pub enum PlayerBarLayout {
     Classic,
     Centered,
     Compact,
+    /// A rounded pill that floats over the page instead of a bar across the window's foot.
+    Island,
 }
 
 impl PlayerBarLayout {
-    pub const ALL: [Self; 3] = [Self::Classic, Self::Centered, Self::Compact];
+    pub const ALL: [Self; 4] = [Self::Classic, Self::Centered, Self::Compact, Self::Island];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Classic => "classic",
             Self::Centered => "centered",
             Self::Compact => "compact",
+            Self::Island => "island",
         }
     }
 
@@ -520,6 +522,7 @@ impl PlayerBarLayout {
             Self::Classic => "settings-player-bar-classic",
             Self::Centered => "settings-player-bar-centered",
             Self::Compact => "settings-player-bar-compact",
+            Self::Island => "settings-player-bar-island",
         }
     }
 
@@ -528,6 +531,7 @@ impl PlayerBarLayout {
         match id {
             "centered" => Self::Centered,
             "compact" => Self::Compact,
+            "island" => Self::Island,
             _ => Self::Classic,
         }
     }
@@ -768,7 +772,7 @@ impl Values {
         if self
             .provider
             .as_deref()
-            .is_some_and(|provider| provider.trim().is_empty())
+            .is_some_and(|provider| provider.trim().is_empty() || provider == LOCAL_PROVIDER)
         {
             self.provider = None;
         }
@@ -885,7 +889,7 @@ impl StateValues {
     /// last-used provider needs settling: it is a slug, and the slugs of the providers Wisp no
     /// longer ships would select nothing at startup.
     fn settled(mut self) -> Self {
-        if self.provider.trim().is_empty() {
+        if self.provider.trim().is_empty() || self.provider == LOCAL_PROVIDER {
             self.provider = NETEASE.to_owned();
         }
         // A resumed queue belongs to whatever provider is available at launch; dynamic plugin
@@ -3763,11 +3767,10 @@ mod tests {
     }
 
     #[test]
-    fn the_local_provider_survives_settling_and_a_fresh_file_keeps_no_choice() {
-        // 本地 provider 仍是合法的启动页，迁移不能把它一起改掉。
+    fn the_retired_local_session_choice_migrates_and_a_fresh_file_keeps_no_choice() {
         let mut values: Values = serde_json::from_str(r#"{"provider": "local"}"#).unwrap();
         values.settle_provider();
-        assert_eq!(values.provider.as_deref(), Some(LOCAL_PROVIDER));
+        assert_eq!(values.provider, None);
 
         // 没写 provider 的文件保持「跟随上次使用」，迁移不替它写死一个值。
         let mut values: Values = serde_json::from_str("{}").unwrap();
@@ -3784,12 +3787,12 @@ mod tests {
         .settled();
         assert_eq!(retired.provider, "retired-provider");
 
-        let kept = StateValues {
+        let migrated = StateValues {
             provider: LOCAL_PROVIDER.to_owned(),
             ..StateValues::default()
         }
         .settled();
-        assert_eq!(kept.provider, LOCAL_PROVIDER);
+        assert_eq!(migrated.provider, NETEASE);
     }
 
     #[test]

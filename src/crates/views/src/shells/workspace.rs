@@ -166,7 +166,8 @@ impl Render for Workspace {
         let covered = self.sidebar_right.read(cx).covers_content(window);
         let overlay = self.sidebar.read(cx).overlays();
         let bar_height = PlayerBar::height(window, cx);
-        let underlap = self.settings.read(cx).player_bar_translucent();
+        let floating = PlayerBar::floating(window, cx);
+        let underlap = self.settings.read(cx).player_bar_translucent() || floating;
         let bottom = match underlap {
             true => bar_height,
             false => Pixels::ZERO,
@@ -358,11 +359,21 @@ impl Render for Workspace {
                 div()
                     .relative()
                     .when(underlap, |bar| bar.absolute().left_0().right_0().bottom_0())
-                    .child(
-                        self.player_bar
+                    .when(floating, |bar| {
+                        bar.h(bar_height)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .px(PlayerBar::island(cx).1)
+                    })
+                    .child(match floating {
+                        true => self.player_bar.clone().into_any_element(),
+                        false => self
+                            .player_bar
                             .clone()
-                            .cached(StyleRefinement::default().w_full().h(bar_height)),
-                    ),
+                            .cached(StyleRefinement::default().w_full().h(bar_height))
+                            .into_any_element(),
+                    }),
             )
             // Deferred so the cards sit above the sidebars' resize grips. The root draws the
             // dialogs after the shell, so those still cover them.

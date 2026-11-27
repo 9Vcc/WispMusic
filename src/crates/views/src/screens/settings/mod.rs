@@ -17,7 +17,7 @@ use state::{
     AppSettings, Equalizer, Io, Outputs, Playback, Scan, Session, SessionState, Sleep, Wisp,
 };
 use ui::{
-    ActiveTheme as _, Card, Cascade, Deck, Dismiss, Dropdown, Input, Lazy, Popovers, Scrollbar,
+    ActiveTheme as _, Card, Cascade, Deck, Dismiss, Dropdown, Input, Lazy, Popovers, Room, Scrollbar,
     ScrubberState, SelectNext, SelectPrevious, Submit, Unfold, Vacancy, ease_out_quad, paced,
     snapped,
 };
@@ -54,6 +54,8 @@ pub(crate) use rows::Row;
 
 /// The space between two groups of a page.
 pub(super) const GROUPS: Pixels = px(40.);
+/// How wide the column of group names beside the groups stands, in list rows.
+const LABEL_COLUMN: f32 = 2.4;
 /// How much a query found in a setting's title counts over one found in its detail.
 const TITLE_WEIGHT: u32 = 2;
 /// How many settings the panel under the search field suggests.
@@ -1459,12 +1461,29 @@ impl SettingsView {
                 .children(rows)
         });
 
-        div()
+        let content = div()
             .flex()
             .flex_col()
-            .children(heading)
+            .flex_1()
+            .min_w_0()
             .children(cards)
-            .children(rows)
+            .children(rows);
+        let side = Layout::of(window, cx).room().fits(Room::Roomy);
+        let label_width = cx.theme().metrics.list_row * LABEL_COLUMN;
+
+        div()
+            .flex()
+            .when(side, |this| this.flex_row().items_start().gap_6())
+            .when(!side, |this| this.flex_col().gap_3())
+            .when_some(heading, |this, heading| {
+                this.child(
+                    div()
+                        .when(side, |this| this.flex_none().w(label_width))
+                        .when(!side, |this| this.w_full())
+                        .child(heading),
+                )
+            })
+            .child(content)
             .into_any_element()
     }
 

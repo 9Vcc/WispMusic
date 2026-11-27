@@ -11,6 +11,7 @@ settings-player-bar-layout-detail = 排列歌曲信息、播放控件和进度�
 settings-player-bar-classic = 经典
 settings-player-bar-compact = 紧凑
 settings-player-bar-centered = 居中
+settings-player-bar-island = 悬浮胶囊
 settings-player-bar-surface = 表面
 settings-player-bar-transparent = 透明播放栏
 settings-player-bar-transparent-detail = 让页面和侧边栏在毛玻璃播放栏下方滚动
