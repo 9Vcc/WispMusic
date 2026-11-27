@@ -1,9 +1,9 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Background, Div, ElementId, Hsla, Pixels, ScrollHandle, ScrollEvent,
+    AnyElement, App, Background, Bounds, Div, ElementId, Hsla, Pixels, ScrollEvent, ScrollHandle,
     SharedString, Stateful, StyleRefinement, Window, div, ease_in_out, linear_color_stop,
     linear_gradient, px,
 };
@@ -11,7 +11,7 @@ use gpui::{
 use crate::button::Button;
 use crate::glass::{blurring, glass};
 use crate::glide::Glide;
-use crate::motion::{Motion, Motioned as _, animates};
+use crate::motion::{Motion, Motioned as _, Springs, Sprung, animates};
 use crate::theme::ActiveTheme as _;
 
 const LINE: f32 = 1.;
@@ -28,6 +28,8 @@ const EDGE: Pixels = px(1.);
 /// How a fade leaves. There is nothing to ease in: the tabs behind the edge are already there
 /// the moment the row moves, so the gradient arrives with them and only its exit is animated.
 const HUSH: Motion = Motion::Base;
+/// How close the selection indicator has to be before it lands.
+const TAB_SLIDE_REST: f32 = 0.01;
 
 #[derive(IntoElement)]
 pub struct Tabs {
@@ -55,6 +57,7 @@ pub struct TabBar {
     items: Vec<Button>,
     blurred: bool,
     reveal: Option<usize>,
+    selected: Option<usize>,
 }
 
 impl TabBar {
@@ -67,6 +70,7 @@ impl TabBar {
             items: Vec::new(),
             blurred: false,
             reveal: None,
+            selected: None,
         }
     }
 
@@ -94,11 +98,44 @@ impl TabBar {
         self.reveal = index;
         self
     }
+
+    /// The selected item, under an indicator that slides when the selection changes.
+    pub fn selected(mut self, index: Option<usize>) -> Self {
+        self.selected = index;
+        self
+    }
 }
 
 impl Styled for TabBar {
     fn style(&mut self) -> &mut StyleRefinement {
         self.base.style()
+    }
+}
+
+struct Selection {
+    bounds: Vec<Bounds<Pixels>>,
+    left: Sprung,
+    width: Sprung,
+    ready: bool,
+}
+
+impl Selection {
+    fn new() -> Self {
+        Self {
+            bounds: Vec::new(),
+            left: Sprung::at(0.),
+            width: Sprung::at(0.),
+            ready: false,
+        }
+    }
+
+    fn target(&self, index: Option<usize>) -> Option<Bounds<Pixels>> {
+        let base = self.bounds.first()?.origin;
+        let target = self.bounds.get(index?)?;
+        Some(Bounds {
+            origin: target.origin - base,
+            size: target.size,
+        })
     }
 }
 
@@ -212,6 +249,7 @@ impl RenderOnce for TabBar {
             items,
             blurred,
             reveal,
+            selected,
         } = self;
         let theme = *cx.theme();
         let glassy = blurred && blurring(cx);
@@ -231,6 +269,10 @@ impl RenderOnce for TabBar {
         let radius = (rounding - rem * PAD).max(px(0.));
         let capped = overrides.max_size.width.is_some();
         let moving = animates(cx);
+        let item_count = items.len();
+        let selection = window.use_keyed_state((id.clone(), "selected"), cx, |_, _| {
+            RefCell::new(Selection::new())
+        });
         let rails = capped.then(|| {
             let rail = window.use_keyed_state((id.clone(), "rail"), cx, |_, _| Rail::new());
             let rail = rail.read(cx);
@@ -241,7 +283,8 @@ impl RenderOnce for TabBar {
                     true => {
                         rail.revealed.set(reveal);
                         if let Some(index) = reveal {
-                            rail.scroll.scroll_to_item(index);
+                            // the selection indicator is the row's first child
+                            rail.scroll.scroll_to_item(index + 1);
                         }
                     }
                     false => window.request_animation_frame(),
@@ -259,15 +302,103 @@ impl RenderOnce for TabBar {
                 washes: rail.washes([at > EDGE, at < hidden - EDGE], moving),
             }
         });
+        // A capped row hands its child bounds to the scroll handle, so its measurement comes
+        // from there rather than the prepaint listener the row would otherwise report through.
+        let measured = rails.as_ref().and_then(|rails| {
+            let base = rails.scroll.bounds_for_item(1)?;
+            if base.size.width <= Pixels::ZERO {
+                return None;
+            }
+            (0..item_count)
+                .map(|index| {
+                    let bounds = rails.scroll.bounds_for_item(index + 1)?;
+                    Some(Bounds {
+                        origin: bounds.origin - base.origin,
+                        size: bounds.size,
+                    })
+                })
+                .collect()
+        });
+        let indicator = selection.update(cx, |selection, cx| {
+            let mut selection = selection.borrow_mut();
+            if let Some(measured) = measured {
+                selection.bounds = measured;
+            }
+            let target = selection.target(selected);
+            if let Some(target) = target {
+                if !selection.ready {
+                    selection.left.jump(f32::from(target.origin.x));
+                    selection.width.jump(f32::from(target.size.width));
+                    selection.ready = true;
+                } else {
+                    selection.left.follow(
+                        f32::from(target.origin.x),
+                        Springs::RESPONSIVE,
+                        TAB_SLIDE_REST,
+                        window,
+                        cx,
+                    );
+                    selection.width.follow(
+                        f32::from(target.size.width),
+                        Springs::RESPONSIVE,
+                        TAB_SLIDE_REST,
+                        window,
+                        cx,
+                    );
+                }
+            } else {
+                selection.ready = false;
+                if selected.is_some() {
+                    window.request_animation_frame();
+                }
+            }
+            match target {
+                Some(target) => (
+                    px(selection.left.position()),
+                    target.origin.y,
+                    px(selection.width.position()),
+                    target.size.height,
+                ),
+                None => (Pixels::ZERO, Pixels::ZERO, Pixels::ZERO, Pixels::ZERO),
+            }
+        });
+        let tracked = selection.clone();
+        let measure_selection =
+            move |bounds: Vec<Bounds<Pixels>>, _window: &mut Window, cx: &mut App| {
+                let bounds = &bounds[bounds.len().saturating_sub(item_count)..];
+                tracked.update(cx, |selection, cx| {
+                    let mut selection = selection.borrow_mut();
+                    if selection.bounds.as_slice() != bounds {
+                        selection.bounds = bounds.to_vec();
+                        drop(selection);
+                        cx.notify();
+                    }
+                });
+            };
 
         let row = div()
-            .id(id)
-            .role(gpui::accesskit::Role::TabList)
-            .when_some(name, |row, name| row.aria_label(name))
+            .relative()
             .flex()
             .items_center()
             .gap_1()
             .min_w_0()
+            .when(rails.is_none(), |row| {
+                row.on_children_prepainted(measure_selection)
+            })
+            .child({
+                let (left, top, width, height) = indicator;
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(top)
+                    .w(width)
+                    .h(height)
+                    .rounded(radius)
+                    .bg(theme.secondary_active)
+            })
+            .id(id)
+            .role(gpui::accesskit::Role::TabList)
+            .when_some(name, |row, name| row.aria_label(name))
             .when_some(rails.clone(), |row, rails| {
                 // No `restrict_scroll_to_axis`: a bar that scrolls in one axis only takes the
                 // wheel whichever way it was turned, which is what a row of tabs wants.
@@ -288,13 +419,13 @@ impl RenderOnce for TabBar {
                     })
             })
             .children({
-                let count = items.len();
                 items.into_iter().enumerate().map(move |(index, item)| {
                     item.tab()
                         .aria_position_in_set(index + 1)
-                        .aria_size_of_set(count)
+                        .aria_size_of_set(item_count)
                         .flex_shrink_0()
                         .rounded(radius)
+                        .when(selected.is_some(), Button::selection_backgroundless)
                 })
             });
         // A glass bar has no flat fill to paint a fade with: a wash of its own thin fill hides

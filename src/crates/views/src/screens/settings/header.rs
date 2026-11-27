@@ -69,6 +69,7 @@ impl Render for SettingsHeader {
             .max_w_full()
             .blurred()
             .reveal(shown)
+            .selected(shown)
             .items(SettingsTab::ALL.map(|tab| {
                 Button::new(tab.id())
                     .icon(tab.icon())
