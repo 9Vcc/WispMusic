@@ -232,19 +232,33 @@ impl Render for Workspace {
             }
             WorkspaceHeader::Page(header) => header.clone().into_any_element(),
         });
-        // The island follows the sheet as either sidebar moves, and reaches over them only when
-        // the sheet becomes too narrow for every control.
+        // The island follows the sheet as either sidebar moves, or stays at the window's centre
+        // when the listener asks for that. It reaches over a sidebar only when the sheet is too
+        // narrow for every control.
+        let viewport = window.viewport_size().width;
+        let layout = self.settings.read(cx).player_bar_layout();
+        let page = self.settings.read(cx).player_bar_island_page();
         let island = floating.then(|| {
-            let sheet_left = overlay_width + left;
-            let sheet_width = (window.viewport_size().width - sheet_left - right).max(Pixels::ZERO);
-            let target = f32::from(!PlayerBar::island_fits(sheet_width, window, cx));
+            let (sheet_left, sheet_width) = match page {
+                true => (
+                    overlay_width + left,
+                    (viewport - overlay_width - left - right).max(Pixels::ZERO),
+                ),
+                false => (Pixels::ZERO, viewport),
+            };
+            let target =
+                f32::from(!page || !PlayerBar::island_fits(layout, sheet_width, window, cx));
             let shift = self
                 .island_shift
                 .get_or_insert_with(|| Sprung::at(target))
                 .follow(target, ISLAND_SHIFT, SHIFT_REST, window, cx);
-            PlayerBar::island_span(sheet_left, sheet_width, shift, window, cx)
+            PlayerBar::island_span(layout, sheet_left, sheet_width, shift, window, cx)
         });
-        let viewport = window.viewport_size().width;
+        if island.is_none() {
+            self.island_shift = None;
+        }
+        self.player_bar
+            .update(cx, |bar, cx| bar.stand(island.map(|(_, width)| width), cx));
         let (sheet_start, sheet_end) = (overlay_width + left, viewport - right);
         let over = island.is_some_and(|(at, width)| at < sheet_start || at + width > sheet_end);
         Chrome::set_island_clear(island.is_some() && !over, cx);

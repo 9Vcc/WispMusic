@@ -98,6 +98,8 @@ enum Slot {
     VisualizerScreens,
     VisualizerAbsolute,
     PlayerBarLayout,
+    PlayerBarIsland,
+    PlayerBarIslandPage,
     PlayerBarTransparent,
     PlayerBarTimeLeft,
     FullscreenControlsAutohide,
@@ -1010,6 +1012,14 @@ impl SettingsView {
                 t!("settings-player-bar-layout"),
                 t!("settings-player-bar-layout-detail"),
             ),
+            Slot::PlayerBarIsland => (
+                t!("settings-player-bar-island"),
+                t!("settings-player-bar-island-detail"),
+            ),
+            Slot::PlayerBarIslandPage => (
+                t!("settings-player-bar-island-page"),
+                t!("settings-player-bar-island-page-detail"),
+            ),
             Slot::PlayerBarTransparent => (
                 t!("settings-player-bar-transparent"),
                 t!("settings-player-bar-transparent-detail"),
@@ -1284,6 +1294,8 @@ impl SettingsView {
             Slot::AmbientMotion => self.ambient_motion_row(cx),
             Slot::Visualizer => div().into_any_element(),
             Slot::PlayerBarLayout => div().into_any_element(),
+            Slot::PlayerBarIsland => self.player_bar_island_row(cx),
+            Slot::PlayerBarIslandPage => self.player_bar_island_page_row(cx),
             Slot::PlayerBarTransparent => self.player_bar_transparent_row(cx),
             Slot::PlayerBarTimeLeft => self.player_bar_time_left_row(cx),
             Slot::VisualizerScreens => self.visualizer_screens_row(cx),

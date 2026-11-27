@@ -4,10 +4,10 @@ use gpui::{
     relative,
 };
 use i18n::t;
-use state::PlayerBarLayout;
+use state::{PlayerBarIsland, PlayerBarLayout};
 use ui::{ActiveTheme as _, OptionCard};
 
-use super::rows::{Announced as _, grid, chip};
+use super::rows::{Announced as _, chip, grid, segmented};
 use super::{Group, Row, SettingsView, Slot};
 
 impl SettingsView {
@@ -16,6 +16,8 @@ impl SettingsView {
         vec![
             Group::new("settings-player-bar-layout", "icons/layout-grid.svg")
                 .cards(Slot::PlayerBarLayout),
+            Group::new("settings-player-bar-island", "icons/rectangle-ellipsis.svg")
+                .rows([Slot::PlayerBarIsland, Slot::PlayerBarIslandPage]),
             Group::new("settings-player-bar-surface", "icons/blend.svg")
                 .rows([Slot::PlayerBarTransparent]),
             Group::new("settings-player-bar-time", "icons/rotate-ccw-clock.svg")
@@ -48,6 +50,7 @@ impl SettingsView {
     pub(super) fn player_bar_cards(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let chosen = self.settings.read(cx).player_bar_layout();
         let transparent = self.settings.read(cx).player_bar_translucent();
+        let island = self.settings.read(cx).player_bar_island() != PlayerBarIsland::Off;
         let height = cx.theme().metrics.list_row * 1.6;
         grid(PlayerBarLayout::ALL.len() as u16, window, cx)
             .children(
@@ -63,7 +66,7 @@ impl SettingsView {
                                 PlayerBarLayout::ALL.len(),
                             )
                             .thumb_height(height)
-                            .thumb(sketch(layout, transparent, height, cx))
+                            .thumb(sketch(layout, transparent, island, height, cx))
                             .label(i18n::lookup(layout.key(), None))
                             .selected(layout == chosen)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -74,6 +77,54 @@ impl SettingsView {
                     }),
             )
             .into_any_element()
+    }
+
+    pub(super) fn player_bar_island_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let chosen = self.settings.read(cx).player_bar_island();
+        let settings = self.settings.clone();
+        let title = t!("settings-player-bar-island");
+        let control = segmented(
+            "player-bar-island-mode",
+            PlayerBarIsland::ALL
+                .into_iter()
+                .map(|mode| (mode, i18n::lookup(mode.key(), None))),
+            chosen,
+            move |mode, _, cx| {
+                settings.update(cx, |settings, cx| {
+                    settings.set_player_bar_island(*mode, cx);
+                });
+            },
+        );
+        Row::new(title, control.into_any_element())
+            .detail(t!("settings-player-bar-island-detail"))
+            .into_any_element()
+    }
+
+    pub(super) fn player_bar_island_page_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let settings = self.settings.read(cx);
+        let on = settings.player_bar_island_page();
+        let enabled = settings.player_bar_island() != PlayerBarIsland::Off;
+        let title = t!("settings-player-bar-island-page");
+        let control = chip(
+            "player-bar-island-page-chip",
+            "icons/layout-grid.svg",
+            title.clone(),
+            title.clone(),
+            on && enabled,
+            cx,
+        )
+        .disabled(!enabled)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.settings.update(cx, |settings, cx| {
+                settings.set_player_bar_island_page(!on, cx);
+            });
+        }));
+        let row = Row::new(title, control.into_any_element());
+        let row = match enabled {
+            true => row.detail(t!("settings-player-bar-island-page-detail")),
+            false => row.warning(t!("settings-player-bar-island-page-needs-island")),
+        };
+        row.into_any_element()
     }
 
     /// Explains that transparency also moves the page behind the player bar. The switch stands
@@ -109,16 +160,25 @@ impl SettingsView {
 /// A still miniature of a page and its player bar, `height` tall. The page is placed in
 /// proportions of the thumbnail and the bar in flex rows sized from `height`, so the bar's
 /// pieces stay centred on one line whatever width the settings column gives the card.
-fn sketch(layout: PlayerBarLayout, transparent: bool, height: Pixels, cx: &App) -> Div {
+fn sketch(
+    layout: PlayerBarLayout,
+    transparent: bool,
+    island: bool,
+    height: Pixels,
+    cx: &App,
+) -> Div {
     let theme = *cx.theme();
     let radius = theme.radius * 0.25;
     let ink = theme.foreground.opacity(0.6);
     let muted = theme.muted_foreground.opacity(0.4);
     let bar = height
-        * match layout {
-            PlayerBarLayout::Compact => 0.26,
-            PlayerBarLayout::Island => 0.3,
-            PlayerBarLayout::Classic | PlayerBarLayout::Centered => 0.34,
+        * match island {
+            true => 0.3,
+            false => match layout {
+                PlayerBarLayout::Compact => 0.26,
+                PlayerBarLayout::Minimal => 0.3,
+                PlayerBarLayout::Classic | PlayerBarLayout::Centered => 0.34,
+            },
         };
     let gap = height * 0.06;
     let title = height * 0.035;
@@ -127,9 +187,12 @@ fn sketch(layout: PlayerBarLayout, transparent: bool, height: Pixels, cx: &App) 
     // A full-height bar keeps its cover well inside its height, as the real bar does around a
     // row-sized cover. The compact bar is about as tall as its cover.
     let cover_side = bar
-        * match layout {
-            PlayerBarLayout::Classic | PlayerBarLayout::Centered => 0.6,
-            PlayerBarLayout::Compact | PlayerBarLayout::Island => 0.7,
+        * match island {
+            true => 0.7,
+            false => match layout {
+                PlayerBarLayout::Classic | PlayerBarLayout::Centered => 0.6,
+                PlayerBarLayout::Compact | PlayerBarLayout::Minimal => 0.7,
+            },
         };
     let cover = div()
         .flex_none()
@@ -177,15 +240,15 @@ fn sketch(layout: PlayerBarLayout, transparent: bool, height: Pixels, cx: &App) 
         .items_center()
         .gap(gap)
         .border_color(theme.border)
-        .map(|panel| match layout {
-            PlayerBarLayout::Island => panel
+        .map(|panel| match island {
+            true => panel
                 .bottom(gap)
                 .left(gap * 2.)
                 .right(gap * 2.)
                 .px(bar * 0.3)
                 .rounded(bar / 2.)
                 .border_1(),
-            _ => panel.bottom_0().w_full().px(gap).border_t_1(),
+            false => panel.bottom_0().w_full().px(gap).border_t_1(),
         })
         .map(|panel| match transparent {
             true => ui::popover_surface(panel, cx),
@@ -244,7 +307,7 @@ fn sketch(layout: PlayerBarLayout, transparent: bool, height: Pixels, cx: &App) 
             .child(sound(1.).w(relative(0.12))),
         // The cover and title sit over the seek line, all three small enough to share the pill's
         // height, with the tools after them as marks like the transport's.
-        PlayerBarLayout::Island => panel
+        PlayerBarLayout::Minimal => panel
             .child(transport(height, cx))
             .child(
                 div()
@@ -272,7 +335,7 @@ fn sketch(layout: PlayerBarLayout, transparent: bool, height: Pixels, cx: &App) 
             .child(transport(height, cx)),
     };
     // Under the island the page fades into its own colour, the way it does in the window.
-    let fade = (layout == PlayerBarLayout::Island).then(|| {
+    let fade = island.then(|| {
         div()
             .absolute()
             .left_0()

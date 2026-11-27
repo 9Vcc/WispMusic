@@ -1339,7 +1339,7 @@ impl FullscreenView {
         let frosted = ambient::shown(cx) && ui::blurring(cx);
         let narrow = !Room::of(window.viewport_size().width).fits(Room::Wide);
         let bottom = match narrow {
-            true => PlayerBar::height(window, cx),
+            true => PlayerBar::strip_height(window, cx),
             false => Pixels::ZERO,
         };
         let mut tool = |id: &'static str, icon: &'static str, hint: SharedString| {
@@ -1972,7 +1972,7 @@ impl FullscreenView {
     ) -> impl IntoElement {
         let theme = *cx.theme();
         let transparent = self.settings.read(cx).player_bar_translucent();
-        let height = PlayerBar::height(window, cx);
+        let height = PlayerBar::strip_height(window, cx);
         let dozing = |element: AnyElement, by: f32| {
             div()
                 .flex_none()
@@ -2083,7 +2083,7 @@ impl FullscreenView {
             .absolute()
             .left_0()
             .right_0()
-            .bottom(PlayerBar::height(window, cx) + px(PILL_LIFT))
+            .bottom(PlayerBar::strip_height(window, cx) + px(PILL_LIFT))
             .flex()
             .items_center()
             .px_5()
@@ -2333,7 +2333,7 @@ impl Render for FullscreenView {
         // The page ends as much nearer the window's bottom edge as the corner sits lower, so
         // the transport along the bottom stays level with the corner. Below `Room::Wide` the
         // bar takes the player bar's own height in the flow, and the pill floats above it.
-        let bar = PlayerBar::height(window, cx);
+        let bar = PlayerBar::strip_height(window, cx);
         let pill = theme.metrics.control_small + px(PILL_GAP * 2. + 2.);
         let foot = match narrow {
             true => {

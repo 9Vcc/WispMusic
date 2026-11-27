@@ -13,7 +13,7 @@ use gpui::{
 use gpui::{Window, deferred, div, px, rems};
 use i18n::t;
 use input::{ToggleLyrics, ToggleQueue};
-use state::{AppSettings, Playback, PlayerBarLayout, Queue, SideTab, Wisp};
+use state::{AppSettings, Playback, PlayerBarIsland, PlayerBarLayout, Queue, SideTab, Wisp};
 use ui::{
     Artwork, Badge, Button, Flight, InlineLink, InlineLinks, Perch, Pinnable, Popup, Room,
     Scrollbar, Sprung,
@@ -112,6 +112,8 @@ pub(crate) struct PlayerBar {
     opening: bool,
     /// The wait before the line opens, kept so the pointer leaving the line drops it.
     dwell: Option<Task<()>>,
+    /// The width of the floating pill, including its clear space, published by the workspace.
+    span: Option<Pixels>,
 }
 
 impl VolumeHost for PlayerBar {
@@ -162,6 +164,15 @@ impl PlayerBar {
             seek_open: Sprung::at(0.),
             opening: false,
             dwell: None,
+            span: None,
+        }
+    }
+
+    /// Records the width the workspace gives the floating pill.
+    pub(crate) fn stand(&mut self, span: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.span != span {
+            self.span = span;
+            cx.notify();
         }
     }
 
@@ -404,7 +415,8 @@ impl PlayerBar {
     fn cover_side(window: &Window, cx: &App) -> Pixels {
         let theme = cx.theme();
         let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
-        let small = matches!(layout, PlayerBarLayout::Compact | PlayerBarLayout::Island);
+        let small = Self::floating(window, cx)
+            || matches!(layout, PlayerBarLayout::Compact | PlayerBarLayout::Minimal);
         let side = match small && !Self::stacked(window, layout) {
             true => theme.metrics.thumb,
             false => theme.metrics.row,
@@ -673,11 +685,10 @@ impl PlayerBar {
     /// `SEEK_LEAST`, and only then does the volume fold into a button whose slider rises on
     /// hover. From there the middle gives the track's title `TITLE_ROOM`, down to
     /// `SEEK_FLOOR`. `tools` counts the icon buttons before the volume.
-    fn classic(window: &Window, tools: usize, cx: &gpui::App) -> Pixels {
+    fn classic(row: Pixels, window: &Window, tools: usize, cx: &gpui::App) -> Pixels {
         let title = cx.theme().metrics.cover * TITLE_ROOM;
         let rem = window.rem_size();
         let button = px(ICON_BUTTON);
-        let row = window.viewport_size().width - rem * (BAR_PAD + COLUMN_GAP) * 2.;
         let tools = button * tools as f32 + rem * TOOL_GAP * tools.saturating_sub(1) as f32;
         // The right side: the icons, the mute and fullscreen buttons and the gaps between them.
         let rising = tools + button * 2. + rem * SIDE_GAP * 2.;
@@ -688,16 +699,38 @@ impl PlayerBar {
             .min(row - rising * 2.)
     }
 
-    /// The volume slider keeps its full width until the window is as narrow as the one that
-    /// stacks the classic bar, so a layout that stacks sooner still matches it.
-    /// Centered needs room for its three columns; smaller windows keep every control reachable
-    /// in the shared responsive layout. Only the whole window's width determines the choice.
+    /// The narrowest window `layout` lays out in one row. Centered and minimal need room for all
+    /// their controls in it, and below its room every control stays reachable in the shared
+    /// stacked layout.
+    fn one_row(layout: PlayerBarLayout) -> Room {
+        match layout {
+            PlayerBarLayout::Centered | PlayerBarLayout::Minimal => Room::Wide,
+            PlayerBarLayout::Classic | PlayerBarLayout::Compact => Room::Roomy,
+        }
+    }
+
+    /// Whether `layout` stacks into two rows at this width. Only the whole window's width
+    /// determines the choice.
     fn stacked(window: &Window, layout: PlayerBarLayout) -> bool {
-        let room = match layout {
-            PlayerBarLayout::Centered | PlayerBarLayout::Island => Room::Wide,
-            _ => Room::Roomy,
-        };
-        !Chrome::window_room(window).fits(room)
+        !Chrome::window_room(window).fits(Self::one_row(layout))
+    }
+
+    /// Whether the bar draws the slim seek line, which opens under the pointer with its clocks
+    /// over it: in the island whatever its layout, and in the minimal row along the window's foot.
+    fn slim(window: &Window, cx: &App) -> bool {
+        let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
+        Self::floating(window, cx)
+            || (layout == PlayerBarLayout::Minimal && !Self::stacked(window, layout))
+    }
+
+    /// How tall `layout` stands in one row along the window's foot.
+    fn row_height(layout: PlayerBarLayout, cx: &App) -> Pixels {
+        let metrics = cx.theme().metrics;
+        match layout {
+            PlayerBarLayout::Classic | PlayerBarLayout::Centered => metrics.player_bar,
+            PlayerBarLayout::Compact => metrics.row + metrics.pad * 2.,
+            PlayerBarLayout::Minimal => Self::island(cx).0,
+        }
     }
 
     /// How far below its place in a full-height bar the fullscreen button sits, which is where
@@ -706,7 +739,7 @@ impl PlayerBar {
     pub(crate) fn fullscreen_drop(window: &Window, cx: &gpui::App) -> Pixels {
         let theme = *cx.theme();
         let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
-        let spare = theme.metrics.player_bar - Self::height(window, cx);
+        let spare = theme.metrics.player_bar - Self::strip_height(window, cx);
         let drop = match Self::stacked(window, layout) {
             // The button's row is centred under the cover's row and the gap between the two.
             true => spare + theme.metrics.row + window.rem_size() * STACK_GAP,
@@ -738,9 +771,13 @@ impl PlayerBar {
         Self::island_pad(pill, cx) + px(ICON_BUTTON - ICON_GLYPH) / 2.
     }
 
-    /// The narrowest the island's pill draws: every control around a middle that keeps room for
-    /// the cover and the title.
-    fn island_least(window: &Window, cx: &App) -> Pixels {
+    /// The narrowest the island's pill draws around `layout`. The minimal row counts every
+    /// control around a middle that keeps room for the cover and the title. The other layouts
+    /// take as much as the narrowest window they lay out in one row.
+    fn island_least(layout: PlayerBarLayout, window: &Window, cx: &App) -> Pixels {
+        if layout != PlayerBarLayout::Minimal {
+            return Self::one_row(layout).least();
+        }
         let rem = window.rem_size();
         let (pill, _) = Self::island(cx);
         let button = px(ICON_BUTTON);
@@ -765,15 +802,21 @@ impl PlayerBar {
 
     /// Whether the whole island fits on a sheet `sheet_width` wide. One that does not widens over
     /// the sidebars and stands centred on the window instead.
-    pub(crate) fn island_fits(sheet_width: Pixels, window: &Window, cx: &App) -> bool {
+    pub(crate) fn island_fits(
+        layout: PlayerBarLayout,
+        sheet_width: Pixels,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
         let (_, clear) = Self::island(cx);
         (sheet_width.max(Pixels::ZERO) - clear * 2.).min(px(ISLAND_MAX))
-            >= Self::island_least(window, cx)
+            >= Self::island_least(layout, window, cx)
     }
 
     /// Where the island stands across the window, as its left edge and width with its clear space
     /// included. `shift` runs from 0, centred on the sheet, to 1, centred on the window.
     pub(crate) fn island_span(
+        layout: PlayerBarLayout,
         sheet_left: Pixels,
         sheet_width: Pixels,
         shift: f32,
@@ -785,7 +828,7 @@ impl PlayerBar {
         let room = (viewport - clear * 2.).max(Pixels::ZERO);
         let width = (sheet_width.max(Pixels::ZERO) - clear * 2.)
             .min(px(ISLAND_MAX))
-            .max(Self::island_least(window, cx))
+            .max(Self::island_least(layout, window, cx))
             .min(room);
         let on_sheet = sheet_left + sheet_width.max(Pixels::ZERO) / 2.;
         let centre = on_sheet + (viewport / 2. - on_sheet) * shift.clamp(0., 1.);
@@ -795,22 +838,36 @@ impl PlayerBar {
     /// Whether the bar floats over the page as an island. The workspace then stands it over the
     /// page and lets the page run under it to the window's foot.
     pub(crate) fn floating(window: &Window, cx: &App) -> bool {
-        let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
-        layout == PlayerBarLayout::Island && !Self::stacked(window, layout)
+        let settings = Wisp::global(cx).settings.read(cx);
+        let layout = settings.player_bar_layout();
+        let wanted = match settings.player_bar_island() {
+            PlayerBarIsland::Off => false,
+            PlayerBarIsland::Wide => Chrome::window_room(window).fits(Room::Grand),
+            PlayerBarIsland::Fits => true,
+        };
+        let (_, clear) = Self::island(cx);
+        let room = window.viewport_size().width - clear * 2.;
+        wanted && !Self::stacked(window, layout) && room >= Self::island_least(layout, window, cx)
     }
 
     /// The height the workspace reserves, shared by the overlay's bottom scroll clearance.
     pub(crate) fn height(window: &Window, cx: &gpui::App) -> Pixels {
+        match Self::floating(window, cx) {
+            true => {
+                let (pill, gap) = Self::island(cx);
+                ui::snapped(pill + gap * 2., window)
+            }
+            false => Self::strip_height(window, cx),
+        }
+    }
+
+    /// The height of a bar along the window's foot in the layout it has at this width.
+    pub(crate) fn strip_height(window: &Window, cx: &gpui::App) -> Pixels {
         let theme = *cx.theme();
         let layout = Wisp::global(cx).settings.read(cx).player_bar_layout();
-        let height = match (Self::stacked(window, layout), layout) {
-            (true, _) => theme.metrics.player_bar + theme.metrics.pad * 3.,
-            (false, PlayerBarLayout::Compact) => theme.metrics.row + theme.metrics.pad * 2.,
-            (false, PlayerBarLayout::Island) => {
-                let (pill, gap) = Self::island(cx);
-                pill + gap * 2.
-            }
-            _ => theme.metrics.player_bar,
+        let height = match Self::stacked(window, layout) {
+            true => theme.metrics.player_bar + theme.metrics.pad * 3.,
+            false => Self::row_height(layout, cx),
         };
         ui::snapped(height, window)
     }
@@ -853,9 +910,8 @@ impl Render for PlayerBar {
             .when(picker, |this| this.child(self.speed.clone()))
             .children(sides);
 
-        // Only the island has a seek line that opens. Another layout, or a window too narrow for the
-        // island, starts it shut the next time.
-        let opened = match Self::floating(window, cx) {
+        // Only a slim line opens. A full seek bar starts it shut the next time.
+        let opened = match Self::slim(window, cx) {
             true => {
                 let spring = ui::spring(ui::paced(SEEK_SPRING).as_secs_f32(), SEEK_BOUNCE);
                 let target = f32::from(u8::from(self.opening));
@@ -930,6 +986,20 @@ impl Render for PlayerBar {
             )
             .occlude()
             .on_mouse_move(cx.listener(Self::hover));
+        let base = match floating {
+            true => base.pl(lead).pr(pad),
+            false => base,
+        };
+        let classic_row = match floating {
+            true => {
+                self.span.unwrap_or_else(|| window.viewport_size().width)
+                    - clear * 2.
+                    - pad
+                    - lead
+                    - window.rem_size() * COLUMN_GAP * 2.
+            }
+            false => window.viewport_size().width - window.rem_size() * (BAR_PAD + COLUMN_GAP) * 2.,
+        };
 
         let context_menu = self.context_menu.clone().map(|(track, position)| {
             Popup::new(position, self.track_menu.for_track(&track, cx)).on_close(cx.listener(
@@ -970,7 +1040,7 @@ impl Render for PlayerBar {
                 ),
             (false, PlayerBarLayout::Centered) => base
                 .items_center()
-                .py(theme.metrics.pad)
+                .when(!floating, |this| this.py(theme.metrics.pad))
                 .gap_3()
                 .child(
                     div()
@@ -1011,87 +1081,69 @@ impl Render for PlayerBar {
                         .child(self.mini_button())
                         .child(self.fullscreen_button(cx)),
                 ),
-            (false, PlayerBarLayout::Island) => {
+            (false, PlayerBarLayout::Minimal) => {
                 let overlap = theme.metrics.pad * (SEEK_HIT / 2. - LINE_DROP);
-                div()
-                    .id("player-island")
-                    .flex()
-                    .w_full()
-                    .h(Self::height(window, cx))
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .px(clear)
-                    .child(
-                        base.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                            if !*hovered {
-                                this.aim_seek(false, cx);
-                                this.timeline.update(cx, |timeline, cx| timeline.leave(cx));
-                            }
-                        }))
+                base.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        this.aim_seek(false, cx);
+                        this.timeline.update(cx, |timeline, cx| timeline.leave(cx));
+                    }
+                }))
+                .flex()
+                .items_center()
+                .gap(rems(ISLAND_GAP))
+                .w_full()
+                .h(pill)
+                .child(
+                    div()
+                        .flex_none()
+                        .child(transport(&self.playback, false, cx)),
+                )
+                .child(
+                    // The seek bar runs under the cover and the title both. Opening it
+                    // fades them out and puts its clocks in their place.
+                    div()
                         .flex()
-                        .items_center()
-                        .gap(rems(ISLAND_GAP))
-                        .w_full()
-                        .h(pill)
-                        .pl(lead)
-                        .pr(pad)
-                        .child(
-                            div()
-                                .flex_none()
-                                .child(transport(&self.playback, false, cx)),
-                        )
-                        .child(
-                            // The seek bar runs under the cover and the title both. Opening it
-                            // fades them out and puts its clocks in their place.
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .justify_end()
-                                .pb(theme.metrics.pad * ISLAND_INSET)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(rems(COVER_GAP))
-                                        .opacity((1. - opened.unwrap_or_default()).clamp(0., 1.))
-                                        // Opacity leaves the row under the pointer, so once it
-                                        // has faded all the way it is hidden for good measure and
-                                        // a click on the clocks cannot reach its links.
-                                        .when(opened.is_some_and(|open| open >= 1.), |this| {
-                                            this.invisible()
-                                        })
-                                        .child(self.artwork(window, cx))
-                                        .child(
-                                            self.track_details(false, cx)
-                                                .gap_0()
-                                                .flex_1()
-                                                .min_w_0(),
-                                        ),
-                                )
-                                // The seek bar's hit area stands taller than its line, which sits
-                                // in the middle of it. The row overlaps the cover's row and the
-                                // pill's inset by as much on either side, so in the flow it takes
-                                // only `LINE_DROP` above the line's middle and as much below.
-                                .child(div().flex_none().w_full().my(-overlap).child(seek)),
-                        )
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .justify_end()
+                        .pb(theme.metrics.pad * ISLAND_INSET)
                         .child(
                             div()
                                 .flex()
-                                .flex_none()
                                 .items_center()
-                                .gap_2()
-                                .child(buttons)
-                                .child(play_mode(&self.playback, false, cx))
-                                .child(self.sound(cx))
-                                .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                                .child(self.mini_button())
-                                .child(self.fullscreen_button(cx)),
-                        ),
-                    )
+                                .gap(rems(COVER_GAP))
+                                .opacity((1. - opened.unwrap_or_default()).clamp(0., 1.))
+                                // Opacity leaves the row under the pointer, so once it
+                                // has faded all the way it is hidden for good measure and
+                                // a click on the clocks cannot reach its links.
+                                .when(opened.is_some_and(|open| open >= 1.), |this| {
+                                    this.invisible()
+                                })
+                                .child(self.artwork(window, cx))
+                                .child(self.track_details(false, cx).gap_0().flex_1().min_w_0()),
+                        )
+                        // The seek bar's hit area stands taller than its line, which sits
+                        // in the middle of it. The row overlaps the cover's row and the
+                        // pill's inset by as much on either side, so in the flow it takes
+                        // only `LINE_DROP` above the line's middle and as much below.
+                        .child(div().flex_none().w_full().my(-overlap).child(seek)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .child(buttons)
+                        .child(play_mode(&self.playback, false, cx))
+                        .child(self.sound(cx))
+                        .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
+                        .child(self.mini_button())
+                        .child(self.fullscreen_button(cx)),
+                )
             }
             (false, PlayerBarLayout::Compact) => base
                 .items_center()
@@ -1112,7 +1164,7 @@ impl Render for PlayerBar {
             // seek bar stay centred. `classic` works out how wide the middle is and how the
             // volume draws.
             _ => {
-                let middle = Self::classic(window, tools, cx);
+                let middle = Self::classic(classic_row, window, tools, cx);
                 // The climax key sits right beside `next`, but it must not shift the
                 // transport: only prev/play/next take part in centring, and the key is placed
                 // one gap past the next button's right edge.
@@ -1165,6 +1217,20 @@ impl Render for PlayerBar {
                             .child(self.fullscreen_button(cx)),
                     )
             }
+        };
+
+        let content = match floating {
+            true => div()
+                .id("player-island")
+                .flex()
+                .w_full()
+                .h(height)
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .px(clear)
+                .child(content),
+            false => content,
         };
 
         content
