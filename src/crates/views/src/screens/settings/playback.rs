@@ -73,6 +73,7 @@ impl SettingsView {
                     .w(theme.metrics.cover * SLEEP_WIDTH)
                     .child(
                         Scrubber::new(&self.preamp, fraction)
+                            .smooth(true)
                             .name(t!("settings-preamp"))
                             .value(label)
                             .colors(
@@ -175,6 +176,7 @@ impl SettingsView {
                     .w(theme.metrics.cover * SLEEP_WIDTH)
                     .child(
                         Scrubber::new(&self.cache, fraction)
+                            .smooth(true)
                             .name(t!("settings-cache-size"))
                             .value(t!("settings-cache-size-value", count = current))
                             .colors(
@@ -307,6 +309,7 @@ impl SettingsView {
                     .w(theme.metrics.cover * SLEEP_WIDTH)
                     .child(
                         Scrubber::new(&self.sleep, sleep_slot(current) as f32 / SLEEP_LAST as f32)
+                            .smooth(true)
                             .name(t!("settings-sleep"))
                             .value(sleep_label(current))
                             .colors(
