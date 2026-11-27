@@ -23,7 +23,7 @@ pub(crate) use aside::{Aside, VerseLook, verse, verse_gap, verse_sizes};
 pub use legacy_frame::install as install_legacy_client_area;
 pub(crate) use notice::AppNotice;
 pub(crate) use output_picker::OutputPicker;
-pub(crate) use player_bar::PlayerBar;
+pub(crate) use player_bar::{Held, PlayerBar};
 pub(crate) use sheet::{SHEET_EDGE, inner_corners, sheet_frame};
 pub(crate) use sidebar_left::SidebarLeft;
 pub(crate) use sidebar_right::SidebarRight;

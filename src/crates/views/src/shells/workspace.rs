@@ -14,7 +14,8 @@ use ui::{
 };
 
 use crate::chrome::{
-    AppNotice, Chrome, PlayerBar, SidebarLeft, SidebarRight, SwipeCue, TitleBarOptions, sheet_frame,
+    AppNotice, Chrome, Held, PlayerBar, SidebarLeft, SidebarRight, SwipeCue, TitleBarOptions,
+    sheet_frame,
 };
 use crate::shared::menus::CardMenu;
 use crate::shells::Shell;
@@ -47,8 +48,14 @@ pub(crate) struct Workspace {
     /// own parts instead.
     cached: bool,
     transition: Option<Entrance>,
-    /// Where the island stands between the sheet's centre, at 0, and the window's, at 1.
+    /// Where the island stands between the sheet's centre, at 0, and the window's, at 1. It
+    /// springs there when the island stops or starts fitting on the sheet.
     island_shift: Option<Sprung>,
+    /// Where the island stood last frame, as its left edge and its width with clear space.
+    island_at: Option<(Pixels, Pixels)>,
+    /// Where the island stood when the pointer left it, and how far it has glided on from there
+    /// to where it belongs, 0 to 1.
+    island_glide: Option<((Pixels, Pixels), Sprung)>,
     focus: FocusHandle,
 }
 
@@ -62,6 +69,9 @@ impl Workspace {
         let sidebar = cx.new(SidebarLeft::new);
         let sidebar_right = cx.new(|cx| SidebarRight::new(queue.clone(), playback.clone(), cx));
         let player_bar = cx.new(|cx| PlayerBar::new(playback.clone(), queue, cx));
+        // The island holds still under the pointer and moves on once it leaves.
+        cx.subscribe(&player_bar, |_, _, _: &Held, cx| cx.notify())
+            .detach();
         let settings = Wisp::global(cx).settings.clone();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
         cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
@@ -80,8 +90,49 @@ impl Workspace {
             cached: true,
             transition: None,
             island_shift: None,
+            island_at: None,
+            island_glide: None,
             focus: cx.focus_handle(),
         }
+    }
+
+    /// Where the island stands this frame, given the `span` it belongs at. While the pointer rests
+    /// on it the island holds where it stood, so its buttons stay under the pointer as a sidebar
+    /// comes or goes, and once the pointer leaves it glides on to where it belongs. A window
+    /// narrowed under a held island still keeps it inside.
+    fn hold_island(
+        &mut self,
+        span: (Pixels, Pixels),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Pixels, Pixels) {
+        let viewport = window.viewport_size().width;
+        let held = self.player_bar.read(cx).held();
+        let shown = match (held, self.island_at) {
+            (true, Some((left, width))) => {
+                let width = width.min(viewport);
+                let at = (left.clamp(Pixels::ZERO, viewport - width), width);
+                self.island_glide = Some((at, Sprung::at(0.)));
+                at
+            }
+            _ => match self.island_glide.as_mut() {
+                Some((from, glide)) if *from != span => {
+                    let progress = glide.follow(1., ISLAND_SHIFT, SHIFT_REST, window, cx);
+                    let between = |from: Pixels, to: Pixels| from + (to - from) * progress;
+                    let shown = (between(from.0, span.0), between(from.1, span.1));
+                    if glide.resting() {
+                        self.island_glide = None;
+                    }
+                    shown
+                }
+                _ => {
+                    self.island_glide = None;
+                    span
+                }
+            },
+        };
+        self.island_at = Some(shown);
+        shown
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -252,10 +303,13 @@ impl Render for Workspace {
                 .island_shift
                 .get_or_insert_with(|| Sprung::at(target))
                 .follow(target, ISLAND_SHIFT, SHIFT_REST, window, cx);
-            PlayerBar::island_span(layout, sheet_left, sheet_width, shift, window, cx)
+            let span = PlayerBar::island_span(layout, sheet_left, sheet_width, shift, window, cx);
+            self.hold_island(span, window, cx)
         });
         if island.is_none() {
             self.island_shift = None;
+            self.island_at = None;
+            self.island_glide = None;
         }
         self.player_bar
             .update(cx, |bar, cx| bar.stand(island.map(|(_, width)| width), cx));
@@ -431,13 +485,6 @@ impl Render for Workspace {
                         (Some((left, width)), _) => bar.absolute().bottom_0().left(left).w(width),
                         (None, true) => bar.absolute().left_0().right_0().bottom_0(),
                         (None, false) => bar,
-                    })
-                    .when(floating, |bar| {
-                        bar.h(bar_height)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px(PlayerBar::island(cx).1)
                     })
                     .child(match floating {
                         true => self.player_bar.clone().into_any_element(),

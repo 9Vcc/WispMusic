@@ -7,8 +7,8 @@ use ui::Tipped as _;
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point,
-    Render, SharedString, StyledText, Task,
+    AnyElement, App, Context, Entity, EventEmitter, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Pixels, Point, Render, SharedString, StyledText, Task,
 };
 use gpui::{Window, deferred, div, px, rems};
 use i18n::t;
@@ -114,7 +114,16 @@ pub(crate) struct PlayerBar {
     dwell: Option<Task<()>>,
     /// The width of the floating pill, including its clear space, published by the workspace.
     span: Option<Pixels>,
+    /// Whether the pointer rests on the bar, which holds a floating island where it stands.
+    held: bool,
 }
+
+/// Says that the pointer came to rest on the bar or left it. The workspace holds a floating
+/// island still while the pointer is on it, so its buttons stay under the pointer as a sidebar
+/// comes or goes, and lets it move on once the pointer leaves.
+pub(crate) struct Held;
+
+impl EventEmitter<Held> for PlayerBar {}
 
 impl VolumeHost for PlayerBar {
     fn volume(&mut self) -> &mut RisingVolume {
@@ -165,6 +174,27 @@ impl PlayerBar {
             opening: false,
             dwell: None,
             span: None,
+            held: false,
+        }
+    }
+
+    /// Whether the pointer rests on the bar.
+    pub(crate) fn held(&self) -> bool {
+        self.held
+    }
+
+    /// Follows the pointer onto the bar and off it. Leaving shuts the slim seek line and drops
+    /// the seek bar's hover. Only a floating island is held.
+    fn hovered(&mut self, hovered: &bool, window: &mut Window, cx: &mut Context<Self>) {
+        let hovered = *hovered;
+        if !hovered {
+            self.aim_seek(false, cx);
+            self.timeline.update(cx, |timeline, cx| timeline.leave(cx));
+        }
+        let held = hovered && Self::floating(window, cx);
+        if self.held != held {
+            self.held = held;
+            cx.emit(Held);
         }
     }
 
@@ -985,7 +1015,8 @@ impl Render for PlayerBar {
                 },
             )
             .occlude()
-            .on_mouse_move(cx.listener(Self::hover));
+            .on_mouse_move(cx.listener(Self::hover))
+            .on_hover(cx.listener(Self::hovered));
         let base = match floating {
             true => base.pl(lead).pr(pad),
             false => base,
@@ -1083,67 +1114,63 @@ impl Render for PlayerBar {
                 ),
             (false, PlayerBarLayout::Minimal) => {
                 let overlap = theme.metrics.pad * (SEEK_HIT / 2. - LINE_DROP);
-                base.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if !*hovered {
-                        this.aim_seek(false, cx);
-                        this.timeline.update(cx, |timeline, cx| timeline.leave(cx));
-                    }
-                }))
-                .flex()
-                .items_center()
-                .gap(rems(ISLAND_GAP))
-                .w_full()
-                .h(pill)
-                .child(
-                    div()
-                        .flex_none()
-                        .child(transport(&self.playback, false, cx)),
-                )
-                .child(
-                    // The seek bar runs under the cover and the title both. Opening it
-                    // fades them out and puts its clocks in their place.
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .justify_end()
-                        .pb(theme.metrics.pad * ISLAND_INSET)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(rems(COVER_GAP))
-                                .opacity((1. - opened.unwrap_or_default()).clamp(0., 1.))
-                                // Opacity leaves the row under the pointer, so once it
-                                // has faded all the way it is hidden for good measure and
-                                // a click on the clocks cannot reach its links.
-                                .when(opened.is_some_and(|open| open >= 1.), |this| {
-                                    this.invisible()
-                                })
-                                .child(self.artwork(window, cx))
-                                .child(self.track_details(false, cx).gap_0().flex_1().min_w_0()),
-                        )
-                        // The seek bar's hit area stands taller than its line, which sits
-                        // in the middle of it. The row overlaps the cover's row and the
-                        // pill's inset by as much on either side, so in the flow it takes
-                        // only `LINE_DROP` above the line's middle and as much below.
-                        .child(div().flex_none().w_full().my(-overlap).child(seek)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_2()
-                        .child(buttons)
-                        .child(play_mode(&self.playback, false, cx))
-                        .child(self.sound(cx))
-                        .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
-                        .child(self.mini_button())
-                        .child(self.fullscreen_button(cx)),
-                )
+                base.flex()
+                    .items_center()
+                    .gap(rems(ISLAND_GAP))
+                    .w_full()
+                    .h(pill)
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(transport(&self.playback, false, cx)),
+                    )
+                    .child(
+                        // The seek bar runs under the cover and the title both. Opening it
+                        // fades them out and puts its clocks in their place.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .justify_end()
+                            .pb(theme.metrics.pad * ISLAND_INSET)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(rems(COVER_GAP))
+                                    .opacity((1. - opened.unwrap_or_default()).clamp(0., 1.))
+                                    // Opacity leaves the row under the pointer, so once it
+                                    // has faded all the way it is hidden for good measure and
+                                    // a click on the clocks cannot reach its links.
+                                    .when(opened.is_some_and(|open| open >= 1.), |this| {
+                                        this.invisible()
+                                    })
+                                    .child(self.artwork(window, cx))
+                                    .child(
+                                        self.track_details(false, cx).gap_0().flex_1().min_w_0(),
+                                    ),
+                            )
+                            // The seek bar's hit area stands taller than its line, which sits
+                            // in the middle of it. The row overlaps the cover's row and the
+                            // pill's inset by as much on either side, so in the flow it takes
+                            // only `LINE_DROP` above the line's middle and as much below.
+                            .child(div().flex_none().w_full().my(-overlap).child(seek)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_2()
+                            .child(buttons)
+                            .child(play_mode(&self.playback, false, cx))
+                            .child(self.sound(cx))
+                            .when(lyrics, |this| this.child(self.desktop_lyrics_button(cx)))
+                            .child(self.mini_button())
+                            .child(self.fullscreen_button(cx)),
+                    )
             }
             (false, PlayerBarLayout::Compact) => base
                 .items_center()
