@@ -9,7 +9,9 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
-use gpui::{Font, FontWeight, SharedString, TextRun, WindowTextSystem, black, font, px};
+use gpui::{
+    Font, FontFallbacks, FontWeight, SharedString, TextRun, WindowTextSystem, black, font, px,
+};
 
 fn faces() -> Vec<Cow<'static, [u8]>> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
@@ -80,6 +82,55 @@ fn the_bundled_family_lays_out_three_weights() {
     assert!(
         body < heading && heading < strong,
         "the three faces should get wider with weight, got {body} / {heading} / {strong}"
+    );
+}
+
+/// The bundled Hangul cut must be usable as a real fallback, not merely appear in the font
+/// picker's registry. Arial has no Korean glyphs, so every Korean run must come from the
+/// explicit fallback chain.
+#[test]
+fn the_hangul_subset_draws_korean_through_the_fallback_chain() {
+    let platform = gpui_platform::current_platform(false);
+    let text = Arc::new(gpui::TextSystem::new(platform.text_system()));
+    let window_text = WindowTextSystem::new(text.clone());
+    text.add_fonts(vec![Cow::Borrowed(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/SonoraHangul.ttf"
+        ))
+        .as_slice(),
+    )])
+    .unwrap();
+
+    assert!(
+        text.all_font_names()
+            .iter()
+            .any(|name| name == "Sonora Hangul"),
+        "the bundled Hangul family never registered"
+    );
+
+    let sample = SharedString::from("한글");
+    let run = TextRun {
+        len: sample.len(),
+        font: Font {
+            family: "Arial".into(),
+            fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "Sonora Hangul".to_owned().into(),
+            ])),
+            ..Default::default()
+        },
+        color: black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window_text.shape_line(sample, px(16.), &[run], None);
+    let hangul = text.resolve_font(&font("Sonora Hangul"));
+    assert!(!line.runs.is_empty(), "Korean text produced no runs");
+    assert!(
+        line.runs.iter().all(|run| run.font_id == hangul),
+        "Korean runs did not use the embedded fallback: {:?}",
+        line.runs.iter().map(|run| run.font_id).collect::<Vec<_>>()
     );
 }
 

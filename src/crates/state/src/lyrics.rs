@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui::{Context, Entity, Task};
 use logic::lyrics::{awaits_better, gather, ordered};
-use music::lyrics::LOCAL;
+use lyrics::LOCAL;
 use music::{LyricsHit, LyricsProvider, LyricsQuery, Track, TrackKey};
 
 use crate::sheets::{Sheets, Unsaved};
@@ -264,7 +264,7 @@ impl Lyrics {
             ms if ms > 0 => position + self.offset_time(),
             _ => position.saturating_sub(self.offset_time()),
         };
-        music::lyrics::active(lines, position)
+        lyrics::active(lines, position)
     }
 
     fn follow(&mut self, cx: &mut Context<Self>) {
@@ -322,7 +322,7 @@ impl Lyrics {
             .as_deref()
             .and_then(|id| settings.lyric_version(id))
             .map(str::to_owned);
-        let instrumental = music::lyrics::instrumental(query, &hits);
+        let instrumental = lyrics::instrumental(query, &hits);
         self.task = None;
         self.settled = true;
         self.hits = ordered(query, hits, &priority, worded_first);
@@ -588,7 +588,7 @@ impl Lyrics {
                         crate::Network::reached(cx);
                         this.keep(id, cached, &hits, answered, cx);
                         if current {
-                            let instrumental = music::lyrics::instrumental(&ranking, &hits);
+                            let instrumental = lyrics::instrumental(&ranking, &hits);
                             let ranked = ordered(&ranking, hits, &priority, worded_first);
                             this.settle(ranked, displayed.as_ref(), instrumental, cx);
                         }
@@ -790,8 +790,8 @@ impl Found {
     fn usable(&self, query: &LyricsQuery, enabled: &[impl AsRef<str>]) -> bool {
         self.hits.iter().any(|hit| {
             enabled.iter().any(|name| name.as_ref() == hit.source)
-                && (music::lyrics::eligible(query, hit)
-                    || (hit.instrumental && music::lyrics::matched(query, hit)))
+                && (lyrics::eligible(query, hit)
+                    || (hit.instrumental && lyrics::matched(query, hit)))
         })
     }
 

@@ -334,7 +334,7 @@ impl SettingsView {
         let title = t!("settings-lyrics-word-synced-first");
         let control = chip(
             "lyrics-word-synced-first-chip",
-            "icons/align-left.svg",
+            "icons/text-select.svg",
             title.clone(),
             title.clone(),
             on,
@@ -862,7 +862,7 @@ impl SettingsView {
             .child(
                 chip(
                     "romanized-lyrics-chip",
-                    "icons/languages.svg",
+                    "icons/text-select.svg",
                     t!("settings-romanized-lyrics"),
                     t!("settings-romanized-lyrics"),
                     on,
@@ -902,7 +902,7 @@ impl Render for DraggedSource {
 /// The name a lyrics source goes by in the settings, falling back to the provider's own name.
 pub(crate) fn source_name(provider: &str) -> SharedString {
     let key = match provider {
-        music::lyrics::LOCAL => "settings-lyrics-provider-local",
+        lyrics::LOCAL => "settings-lyrics-provider-local",
         "Kugou" => "settings-lyrics-provider-kugou",
         "NetEase" => "settings-lyrics-provider-netease",
         _ => return SharedString::from(provider.to_owned()),

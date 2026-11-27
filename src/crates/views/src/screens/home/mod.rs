@@ -692,7 +692,7 @@ impl Render for HomeView {
 
         Scroller::new("home-page", &self.scrollbar)
             .hold()
-            .bottom_inset(crate::chrome::Chrome::bottom(cx))
+            .bottom_inset(crate::chrome::Chrome::track_bottom(cx))
             // [wisp] 对齐原版主页的横向 px-8 留白；纵向收紧，小窗下更紧凑
             .py(px(20.))
             .px(px(32.) + crate::chrome::Chrome::margin(window, cx))

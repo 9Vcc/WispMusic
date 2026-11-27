@@ -26,6 +26,12 @@ pub(crate) struct CoverFade(pub(crate) f32);
 
 impl Global for CoverFade {}
 
+/// How much of its backdrop the opening fullscreen player shows yet, from 0 to 1. The opening
+/// zoom drops backdrop blurs inside its layer, so they rise again as the zoom settles.
+pub(crate) struct Backdrops(pub(crate) f32);
+
+impl Global for Backdrops {}
+
 /// How much room the player bar's cover takes beside the title, from 1 where it shows to 0 where
 /// the title has slid over its place. Below `Room::Wide` the fullscreen player's artwork tab
 /// tucks it away, since its big cover shows the same art, and the player bar under the player

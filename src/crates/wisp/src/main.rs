@@ -121,11 +121,11 @@ fn main() -> ExitCode {
         let database = storage::Database::standard();
         // [wisp] provider 列表由已装插件 manifest 驱动：内置网易云仍是同 slug 的 fallback，
         // 没有 host bridge 的插件只进管理列表，不会被当成可用 provider。
-        let plugins_dir = music::plugins::plugins_dir();
-        let plugins = music::plugins::Catalog::scan(&plugins_dir);
+        let plugins_dir = wasm_provider::plugins_dir();
+        let plugins = wasm_provider::Catalog::scan(&plugins_dir);
         let providers = plugins.providers();
         let local_provider: Arc<dyn music::MusicProvider> =
-            Arc::new(music::local::LocalProvider::new(
+            Arc::new(local::LocalProvider::new(
                 paths::cache_dir()
                     .unwrap_or_else(std::env::temp_dir)
                     .join("wisp"),
@@ -134,15 +134,15 @@ fn main() -> ExitCode {
             ));
         // [wisp] 歌词源是宿主能力：本地与内置云端源始终可用，不随插件启停变化。
         let mut lyrics: Vec<Arc<dyn LyricsProvider>> =
-            vec![Arc::new(music::local::LocalLyrics)];
-        lyrics.extend(music::builtin::lyrics_sources());
+            vec![Arc::new(local::LocalLyrics)];
+        lyrics.extend(host_sources::lyrics_sources());
         state::init(cx, io, database, providers, local_provider, lyrics, plugins, plugins_dir);
         // [wisp] 解灰设置推送到 music 侧共享配置：启动一次，之后设置变化跟随。
         {
             let settings = Wisp::global(cx).settings.clone();
-            music::builtin::set_unblock_config(settings.read(cx).unblock_config());
+            host_sources::set_unblock_config(settings.read(cx).unblock_config());
             cx.observe(&settings, |settings, cx| {
-                music::builtin::set_unblock_config(settings.read(cx).unblock_config());
+                host_sources::set_unblock_config(settings.read(cx).unblock_config());
             })
             .detach();
         }

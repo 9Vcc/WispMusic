@@ -1256,7 +1256,7 @@ impl Playback {
         }
 
         self.track = Some(track.clone());
-        music::builtin::remember(track);
+        host_sources::remember(track);
         self.state = PlaybackState::Loading;
         self.position = at;
         self.clock.reset(at, false);
@@ -2877,7 +2877,7 @@ impl Playback {
         let Some(track) = self.track.clone() else {
             return;
         };
-        music::builtin::remember(&track);
+        host_sources::remember(&track);
         let Some(id) = track.id.as_deref().filter(|_| track.playable) else {
             return;
         };

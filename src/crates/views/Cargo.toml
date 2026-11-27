@@ -9,6 +9,7 @@ gpui.workspace = true
 i18n.workspace = true
 icons.workspace = true
 jiff.workspace = true
+lyrics.workspace = true
 music.workspace = true
 input.workspace = true
 router.workspace = true
@@ -21,6 +22,7 @@ dirs.workspace = true
 unicode-bidi.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true
+wasm-provider.workspace = true
 [dev-dependencies]
 gpui_platform.workspace = true
 

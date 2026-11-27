@@ -29,6 +29,10 @@ pub struct Scroller {
     top_inset: Option<Pixels>,
     /// How tall the band along the top is where content fades out as it scrolls away.
     fade_top: Pixels,
+    /// How tall the top band grows to as content scrolls away.
+    fade_scrolled: Pixels,
+    /// How tall the bottom band is while more content lies below.
+    fade_remaining: Pixels,
     /// How tall the bands are where content fades at whichever end still has more to scroll to.
     fade_ends: Pixels,
     /// Whether the region holds what is at its top when it changes width, and whether that hold
@@ -51,6 +55,8 @@ impl Scroller {
             bottom_inset: Pixels::ZERO,
             top_inset: None,
             fade_top: Pixels::ZERO,
+            fade_scrolled: Pixels::ZERO,
+            fade_remaining: Pixels::ZERO,
             fade_ends: Pixels::ZERO,
             hold: None,
             reflowed: false,
@@ -119,6 +125,18 @@ impl Scroller {
         self
     }
 
+    /// Grows a top fade from nothing to `height` as content scrolls away.
+    pub fn fade_scrolled(mut self, height: Pixels) -> Self {
+        self.fade_scrolled = height.max(Pixels::ZERO);
+        self
+    }
+
+    /// Fades the bottom while more content lies below, shrinking to nothing at the end.
+    pub fn fade_remaining(mut self, height: Pixels) -> Self {
+        self.fade_remaining = height.max(Pixels::ZERO);
+        self
+    }
+
     /// Fades content out across a band of `height` at each end that has more to scroll to, so a
     /// region too short for what it holds says so. An end with nothing past it stays crisp.
     pub fn fade_ends(mut self, height: Pixels) -> Self {
@@ -157,6 +175,8 @@ impl RenderOnce for Scroller {
             bottom_inset,
             top_inset,
             fade_top,
+            fade_scrolled,
+            fade_remaining,
             fade_ends,
             hold,
             reflowed,
@@ -187,15 +207,23 @@ impl RenderOnce for Scroller {
         let scroll = bar.read(cx).scroll().clone();
         // The offset runs negative as the content moves up, so it sits between minus the furthest
         // it can go and zero. Half a pixel of slack keeps a rounded offset from fading an end.
-        let (above, below) = {
+        let (above, below, scrolled, remaining) = {
             let (at, end) = (-scroll.offset().y, scroll.max_offset().y);
-            (at > px(0.5), end - at > px(0.5))
+            (
+                at > px(0.5),
+                end - at > px(0.5),
+                at.max(Pixels::ZERO),
+                (end - at).max(Pixels::ZERO),
+            )
         };
         let end = |more: bool| match more {
             true => fade_ends,
             false => Pixels::ZERO,
         };
-        let (fade_top_end, fade_bottom_end) = (end(above), end(below));
+        let (fade_top_end, fade_bottom_end) = (
+            end(above).max(scrolled.min(fade_scrolled)),
+            end(below).max(remaining.min(fade_remaining)),
+        );
         let overrides = std::mem::take(base.style());
         bar.read(cx).sync();
         let presentation = bar.read(cx).presentation();
@@ -210,12 +238,12 @@ impl RenderOnce for Scroller {
                     .restrict_scroll_to_axis()
                     .track_scroll(&scroll)
             })
-            .on_scroll(move |event: &ScrollEvent, window, cx| {
-                match event.delta.precise() {
+            .on_scroll(
+                move |event: &ScrollEvent, window, cx| match event.delta.precise() {
                     true => gliding.update(cx, |bar, _| bar.stirred()),
                     false => gliding.update(cx, |bar, _| bar.nudge(window)),
-                }
-            })
+                },
+            )
             .children(children);
 
         surface.style().refine(&overrides);

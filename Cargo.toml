@@ -18,11 +18,15 @@ repository = "https://github.com/9Vcc/WispMusic"
 
 [workspace.dependencies]
 embed = { path = "src/crates/embed" }
+engine = { path = "src/crates/engine" }
+host-sources = { path = "src/crates/host-sources" }
 cli = { path = "src/crates/cli" }
 i18n = { path = "src/crates/i18n" }
 icons = { path = "src/crates/icons" }
 logic = { path = "src/crates/logic" }
+local = { path = "src/crates/local" }
 music = { path = "src/crates/music" }
+sound = { path = "src/crates/sound" }
 paths = { path = "src/crates/paths" }
 wisp-plugin-api = { path = "src/crates/wisp-plugin-api" }
 wisp-plugin-host = { path = "src/crates/wisp-plugin-host" }
@@ -31,9 +35,11 @@ state = { path = "src/crates/state" }
 soundtouch-rs = { path = "src/vendor/soundtouch-rs" }
 storage = { path = "src/crates/storage" }
 input = { path = "src/crates/input" }
+lyrics = { path = "src/crates/lyrics" }
 router = { path = "src/crates/router" }
 ui = { path = "src/crates/ui" }
 views = { path = "src/crates/views" }
+wasm-provider = { path = "src/crates/wasm-provider" }
 webview = { path = "src/crates/webview" }
 
 alsa = "0.11"
@@ -294,7 +300,10 @@ opt-level = 2
 
 # The audio path runs in real time, decoding, resampling and mixing every sample, so it is built
 # fully optimised even in debug builds.
-[profile.dev.package.music]
+[profile.dev.package.sound]
+opt-level = 3
+
+[profile.dev.package.engine]
 opt-level = 3
 
 [profile.dev.package.rodio]
@@ -316,7 +325,10 @@ opt-level = 3
 opt-level = 3
 
 # Keep the real-time audio path at full speed while the rest of the release build favours size.
-[profile.release.package.music]
+[profile.release.package.sound]
+opt-level = 3
+
+[profile.release.package.engine]
 opt-level = 3
 
 [profile.release.package.rodio]

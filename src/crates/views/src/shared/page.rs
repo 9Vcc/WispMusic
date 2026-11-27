@@ -9,7 +9,7 @@ use ui::{
     Filter, FilterChange, Listing, Scrollbar, Table, TableSource, TableState, Viewport, scrolled,
 };
 
-use crate::chrome::Chrome;
+use crate::chrome::{Chrome, inner_corners};
 use crate::shared::cells;
 use crate::shared::tracks::{self, TrackSource};
 
@@ -190,18 +190,19 @@ pub(crate) fn bleed<S: TableSource>(table: Table<S>, framed: bool, cx: &App) -> 
     let theme = cx.theme();
     div()
         .when(framed, |this| this.px(theme.metrics.inset))
-        .child(table.when(framed, |table| {
-            table
+        .child(match framed {
+            true => table
                 .rounded(theme.radius)
                 .border_1()
-                .border_color(theme.border)
-        }))
+                .border_color(theme.border),
+            false => table.stuck_corners(inner_corners(cx)),
+        })
 }
 
 /// How far below the top of a page holding a full-page table its scrollbar starts, which is
 /// under the table's head that sticks to the top of the page as it scrolls.
 pub(crate) fn below_head(window: &Window, cx: &App) -> Pixels {
-    ui::snapped(cx.theme().metrics.header, window)
+    ui::snapped(cx.theme().metrics.header, window).max(Chrome::sheet_corners(cx).top_right)
 }
 
 /// Moves a viewport measured from a framed table's outer edge onto its rows, past the border.
@@ -228,5 +229,6 @@ pub(crate) fn viewport(
         .unwrap_or_default();
     let visible = scroll.bounds().size.height;
 
-    Viewport::measured(scrolled(scroll) - inset - hero, visible, window).covered(Chrome::bottom(cx))
+    Viewport::measured(scrolled(scroll) - inset - hero, visible, window)
+        .covered(Chrome::track_bottom(cx))
 }

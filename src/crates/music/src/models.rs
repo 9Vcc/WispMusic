@@ -501,7 +501,7 @@ impl Default for Lyrics {
 impl Lyrics {
     pub fn plain(text: impl Into<String>) -> Self {
         let text = text.into();
-        let romanized = crate::lyrics::romanize::plain(&text);
+        let romanized = crate::romanize::plain(&text);
         Self::Plain { text, romanized }
     }
 

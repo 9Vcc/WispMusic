@@ -211,17 +211,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
-name = "annotate-snippets"
-version = "0.12.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a5b0a5ab8561c603f16c3b78c24a386b1f70e7fc1b1b1e8c15738828e4a176"
-dependencies = [
- "anstyle",
- "memchr",
- "unicode-width",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -316,12 +305,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "arraydeque"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "arrayref"
@@ -557,7 +540,7 @@ dependencies = [
  "futures-util",
  "log",
  "pin-project-lite",
- "tungstenite 0.28.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2050,19 +2033,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "encoding_rs_io"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
-dependencies = [
- "encoding_rs",
-]
-
-[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
+
+[[package]]
+name = "engine"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "log",
+ "music",
+ "sound",
+ "tokio",
+]
 
 [[package]]
 name = "enum-primitive-derive"
@@ -3013,16 +2999,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "granit-parser"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05f05586d4d4df3d47123207826c40b252728b438a1a07bad3c01ee6bea401df"
-dependencies = [
- "arraydeque",
- "smallvec",
-]
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3153,6 +3129,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "host-sources"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.23.1",
+ "fastrand",
+ "flate2",
+ "futures",
+ "log",
+ "lyrics",
+ "md-5 0.11.0",
+ "music",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sound",
+ "tokio",
 ]
 
 [[package]]
@@ -4036,6 +4034,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
+name = "local"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "engine",
+ "fastrand",
+ "lofty",
+ "log",
+ "lyrics",
+ "music",
+ "paths",
+ "percent-encoding",
+ "rodio",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sound",
+ "storage",
+ "symphonia",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4087,6 +4110,7 @@ dependencies = [
  "fastrand",
  "futures",
  "log",
+ "lyrics",
  "music",
  "serde",
  "serde_json",
@@ -4127,6 +4151,16 @@ checksum = "5c463f9c428b7fc5ec885dcd39ce4aa61e29111d0e33483f6f98c74e89d8621e"
 dependencies = [
  "lyon_geom",
  "num-traits",
+]
+
+[[package]]
+name = "lyrics"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "kakasi",
+ "music",
+ "roxmltree 0.21.2",
 ]
 
 [[package]]
@@ -4355,63 +4389,26 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 name = "music"
 version = "0.2.6"
 dependencies = [
- "aes",
- "alsa",
  "anyhow",
- "ardftsrc",
  "async-trait",
- "base64 0.23.1",
  "bytes",
- "cbc",
- "cpal",
  "deunicode",
  "dirs 7.0.0",
- "env_logger",
  "fastrand",
- "flate2",
  "futures",
- "gethostname",
- "http",
  "image",
  "jiff",
  "kakasi",
- "libc",
- "lofty",
  "log",
- "md-5 0.11.0",
- "num-bigint",
- "objc2-core-audio",
- "objc2-core-foundation",
- "open",
  "paths",
  "percent-encoding",
- "protobuf",
- "pulseaudio",
  "reqwest",
  "ring",
- "rodio",
- "roxmltree 0.21.2",
- "rtrb",
- "rusqlite",
- "rustfft",
- "rustls",
- "rusty_aac",
- "semver",
  "serde",
- "serde-saphyr",
  "serde_json",
- "sha1 0.11.0",
- "soundtouch-rs",
- "storage",
- "symphonia",
- "tempfile",
+ "sound",
  "tokio",
- "tokio-tungstenite",
- "wat",
- "windows 0.62.2",
  "wisp-plugin-api",
- "wisp-plugin-host",
- "wisp-plugin-pack",
 ]
 
 [[package]]
@@ -5678,26 +5675,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "protobuf"
-version = "3.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
-dependencies = [
- "once_cell",
- "protobuf-support",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "protobuf-support"
-version = "3.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
-dependencies = [
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "pulley-interpreter"
 version = "50.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5849,7 +5826,6 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
- "chacha20",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -6641,20 +6617,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-saphyr"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
-dependencies = [
- "annotate-snippets",
- "encoding_rs_io",
- "granit-parser",
- "num-traits",
- "serde_core",
- "smallvec",
-]
-
-[[package]]
 name = "serde_bytes"
 version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6760,17 +6722,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
-]
-
-[[package]]
-name = "sha1"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.1",
- "digest 0.11.3",
 ]
 
 [[package]]
@@ -6945,6 +6896,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "sound"
+version = "0.2.6"
+dependencies = [
+ "alsa",
+ "anyhow",
+ "ardftsrc",
+ "async-trait",
+ "bytes",
+ "cpal",
+ "env_logger",
+ "jiff",
+ "libc",
+ "log",
+ "objc2-core-audio",
+ "objc2-core-foundation",
+ "paths",
+ "pulseaudio",
+ "reqwest",
+ "rodio",
+ "rtrb",
+ "rustfft",
+ "rusty_aac",
+ "serde",
+ "soundtouch-rs",
+ "symphonia",
+ "tempfile",
+ "tokio",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "soundtouch-rs"
 version = "0.1.0"
 dependencies = [
@@ -7026,12 +7008,14 @@ dependencies = [
  "fastrand",
  "futures",
  "gpui",
+ "host-sources",
  "i18n",
  "icons",
  "image",
  "libc",
  "log",
  "logic",
+ "lyrics",
  "minisign-verify",
  "moka",
  "mpris-server",
@@ -7051,6 +7035,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ui",
+ "wasm-provider",
  "webview",
  "windows-sys 0.61.2",
  "wisp-plugin-pack",
@@ -7683,22 +7668,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
-dependencies = [
- "futures-util",
- "log",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tungstenite 0.30.0",
-]
-
-[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7934,27 +7903,9 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
- "sha1 0.10.7",
+ "sha1",
  "thiserror 2.0.21",
  "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.10.3",
- "rustls",
- "rustls-pki-types",
- "sha1 0.11.0",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -8268,6 +8219,7 @@ dependencies = [
  "input",
  "jiff",
  "log",
+ "lyrics",
  "music",
  "open",
  "raw-window-handle",
@@ -8277,6 +8229,7 @@ dependencies = [
  "state",
  "ui",
  "unicode-bidi",
+ "wasm-provider",
  "windows-sys 0.61.2",
 ]
 
@@ -8433,6 +8386,36 @@ checksum = "0b883a26aea02eaabe2d2c3fba7eb039ef5cdcb5d5201ae5551e73d5e251a81f"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.263.0",
+]
+
+[[package]]
+name = "wasm-provider"
+version = "0.2.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "engine",
+ "env_logger",
+ "fastrand",
+ "host-sources",
+ "log",
+ "music",
+ "paths",
+ "reqwest",
+ "rodio",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "sound",
+ "tempfile",
+ "tokio",
+ "wat",
+ "wisp-plugin-api",
+ "wisp-plugin-host",
+ "wisp-plugin-pack",
 ]
 
 [[package]]
@@ -9532,6 +9515,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "host-sources",
  "i18n",
  "icons",
  "image",
@@ -9539,6 +9523,7 @@ dependencies = [
  "interprocess",
  "ksni",
  "libc",
+ "local",
  "log",
  "music",
  "objc2 0.6.5",
@@ -9557,6 +9542,7 @@ dependencies = [
  "tray-icon",
  "ui",
  "views",
+ "wasm-provider",
  "webview",
  "widestring",
  "windows 0.62.2",

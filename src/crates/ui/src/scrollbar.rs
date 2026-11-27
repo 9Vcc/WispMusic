@@ -143,6 +143,8 @@ pub struct Scrollbar {
     /// Whether the bar only shows where the region is while it scrolls and takes no pointer.
     passive: bool,
     track_inset: Pixels,
+    /// How far the thumb stands in from the region's side edge.
+    edge_inset: Pixels,
     track_top: Pixels,
     track_bottom: Pixels,
     maximum: Option<Pixels>,
@@ -172,6 +174,7 @@ impl Scrollbar {
             always_visible: false,
             passive: false,
             track_inset: Pixels::ZERO,
+            edge_inset: THUMB_INSET,
             track_top: Pixels::ZERO,
             track_bottom: Pixels::ZERO,
             maximum: None,
@@ -212,6 +215,15 @@ impl Scrollbar {
         self
     }
 
+    /// Switches between a passive position mark and an interactive scrollbar.
+    pub fn set_passive(&mut self, passive: bool, cx: &mut Context<Self>) {
+        if self.passive != passive {
+            self.passive = passive;
+            self.hovered = false;
+            cx.notify();
+        }
+    }
+
     pub fn paced(mut self, pace: f32) -> Self {
         self.glide.set_pace(pace);
         self
@@ -233,6 +245,12 @@ impl Scrollbar {
 
     pub fn track_inset(mut self, inset: Pixels) -> Self {
         self.track_inset = inset;
+        self
+    }
+
+    /// Stands the thumb `inset` in from the region's side edge.
+    pub fn edge_inset(mut self, inset: Pixels) -> Self {
+        self.edge_inset = inset;
         self
     }
 
@@ -684,7 +702,7 @@ impl Render for Scrollbar {
             return div()
                 .absolute()
                 .top(self.track_inset + self.track_top)
-                .right(THUMB_INSET)
+                .right(self.edge_inset)
                 .w(BAR)
                 .h(track)
                 .child(
@@ -742,7 +760,7 @@ impl Render for Scrollbar {
                     .id(("scrollbar-thumb", cx.entity_id()))
                     .absolute()
                     .top(travel * progress)
-                    .right(THUMB_INSET + REACH)
+                    .right(self.edge_inset + REACH)
                     .w(BAR)
                     .h(thumb)
                     .rounded_full()

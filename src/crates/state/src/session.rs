@@ -171,7 +171,7 @@ pub struct Session {
     window_task: Option<Task<()>>,
     local_provider: Arc<dyn MusicProvider>,
     local_folders: Vec<PathBuf>,
-    plugins: music::plugins::Catalog,
+    plugins: wasm_provider::Catalog,
     local_client: Option<Arc<dyn MusicApi>>,
     /// The latest local metadata and exact move aliases, applied to already queued songs.
     local_tracks: HashMap<String, Track>,
@@ -209,7 +209,7 @@ impl Session {
     pub fn new(
         providers: Vec<Arc<dyn MusicProvider>>,
         local_provider: Arc<dyn MusicProvider>,
-        plugins: music::plugins::Catalog,
+        plugins: wasm_provider::Catalog,
         settings: Entity<AppSettings>,
         io: Io,
         cx: &mut Context<Self>,

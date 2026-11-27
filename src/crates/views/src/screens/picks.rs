@@ -1491,7 +1491,7 @@ impl Render for RadioView {
             .size_full()
             .child(
                 Scroller::new("radio-page", &self.scrollbar)
-                    .pb(px(32.) + Chrome::bottom(cx))
+                    .pb(px(32.) + Chrome::track_bottom(cx))
                     .child(
                         div().w_full().flex().justify_center().child(
                             div()

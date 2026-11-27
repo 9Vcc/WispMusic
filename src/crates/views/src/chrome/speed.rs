@@ -1,4 +1,4 @@
-//! 播放条上的变速控件（Wisp 口径），占用原先「共享收听」按钮的位置。
+//! 播放条上的变速控件。
 //! 点开是 0.5×–2.0× 的六档；选定后引擎在原位置重开当前曲目以立即生效。
 
 use gpui::{Context, Entity, IntoElement, SharedString, Window};

@@ -2,20 +2,28 @@ use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::*;
-use gpui::{AnyView, App, Context, Entity, FocusHandle, Pixels, Render, StyleRefinement};
+use gpui::{
+    AnyView, App, Context, Entity, FocusHandle, Pixels, Render, SpringConfig, StyleRefinement,
+};
 use gpui::{Window, deferred, div};
 use input::WORKSPACE_CONTEXT;
 use state::{AppSettings, Playback, Queue, SideTab, Wisp};
 use ui::{
-    Activate, ActiveTheme as _, Deselect, Entrance, Remove, SelectNext, SelectPrevious, entering,
-    shown_listing, veiled,
+    Activate, ActiveTheme as _, Deselect, Entrance, Remove, SelectNext, SelectPrevious, Sprung,
+    entering, shown_listing, veiled,
 };
 
 use crate::chrome::{
-    AppNotice, Chrome, PlayerBar, SidebarLeft, SidebarRight, SwipeCue, TitleBarOptions,
+    AppNotice, Chrome, PlayerBar, SidebarLeft, SidebarRight, SwipeCue, TitleBarOptions, sheet_frame,
 };
 use crate::shared::menus::CardMenu;
 use crate::shells::Shell;
+
+/// How close the island's shift between the sheet's centre and the window's has to come to its
+/// end to count as landed.
+const SHIFT_REST: f32 = 0.002;
+/// The spring that moves the island between the sheet's centre and the window's.
+const ISLAND_SHIFT: SpringConfig = ui::spring(0.2, 0.);
 
 pub(crate) enum WorkspaceHeader {
     Page(AnyView),
@@ -39,6 +47,8 @@ pub(crate) struct Workspace {
     /// own parts instead.
     cached: bool,
     transition: Option<Entrance>,
+    /// Where the island stands between the sheet's centre, at 0, and the window's, at 1.
+    island_shift: Option<Sprung>,
     focus: FocusHandle,
 }
 
@@ -54,6 +64,8 @@ impl Workspace {
         let player_bar = cx.new(|cx| PlayerBar::new(playback.clone(), queue, cx));
         let settings = Wisp::global(cx).settings.clone();
         cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
+        cx.observe(&sidebar_right, |_, _, cx| cx.notify()).detach();
 
         Self {
             sidebar,
@@ -67,6 +79,7 @@ impl Workspace {
             header: None,
             cached: true,
             transition: None,
+            island_shift: None,
             focus: cx.focus_handle(),
         }
     }
@@ -146,16 +159,18 @@ impl Shell for Workspace {
             navigation: true,
             sidebar_open: self.sidebar.read(cx).is_open(),
             sidebar_right: Some(self.sidebar_right.read(cx).is_open()),
-            border: true,
+            border: false,
             content,
             left: None,
             transparent: false,
+            sheet: true,
         }
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
         let right = self.sidebar_right.read(cx).occupied_width(window);
         let reserved = self.sidebar_right.read(cx).reserved_width();
         self.sidebar
@@ -173,12 +188,27 @@ impl Render for Workspace {
             false => Pixels::ZERO,
         };
         Chrome::set_bottom(bottom, cx);
+        let left_breadth = self.sidebar.read(cx).settled_breadth();
+        let right_breadth = self.sidebar_right.read(cx).settled_breadth();
+        let beside = |shown: Pixels, breadth: Pixels| match breadth > Pixels::ZERO {
+            true => f32::from(shown / breadth),
+            false => 0.,
+        };
+        // An overlaid sidebar floats above the sheet and keeps its own square edge.
+        let sheet_left = match overlay {
+            true => 0.,
+            false => beside(left, left_breadth),
+        };
+        let sheet_right = beside(right, right_breadth);
+        Chrome::set_sheet(sheet_left, sheet_right, underlap, cx);
+        let (corners, edges) = Chrome::sheet_shape(sheet_left, sheet_right, underlap, cx);
         // A cached view is laid out from the style given here and its own root
         // style is never consulted, so it can only be cached while it is in the
         // flow at a width this knows: an overlaid sidebar places itself, and a
         // closed one hides itself and takes no space at all.
         let sidebar_width = self.sidebar.read(cx).occupied_width();
         let animating = self.sidebar.read(cx).is_animating();
+        let right_animating = self.sidebar_right.read(cx).is_animating(window);
         // 动画期间宽度逐帧变化，缓存元素会锁死首帧宽度，因此这期间不缓存。
         let sidebar = match overlay || animating || sidebar_width == gpui::Pixels::ZERO {
             true => self.sidebar.clone().into_any_element(),
@@ -202,6 +232,22 @@ impl Render for Workspace {
             }
             WorkspaceHeader::Page(header) => header.clone().into_any_element(),
         });
+        // The island follows the sheet as either sidebar moves, and reaches over them only when
+        // the sheet becomes too narrow for every control.
+        let island = floating.then(|| {
+            let sheet_left = overlay_width + left;
+            let sheet_width = (window.viewport_size().width - sheet_left - right).max(Pixels::ZERO);
+            let target = f32::from(!PlayerBar::island_fits(sheet_width, window, cx));
+            let shift = self
+                .island_shift
+                .get_or_insert_with(|| Sprung::at(target))
+                .follow(target, ISLAND_SHIFT, SHIFT_REST, window, cx);
+            PlayerBar::island_span(sheet_left, sheet_width, shift, window, cx)
+        });
+        let viewport = window.viewport_size().width;
+        let (sheet_start, sheet_end) = (overlay_width + left, viewport - right);
+        let over = island.is_some_and(|(at, width)| at < sheet_start || at + width > sheet_end);
+        Chrome::set_island_clear(island.is_some() && !over, cx);
         let hidden = self.hidden(window, cx);
         // The scrim is what fades the outgoing page: it is the page's own colour at
         // full strength, so covering the content with it costs no layout and the
@@ -211,7 +257,7 @@ impl Render for Workspace {
         // around it for the length of the transition — a quad can only add coverage,
         // never replace it. There the content carries the fade itself, which is the
         // same curve at the price of leaving the cached layout path while it runs.
-        let dissolving = cx.theme().transparent;
+        let dissolving = theme.transparent;
         let scrim = match dissolving {
             true => 0.,
             false => hidden,
@@ -225,14 +271,15 @@ impl Render for Workspace {
         // rendered uncached. Every screen sizes its root `size_full`, so the layout
         // is the one the cache would have used, and only the frames of the
         // transition pay for the render.
-        let content = match (dissolving && hidden > 0.) || !self.cached {
-            true => self.content.clone().into_any_element(),
-            false => self
-                .content
-                .clone()
-                .cached(StyleRefinement::default().size_full())
-                .into_any_element(),
-        };
+        let content =
+            match (dissolving && hidden > 0.) || !self.cached || animating || right_animating {
+                true => self.content.clone().into_any_element(),
+                false => self
+                    .content
+                    .clone()
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element(),
+            };
 
         div()
             .id("workspace")
@@ -291,6 +338,13 @@ impl Render for Workspace {
                             .min_w_0()
                             .min_h_0()
                             .ml(overlay_width)
+                            // The page paints its own ground even on a see-through window; the
+                            // root must not stack another page colour underneath it.
+                            .bg(theme.background)
+                            .rounded_tl(corners.top_left)
+                            .rounded_tr(corners.top_right)
+                            .rounded_bl(corners.bottom_left)
+                            .rounded_br(corners.bottom_right)
                             .when(overlay, |this| this.overflow_hidden())
                             .when(covered, |this| this.hidden())
                             // A two-finger swipe across the page steps through its history,
@@ -350,7 +404,8 @@ impl Render for Workspace {
                                         )
                                     }),
                             )
-                            .child(self.swipe_cue.clone()),
+                            .child(self.swipe_cue.clone())
+                            .child(sheet_frame(corners, edges, cx)),
                     )
                     .child(self.sidebar_right.clone())
                     .when(overlay, |this| this.child(self.sidebar.clone())),
@@ -358,7 +413,11 @@ impl Render for Workspace {
             .child(
                 div()
                     .relative()
-                    .when(underlap, |bar| bar.absolute().left_0().right_0().bottom_0())
+                    .map(|bar| match (island, underlap) {
+                        (Some((left, width)), _) => bar.absolute().bottom_0().left(left).w(width),
+                        (None, true) => bar.absolute().left_0().right_0().bottom_0(),
+                        (None, false) => bar,
+                    })
                     .when(floating, |bar| {
                         bar.h(bar_height)
                             .flex()

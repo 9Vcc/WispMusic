@@ -2636,7 +2636,7 @@ impl Render for DesktopLyric {
         let mut stroke_animating = false;
         match lyric {
             Some(MusicLyrics::Synced { lines }) => {
-                let active = music::lyrics::active(&lines, at);
+                let active = lyrics::active(&lines, at);
                 if stroke_mode {
                     self.swap = None;
                     self.advance_stroke_pair(active, Instant::now());

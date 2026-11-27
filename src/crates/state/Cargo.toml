@@ -14,11 +14,13 @@ paths.workspace = true
 fastrand.workspace = true
 futures.workspace = true
 gpui.workspace = true
+host-sources.workspace = true
 i18n.workspace = true
 icons.workspace = true
 image.workspace = true
 logic.workspace = true
 log.workspace = true
+lyrics.workspace = true
 moka.workspace = true
 music.workspace = true
 notify.workspace = true
@@ -34,6 +36,7 @@ tempfile.workspace = true
 tokio.workspace = true
 ui.workspace = true
 webview.workspace = true
+wasm-provider.workspace = true
 wisp-plugin-pack.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]

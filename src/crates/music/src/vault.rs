@@ -35,7 +35,7 @@ use ring::rand::{SecureRandom as _, SystemRandom};
 use ring::{hkdf, hmac};
 use tokio::sync::watch;
 
-use crate::stream::Source;
+use sound::stream::Source;
 
 /// How much of a track one sealed chunk holds. Big enough that the tags cost nothing, small
 /// enough that a damaged chunk is found long before the decoder needs it.
@@ -201,7 +201,7 @@ impl Vault {
 
     /// The part of the vault one provider keeps its tracks in. `provider` names its folder and
     /// goes into every key, so no provider can open another's entries.
-    pub(crate) fn shelf(self: &Arc<Self>, provider: &'static str) -> Shelf {
+    pub fn shelf(self: &Arc<Self>, provider: &'static str) -> Shelf {
         Shelf {
             vault: self.clone(),
             provider,
@@ -282,7 +282,7 @@ impl Shelf {
     ///
     /// `variant` is whatever changes the bytes for the same id, such as the quality asked for.
     /// A lookup made while the vault is still unlocking waits for it, up to [`UNLOCK_WAIT`].
-    pub(crate) async fn find(&self, id: &str, variant: &str) -> Option<Kept> {
+    pub async fn find(&self, id: &str, variant: &str) -> Option<Kept> {
         if !self.vault.caching.load(Ordering::Relaxed) {
             return None;
         }
@@ -297,7 +297,7 @@ impl Shelf {
     ///
     /// The source passes through untouched whatever happens to the vault. A disk that refuses
     /// the entry only means the track is not kept.
-    pub(crate) fn keep<S: Source>(
+    pub fn keep<S: Source>(
         &self,
         id: &str,
         variant: &str,
@@ -461,18 +461,18 @@ impl Shelf {
 }
 
 /// A kept track, ready to be played again.
-pub(crate) struct Kept {
+pub struct Kept {
     /// What the provider stored beside the track when it was kept.
-    pub(crate) facts: Vec<u8>,
+    pub facts: Vec<u8>,
     /// The length of the track as the provider sent it.
-    pub(crate) length: u64,
+    pub length: u64,
     /// The track, chunk by chunk, as the provider sent it.
-    pub(crate) source: Stored,
+    pub source: Stored,
 }
 
 /// The bytes of a kept track, read a chunk at a time as the stream asks for them. A sealed
 /// chunk that fails to open removes the entry, so the next play downloads the track again.
-pub(crate) struct Stored {
+pub struct Stored {
     file: File,
     /// What opens each chunk.
     key: LessSafeKey,
@@ -519,7 +519,7 @@ impl Stored {
 }
 
 /// A source whose bytes are sealed into the vault as they pass through.
-pub(crate) struct Recording<S> {
+pub struct Recording<S> {
     source: S,
     /// The entry being written, until it is kept or given up on.
     pending: Option<Pending>,
@@ -527,7 +527,7 @@ pub(crate) struct Recording<S> {
 
 impl<S> Recording<S> {
     /// A source that passes through without keeping anything, for a provider with no shelf.
-    pub(crate) fn through(source: S) -> Self {
+    pub fn through(source: S) -> Self {
         Self {
             source,
             pending: None,

@@ -586,7 +586,7 @@ impl Render for SongView {
             .child(
                 Scroller::new("song-page", &self.scrollbar)
                     .hold()
-                    .bottom_inset(crate::chrome::Chrome::bottom(cx))
+                    .bottom_inset(crate::chrome::Chrome::track_bottom(cx))
                     .px(theme.metrics.inset + crate::chrome::Chrome::margin(window, cx))
                     .py(theme.metrics.inset)
                     .when(loading && track.is_none(), |this| {

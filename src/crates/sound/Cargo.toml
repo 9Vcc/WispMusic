@@ -1,0 +1,58 @@
+[package]
+name = "sound"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ardftsrc.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+cpal.workspace = true
+jiff.workspace = true
+log.workspace = true
+paths.workspace = true
+reqwest.workspace = true
+rodio = { workspace = true, features = [
+    "symphonia-aac",
+    "symphonia-aiff",
+    "symphonia-alac",
+    "symphonia-isomp4",
+    "symphonia-mkv",
+    "flac",
+    "mp3",
+    "vorbis",
+    "wav",
+] }
+rtrb.workspace = true
+rustfft.workspace = true
+rusty_aac.workspace = true
+serde.workspace = true
+soundtouch-rs.workspace = true
+symphonia.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa.workspace = true
+cpal = { workspace = true, features = ["pulseaudio"] }
+pulseaudio.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-audio.workspace = true
+objc2-core-foundation.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cpal = { workspace = true, features = ["realtime"] }
+windows.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

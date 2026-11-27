@@ -4,6 +4,7 @@ use router::{Destination, SettingsPage, SettingsTab, navigate};
 use ui::{ActiveTheme as _, Button, Room, TabBar, VeilEdge, effects, veil};
 
 use super::{Layout, SettingsView};
+use crate::chrome::Chrome;
 use crate::screens::equalizer::EqualizerView;
 
 /// How far the rows are blurred where they pass under the header. One blur pass serves every
@@ -121,7 +122,7 @@ impl Render for SettingsHeader {
                     layout.top,
                     BLUR,
                     theme.background,
-                    None,
+                    Chrome::sheet_corners(cx),
                     window,
                 ))
             })

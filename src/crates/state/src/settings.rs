@@ -26,7 +26,7 @@ use gpui::{
     App, Bounds, Context, DisplayId, EventEmitter, Pixels, Size, Subscription, Task, Window,
     WindowBounds, point, px, size,
 };
-use music::lyrics::LOCAL;
+use lyrics::LOCAL;
 use music::{Quality, WritingSystem};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rusqlite::{OptionalExtension, params};
@@ -1239,8 +1239,8 @@ impl AppSettings {
     }
 
     /// 把解灰设置灌成 music 侧的共享配置；Cookie 空串视为未填。
-    pub fn unblock_config(&self) -> music::builtin::UnblockConfig {
-        music::builtin::UnblockConfig::new(
+    pub fn unblock_config(&self) -> host_sources::UnblockConfig {
+        host_sources::UnblockConfig::new(
             self.values.unblock_enabled,
             self.values.unblock_flac,
             self.values.unblock_order_first,

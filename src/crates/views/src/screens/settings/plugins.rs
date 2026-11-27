@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, ExternalPaths, PathPromptOptions, SharedString, div, px, svg};
 use i18n::{localized, t};
-use music::plugins::{PluginHealth, PluginInfo};
 use state::{Outcome, Toasts, Wisp};
 use ui::{ActiveTheme as _, Button, Modal, Switch, Text};
+use wasm_provider::{PluginHealth, PluginInfo};
 
 use super::SettingsView;
 use crate::shared::confirm::{Confirm, Kind};

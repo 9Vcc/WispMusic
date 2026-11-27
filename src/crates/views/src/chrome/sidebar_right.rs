@@ -91,9 +91,21 @@ impl SidebarRight {
     }
 
     pub(crate) fn occupied_width(&self, window: &Window) -> Pixels {
-        match self.open && Self::available(window) {
+        match Self::available(window) {
             false => Pixels::ZERO,
+            true => self.width * self.motion.amount(std::time::Instant::now()),
+        }
+    }
+
+    pub(crate) fn is_animating(&self, window: &Window) -> bool {
+        Self::available(window) && self.motion.is_animating(std::time::Instant::now())
+    }
+
+    /// The width this sidebar occupies once its current open state has landed.
+    pub(crate) fn settled_breadth(&self) -> Pixels {
+        match self.open {
             true => self.width,
+            false => Pixels::ZERO,
         }
     }
 
@@ -231,8 +243,8 @@ impl Render for SidebarRight {
                 this.persist(cx);
                 cx.notify();
             }))
-            .when(!theme.transparent, |this| this.bg(theme.background))
-            .border_color(theme.border)
+            .bg(theme.sidebar)
+            .border_color(gpui::transparent_black())
             .child(
                 div()
                     .relative()

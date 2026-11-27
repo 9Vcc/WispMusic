@@ -7,8 +7,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use gpui::{Context, EventEmitter};
 use music::MusicProvider;
-use music::plugins::{Catalog, PluginHealth};
 use semver::Version;
+use wasm_provider::{Catalog, PluginHealth};
 use wisp_plugin_pack::{VerifyOptions, load as load_package};
 
 use crate::{Outcome, Toasts};
@@ -39,12 +39,12 @@ impl Plugins {
         &self.catalog
     }
 
-    pub fn health(&self, slug: &str) -> Option<music::plugins::PluginHealth> {
-        music::plugins::runtime::health_for(slug)
+    pub fn health(&self, slug: &str) -> Option<wasm_provider::PluginHealth> {
+        wasm_provider::runtime::health_for(slug)
     }
 
     pub fn sign_in_required(&self, slug: &str) -> bool {
-        music::plugins::runtime::sign_in_required_for(slug).unwrap_or(false)
+        wasm_provider::runtime::sign_in_required_for(slug).unwrap_or(false)
     }
 
     /// Watches the runtime health of installed slots and surfaces the automatic transitions
@@ -153,8 +153,8 @@ impl Plugins {
             .cloned()
             .with_context(|| format!("{slug} is not installed"))?;
         let version = match plugin.package {
-            Some(_) => music::plugins::rollback_flat(&self.dir, &plugin.id)?,
-            None => music::plugins::rollback(&self.dir, slug)?,
+            Some(_) => wasm_provider::rollback_flat(&self.dir, &plugin.id)?,
+            None => wasm_provider::rollback(&self.dir, slug)?,
         };
         self.reload_async(cx);
         Ok(version)
@@ -167,11 +167,11 @@ impl Plugins {
             .cloned()
             .with_context(|| format!("{slug} is not installed"))?;
         if plugin.package.is_some() {
-            music::plugins::uninstall_flat(&self.dir, &plugin.id)?;
+            wasm_provider::uninstall_flat(&self.dir, &plugin.id)?;
         }
         let legacy = self.dir.join(&plugin.slug);
         if legacy.exists() {
-            music::plugins::uninstall(&self.dir, &plugin.slug)?;
+            wasm_provider::uninstall(&self.dir, &plugin.slug)?;
         }
         self.reload_async(cx);
         Ok(())
@@ -184,9 +184,9 @@ impl Plugins {
             .cloned()
             .with_context(|| format!("{slug} is not installed"))?;
         if plugin.package.is_some() {
-            music::plugins::set_flat_enabled(&self.dir, &plugin.id, enabled)?;
+            wasm_provider::set_flat_enabled(&self.dir, &plugin.id, enabled)?;
         } else {
-            music::plugins::set_enabled(&self.dir, slug, enabled)?;
+            wasm_provider::set_enabled(&self.dir, slug, enabled)?;
         }
         self.reload_async(cx);
         Ok(())

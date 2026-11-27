@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use gpui::accesskit::Role;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyView, App, Bounds, ClickEvent, Context, Entity, FocusHandle, FontWeight,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, ScrollEvent, SharedString, SpringConfig, SpringState, Task,
-    TextShadow,
+    AnyElement, AnyView, App, Bounds, ClickEvent, Context, Corners, Entity, FocusHandle,
+    FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, ScrollEvent, SharedString, SpringConfig, SpringState,
+    Task, TextShadow,
 };
 use gpui::{Div, ElementId, Window, anchored, canvas, deferred, div, phi, point, px, svg};
 use i18n::t;
@@ -28,7 +28,7 @@ use ui::{Perch, tabular};
 use crate::chrome::{Aside, OutputPicker, PlayerBar, SpeedButton, TitleBarOptions};
 use crate::shared::menus::ItemMenu;
 use crate::shared::transport::{
-    COVER_FLIGHT, CoverFade, ShellSwap, fraction, like, moved, play_mode, transport,
+    Backdrops, COVER_FLIGHT, CoverFade, ShellSwap, fraction, like, moved, play_mode, transport,
 };
 use crate::shared::visualizer::VisualizerDrive;
 use crate::shared::volume::{
@@ -1987,7 +1987,10 @@ impl FullscreenView {
             .opacity(1. - hide)
             .when(hide >= 1., |this| this.invisible())
             .child(self.seek(cx));
-        let mode = dozing(play_mode(&self.playback, false, cx).into_any_element(), hide);
+        let mode = dozing(
+            play_mode(&self.playback, false, cx).into_any_element(),
+            hide,
+        );
         let sound = dozing(
             rising_volume(&self.volume, &self.playback, true, cx).into_any_element(),
             hide,
@@ -2263,6 +2266,7 @@ impl Shell for FullscreenView {
             // the same way out at the start of the bar.
             left: Some(self.collapse.clone().into()),
             transparent: ambient::shown(cx),
+            sheet: false,
         }
     }
 }
@@ -2460,6 +2464,9 @@ impl Render for FullscreenView {
         // and the artist line keep their own edges. The band fades with the controls, so a
         // hidden set takes it along, and with the spectrum, so it lasts for as long as bars
         // still show under the controls.
+        let backdrops = cx
+            .try_global::<Backdrops>()
+            .map_or(1., |backdrops| backdrops.0);
         if visualizer_presence > 0. && shown && shared::effects() {
             let band = viewport.height * VEIL;
             spectrum.push(
@@ -2469,13 +2476,13 @@ impl Render for FullscreenView {
                     .right_0()
                     .bottom_0()
                     .h(band)
-                    .opacity((1. - hide) * (visualizer_presence * VEIL_LEAD).min(1.))
+                    .opacity(backdrops * (1. - hide) * (visualizer_presence * VEIL_LEAD).min(1.))
                     .child(veil(
                         VeilEdge::Bottom,
                         band,
                         VEIL_BLUR,
                         theme.background,
-                        corner,
+                        corner.map_or_else(Corners::default, Corners::all),
                         window,
                     ))
                     .into_any_element(),

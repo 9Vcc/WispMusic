@@ -33,7 +33,7 @@ use crate::shared::volume::{RisingVolume, VolumeHost, rising_volume};
 
 const SEEK_MAX: f32 = 560.;
 /// How wide a small icon button draws: `SMALL_INSET` on each side of a 16 px icon. Every button
-/// on the classic bar's right side is one, the sessions picker included.
+/// on the classic bar's right side is one.
 const ICON_BUTTON: f32 = 32.;
 /// The classic bar's spacing in rems: its `px_5` at either end, its `gap_4` between the three
 /// columns, the right side's `gap_2` between its groups, the `gap_1` between the panel buttons
@@ -57,6 +57,10 @@ const STACK_GAP: f32 = 0.5;
 const COVER_GAP: f32 = 0.75;
 /// The island's `gap_5` between its transport, its middle and its tools, in rems.
 const ISLAND_GAP: f32 = 1.25;
+/// The room the island keeps between the cover and the title, as a share of the cover metric.
+const ISLAND_MIDDLE: f32 = 1.3;
+/// The widest the island's pill draws, in pixels.
+const ISLAND_MAX: f32 = 800.;
 /// How far the island keeps from the sheet's sides and the window's foot, in pads.
 const ISLAND_CLEAR: f32 = 1.5;
 /// How far below the cover the middle of the island's seek line stands, and as far again the
@@ -405,11 +409,7 @@ impl PlayerBar {
     }
 
     /// The playing cover keeps its album link and context menu in every layout.
-    fn artwork(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    fn artwork(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let artwork = Self::cover_side(window, cx);
         let away = cx.try_global::<CoverAway>().is_some_and(|away| away.0);
         let shown = self.playback.read(cx).shown_track(cx);
@@ -448,7 +448,10 @@ impl PlayerBar {
                         .when(away, |this| this.invisible())
                         .child(Artwork::new(cover).size(artwork)),
                 )
-                .seen_as(COVER_FLIGHT),
+                .seen_as(COVER_FLIGHT)
+                // The island rides along with the sheet as a sidebar slides, and a cover that
+                // flew after every such move would trail behind the rest of it.
+                .follows(!Self::floating(window, cx)),
             )
             .flex_none()
     }
@@ -722,6 +725,59 @@ impl PlayerBar {
         (pill - cx.theme().metrics.control) / 2.
     }
 
+    /// The narrowest the island's pill draws: every control around a middle that keeps room for
+    /// the cover and the title.
+    fn island_least(window: &Window, cx: &App) -> Pixels {
+        let rem = window.rem_size();
+        let (pill, _) = Self::island(cx);
+        let button = px(ICON_BUTTON);
+        let row = |count: f32, gap: f32| button * count + rem * gap * (count - 1.).max(0.);
+        let settings = Wisp::global(cx).settings.read(cx);
+        let lyrics = usize::from(settings.lyrics_enabled());
+        let sides = match SidebarRight::available(window) {
+            true => lyrics + usize::from(!Wisp::global(cx).playback.read(cx).fm_session()),
+            false => 0,
+        };
+        let tools = 5 + sides + lyrics;
+        // Speed and the panel buttons form one tightly spaced group. The four gaps to the
+        // remaining controls use the wider spacing of the island's tools row.
+        let right = row(tools as f32, TOOL_GAP) + rem * SIDE_GAP * 4.;
+        Self::island_pad(pill, cx) * 2.
+            + row(4., SIDE_GAP)
+            + rem * ISLAND_GAP * 2.
+            + cx.theme().metrics.cover * ISLAND_MIDDLE
+            + right
+    }
+
+    /// Whether the whole island fits on a sheet `sheet_width` wide. One that does not widens over
+    /// the sidebars and stands centred on the window instead.
+    pub(crate) fn island_fits(sheet_width: Pixels, window: &Window, cx: &App) -> bool {
+        let (_, clear) = Self::island(cx);
+        (sheet_width.max(Pixels::ZERO) - clear * 2.).min(px(ISLAND_MAX))
+            >= Self::island_least(window, cx)
+    }
+
+    /// Where the island stands across the window, as its left edge and width with its clear space
+    /// included. `shift` runs from 0, centred on the sheet, to 1, centred on the window.
+    pub(crate) fn island_span(
+        sheet_left: Pixels,
+        sheet_width: Pixels,
+        shift: f32,
+        window: &Window,
+        cx: &App,
+    ) -> (Pixels, Pixels) {
+        let (_, clear) = Self::island(cx);
+        let viewport = window.viewport_size().width;
+        let room = (viewport - clear * 2.).max(Pixels::ZERO);
+        let width = (sheet_width.max(Pixels::ZERO) - clear * 2.)
+            .min(px(ISLAND_MAX))
+            .max(Self::island_least(window, cx))
+            .min(room);
+        let on_sheet = sheet_left + sheet_width.max(Pixels::ZERO) / 2.;
+        let centre = on_sheet + (viewport / 2. - on_sheet) * shift.clamp(0., 1.);
+        (centre - width / 2. - clear, width + clear * 2.)
+    }
+
     /// Whether the bar floats over the page as an island. The workspace then stands it over the
     /// page and lets the page run under it to the window's foot.
     pub(crate) fn floating(window: &Window, cx: &App) -> bool {
@@ -764,7 +820,7 @@ impl Render for PlayerBar {
             true => Some(self.side_buttons(cx)),
             false => None,
         };
-        // [wisp] 共享收听按钮的位置改放变速控件，始终可用。
+        // 变速控件始终可用。
         let picker = true;
         // [wisp] 播放模式键排在音量左侧，也算一颗音量前的图标按钮；mini 键同理。
         let tools = 1
@@ -819,9 +875,13 @@ impl Render for PlayerBar {
             .map(|this| match floating {
                 true => this
                     .h(pill)
-                    .max_w(px(800.))
+                    .max_w(px(ISLAND_MAX))
                     .px_5()
-                    .rounded_full()
+                    .when_else(
+                        theme.radius == px(0.),
+                        |this| this.rounded_none(),
+                        |this| this.rounded_full(),
+                    )
                     .border_1()
                     .border_color(theme.border)
                     .shadow_md(),
@@ -830,15 +890,16 @@ impl Render for PlayerBar {
                     .px_5()
                     .when(stacked, |this| this.py_2())
                     .when_some(radius, |this, radius| this.rounded_b(radius))
-                    .border_t_1()
-                    .border_color(theme.border),
+                    .when(transparent, |this| {
+                        this.border_t_1().border_color(theme.border)
+                    }),
             })
             .when_else(
                 transparent,
                 |this| ui::bar_surface(this, cx).text_color(theme.popover_foreground),
                 |this| match floating {
                     true => this.bg(theme.popover).text_color(theme.popover_foreground),
-                    false => this.when(!theme.transparent, |this| this.bg(theme.secondary)),
+                    false => this.when(!theme.transparent, |this| this.bg(theme.sidebar)),
                 },
             )
             .occlude()

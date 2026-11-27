@@ -243,7 +243,7 @@ pub fn init(
     providers: Vec<Arc<dyn MusicProvider>>,
     local_provider: Arc<dyn MusicProvider>,
     lyrics_providers: Vec<Arc<dyn LyricsProvider>>,
-    plugins: music::plugins::Catalog,
+    plugins: wasm_provider::Catalog,
     plugins_dir: PathBuf,
 ) {
     cx.set_global(io.clone());

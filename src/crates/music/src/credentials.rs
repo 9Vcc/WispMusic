@@ -28,7 +28,7 @@ pub(crate) fn root() -> PathBuf {
 
 /// A provider's own accounts folder, named by its slug, under `$XDG_DATA_HOME/wisp/accounts`.
 /// The first call in a process moves the sign-ins an older Wisp left in the cache folder.
-pub(crate) fn dir(slug: &str) -> PathBuf {
+pub fn dir(slug: &str) -> PathBuf {
     MIGRATION.call_once(migrate);
     accounts().join(slug)
 }
@@ -37,8 +37,9 @@ pub(crate) fn dir(slug: &str) -> PathBuf {
 /// go to a temporary file beside it that is synced and then renamed over the old one, so a
 /// crash leaves either the old sign-in or the new one and never half of either. It fails when
 /// the system names no data folder, rather than leaving credentials in the shared temp dir.
-pub(crate) fn write(path: &Path, contents: &[u8]) -> Result<()> {
-    let private = paths::data_local_dir().context("cannot find a private folder for credentials")?;
+pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
+    let private =
+        paths::data_local_dir().context("cannot find a private folder for credentials")?;
     if !path.starts_with(&private) {
         anyhow::bail!(
             "cannot store credentials outside {}: {}",
@@ -87,7 +88,7 @@ pub(crate) fn secure(path: &Path) {
 }
 
 /// Deletes a credential file, treating one that is already gone as success.
-pub(crate) fn remove(path: &Path) {
+pub fn remove(path: &Path) {
     if let Err(error) = std::fs::remove_file(path)
         && error.kind() != std::io::ErrorKind::NotFound
     {

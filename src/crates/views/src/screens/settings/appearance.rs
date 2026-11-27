@@ -535,7 +535,7 @@ pub(super) fn usable_fonts(text_system: std::sync::Arc<gpui::TextSystem>) -> Vec
 
     let names: Vec<String> = names
         .into_iter()
-        .filter(|name| !name.starts_with('.'))
+        .filter(|name| !name.starts_with('.') && name != crate::shared::typeface::HANGUL_FONT)
         .collect();
     // A family whose metrics report an inverted glyph box would crash the renderer the moment a
     // line was painted in it, so it never reaches the picker. See `shared::typeface`.

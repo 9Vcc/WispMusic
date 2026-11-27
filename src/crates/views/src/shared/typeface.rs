@@ -66,10 +66,8 @@ pub(crate) fn drawable(text_system: &Arc<TextSystem>, names: Vec<String>) -> Vec
 // 中英文共用一套笔画与字面，观感统一；系统自带的雅黑/宋体在部分字号与字重下会
 // 丢笔画、发虚。
 //
-// 这里必须是**主字体**，不能只当回退项：gpui_windows 生成回退映射时是从
-// **系统**字体集合里按族名查字的（`direct_write.rs::generate_font_fallbacks`），
-// 内嵌字体只活在 custom 集合里，系统里没装就查不到、那条映射会被静默跳过。
-// 所以把普惠体写进 `SCRIPTS` 是无效的（此前即如此，中文实际一直走雅黑）。
+// 当前 gpui 已支持内嵌字体作为回退，Hangul 子集因此放在 `SCRIPTS` 首位；
+// `UI_FONT` 仍作为主字体，保证中英文共用普惠体的字面与度量。
 //
 // 族名取 typographic family（nameID 16）而**不是** nameID 1：实测注册进
 // DirectWrite 后，字体集合报告的名字是本地化的「阿里巴巴普惠体 3.0」，而
@@ -80,9 +78,14 @@ pub(crate) fn drawable(text_system: &Arc<TextSystem>, names: Vec<String>) -> Vec
 // 品牌名与标题用的 SEMIBOLD/BOLD 就落到真字面上，而不是由 500 一档顶替。
 pub(crate) const UI_FONT: &str = "Alibaba PuHuiTi 3.0";
 
-// [wisp] 主字体缺字时的回退链，按语种排优先级。普惠体覆盖拉丁与中日韩，
-// 这里补的是阿拉伯/希伯来/泰/天城体与 emoji，以及各平台的中文兜底。
-const SCRIPTS: [&str; 18] = [
+/// The bundled Hangul subset, first in the fallback chain so Korean does not depend on a
+/// system face being installed.
+pub(crate) const HANGUL_FONT: &str = "Sonora Hangul";
+
+// [wisp] 主字体缺字时的回退链，按语种排优先级。Hangul 先走内嵌子集，
+// 其余脚本使用系统字体与 emoji 兜底。
+const SCRIPTS: [&str; 19] = [
+    HANGUL_FONT,
     "Source Han Sans",
     "Noto Sans CJK JP",
     "Noto Sans CJK SC",
@@ -116,9 +119,8 @@ pub(crate) fn ui_font(chosen: &str) -> Font {
     }
 }
 
-/// The system fonts drawn for whatever `UI_FONT` and a chosen face leave uncovered. One list
-/// for both, since an embedded face cannot serve as a fallback: gpui_windows resolves the
-/// names below against the **system** collection only, where the bundled font is absent.
+/// The fonts drawn for whatever `UI_FONT` and a chosen face leave uncovered. The bundled
+/// Hangul subset is first, followed by the platform's own script faces.
 fn scripts() -> FontFallbacks {
     static SCRIPTS_FALLBACK: std::sync::OnceLock<FontFallbacks> = std::sync::OnceLock::new();
     SCRIPTS_FALLBACK

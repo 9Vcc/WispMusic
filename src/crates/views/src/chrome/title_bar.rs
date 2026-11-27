@@ -59,6 +59,8 @@ pub(crate) struct TitleBarOptions {
     pub left: Option<AnyView>,
     /// Lets the fullscreen ambient background show through behind the controls.
     pub transparent: bool,
+    /// Whether this bar stands over a workspace sheet rather than fullscreen or sign-in.
+    pub sheet: bool,
 }
 
 impl Default for TitleBarOptions {
@@ -71,6 +73,7 @@ impl Default for TitleBarOptions {
             content: None,
             left: None,
             transparent: false,
+            sheet: false,
         }
     }
 }
@@ -483,9 +486,15 @@ impl Render for TitleBar {
             .h(height)
             .flex_none()
             .when_some(radius, |this, radius| this.rounded_t(radius))
-            .when(!self.options.transparent && !theme.transparent, |this| {
-                this.bg(theme.background)
-            })
+            .when(
+                !self.options.transparent && (self.options.sheet || !theme.transparent),
+                |this| {
+                    this.bg(match self.options.sheet {
+                        true => theme.sidebar,
+                        false => theme.background,
+                    })
+                },
+            )
             // The height is a border box, so a bar that drops its border centres its controls
             // one pixel lower than one that keeps it. The edge is always an edge; only its
             // colour goes, and fullscreen's controls land where the workspace's do.

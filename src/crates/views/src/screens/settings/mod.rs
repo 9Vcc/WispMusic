@@ -1263,7 +1263,6 @@ impl SettingsView {
     /// Builds the slot's row or cards when its group is visible or needs measuring.
     fn slot_element(&self, slot: Slot, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         match slot {
-            // [wisp] 共享收听设置已移除，保留槽位消化旧搜索结果
             Slot::Startup => self.startup_row(cx),
             Slot::StartupAnimation => self.startup_animation_row(cx),
             Slot::Entries => self.entries_row(cx),

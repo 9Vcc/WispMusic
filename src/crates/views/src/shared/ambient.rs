@@ -280,11 +280,12 @@ impl Render for Ambient {
             Some(_) => None,
         };
 
+        let stage = shaded(Hsla {
+            a: 1.,
+            ..theme.background
+        });
         let waves = ui::Waves::new(layered(colors).map(shaded))
-            .stage(shaded(Hsla {
-                a: 1.,
-                ..theme.background
-            }))
+            .stage(stage)
             .time(elapsed);
 
         div()
@@ -298,7 +299,27 @@ impl Render for Ambient {
                 None => {
                     let viewport = window.viewport_size();
                     let scale = window.scale_factor();
+                    // A scaled layer is clipped at the window's right and bottom edges. Carry
+                    // the stage past them so fullscreen's bottom veil never blurs bare desktop.
                     this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(viewport.height)
+                            .w(viewport.width * 2.)
+                            .h(viewport.height)
+                            .bg(stage),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(viewport.width)
+                            .top_0()
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .bg(stage),
+                    )
+                    .child(
                         div()
                             .absolute()
                             .top_0()

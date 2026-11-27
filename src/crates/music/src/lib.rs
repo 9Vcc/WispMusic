@@ -1,38 +1,26 @@
 // [wisp] vendored Sonora 引擎代码，provider 裁剪后留有不少未调用的工具函数，暂不逐个删除。
 #![allow(dead_code)]
-mod aac;
 pub mod artwork;
-mod audio;
-pub mod builtin;
 mod calendar;
+pub mod convert;
 pub mod cover;
 pub mod credentials;
-pub mod dns;
-pub use dns::{bind_dns_runtime, dns as dns_resolver};
-pub mod engine;
-pub mod equalizer;
 pub mod escape;
+mod japanese;
 pub mod link;
-pub mod local;
-pub mod lyrics;
 mod models;
-mod mp4;
 pub mod order;
-pub mod output;
-pub mod plugins;
 pub mod progress;
-pub mod ranged;
 mod redact;
-mod sink;
+pub mod romanize;
 pub mod smart;
-mod spectrum;
-pub mod speed;
-mod stream;
-#[cfg(test)]
-mod test_support;
-mod trim;
 pub mod trouble;
 pub mod vault;
+
+pub use sound::dns::{bind_dns_runtime, dns as dns_resolver};
+pub use sound::{Analyzer, Level, Listening, Spectrum, Watch};
+pub use sound::{Meter, SoundServer, missing_bridge};
+pub use sound::{audio, dns, equalizer, output, ranged, spectrum, speed, stream};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,7 +31,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use jiff::fmt::temporal::DateTimeParser;
 
-pub use audio::Meter;
 pub use equalizer::Equalizer;
 pub use models::{
     Album, AlbumCatalogue, AlbumDetail, Arrival, Artist, ArtistCatalogue, ArtistProfile, ArtistRef,
@@ -53,13 +40,11 @@ pub use models::{
     RomanizedText, SavedArtist, Track, TrackKey, TrackTags, UserDetail, UserProfile, Voice,
     WritingSystem,
 };
-pub use output::{Server as SoundServer, missing_bridge};
 pub use redact::redact;
 pub use smart::{
     Condition, FieldKind, Operand, OperandShape, Operator, Problem, Rule, RuleGroup, RuleProblem,
     SmartPlaylist, SmartPlaylistUpdate, SmartRules, field_kind, parse_number,
 };
-pub use spectrum::{Analyzer, Level, Listening, Spectrum, Watch};
 
 pub const LOCAL_TRACK_PREFIX: &str = "local:";
 pub const LOCAL_ALBUM_PREFIX: &str = "local-album:";
@@ -493,12 +478,7 @@ pub trait MusicApi: Send + Sync {
 
     /// One more page of a genre, starting at `offset` and asking for at most `limit` cards.
     /// Providers that list a genre in one go ignore both and return the whole page again.
-    async fn genre_page(
-        &self,
-        genre_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<GenreDetail> {
+    async fn genre_page(&self, genre_id: &str, offset: usize, limit: usize) -> Result<GenreDetail> {
         let _ = (offset, limit);
         self.genre(genre_id).await
     }
@@ -536,7 +516,7 @@ pub struct PlaybackConfig {
     /// 播放速度（1.0 = 正常）。provider 在打开解码器时套一层 Speed。
     pub speed: f32,
     /// 跨线程速度控制：UI 改速度时写这里，音频线程就地生效，不重建引擎。
-    pub speed_control: Arc<crate::speed::SpeedControl>,
+    pub speed_control: Arc<sound::speed::SpeedControl>,
     /// Shared like `equalizer`: every output the engine opens reports its loudest sample here.
     pub meter: Meter,
     /// Shared like `equalizer`: every output the engine opens lets it hear the music ahead of the

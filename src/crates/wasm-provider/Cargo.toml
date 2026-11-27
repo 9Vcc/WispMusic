@@ -1,0 +1,36 @@
+[package]
+name = "wasm-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+engine.workspace = true
+fastrand.workspace = true
+host-sources.workspace = true
+log.workspace = true
+music.workspace = true
+paths.workspace = true
+reqwest.workspace = true
+rodio.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sound.workspace = true
+wisp-plugin-api.workspace = true
+wisp-plugin-host.workspace = true
+wisp-plugin-pack.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
+wat = "1"
+
+[lints]
+workspace = true
