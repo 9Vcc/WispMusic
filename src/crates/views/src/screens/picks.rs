@@ -188,7 +188,7 @@ impl Render for RadioHeader {
         self.view.update(cx, |view, cx| {
             let scrolled = view.scrollbar.read(cx).offset().max(px(0.));
             let progress = (scrolled.as_f32() / HEADER_SCROLL).clamp(0., 1.);
-            view.sliver_header(progress, page, cx)
+            view.sliver_header(progress, page, window, cx)
         })
     }
 }
@@ -943,30 +943,45 @@ impl RadioView {
         &self,
         progress: f32,
         page: gpui::Pixels,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *cx.theme();
         let frosted = theme.transparent && ui::blurring(cx);
         let height = HEADER_H + HEADER_TOP - (HEADER_H + HEADER_TOP - HEADER_COLLAPSED) * progress;
+        // A page as wide as the content area starts at the sheet's rounded top corners, which a
+        // square header background would cover.
+        let flush = page >= Chrome::content(window, cx);
+        let corners = Chrome::sheet_corners(cx);
         let header = self.header(progress, cx);
         div()
             .relative()
             .w_full()
             .h(px(height))
-            .overflow_hidden()
-            .bg(theme.card(frosted))
-            .when(frosted, |this| this.backdrop_blur(ui::GLASS_BLUR))
-            .border_b_1()
-            .border_color(theme.border.opacity(0.5))
+            .flex()
+            .justify_center()
             .child(
-                div().size_full().flex().justify_center().child(
-                    div()
-                        .w(page)
-                        .px(px(PAGE_PAD))
-                        .h_full()
-                        .pt(px(HEADER_TOP * (1. - progress)))
-                        .child(header),
-                ),
+                div()
+                    .relative()
+                    .w(page)
+                    .h_full()
+                    .overflow_hidden()
+                    .bg(theme.card(frosted))
+                    .when(flush, |this| {
+                        this.rounded_tl(corners.top_left)
+                            .rounded_tr(corners.top_right)
+                    })
+                    .when(frosted, |this| this.backdrop_blur(ui::GLASS_BLUR))
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.5))
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(PAGE_PAD))
+                            .h_full()
+                            .pt(px(HEADER_TOP * (1. - progress)))
+                            .child(header),
+                    ),
             )
             .into_any_element()
     }
