@@ -967,13 +967,22 @@ impl Render for PlayerBar {
         let span = Chrome::window_room(window);
         let layout = self.settings.read(cx).player_bar_layout();
         let stacked = Self::stacked(window, layout);
+        let floating = Self::floating(window, cx);
         let transparent = self.settings.read(cx).player_bar_translucent();
         let height = Self::height(window, cx);
         let lyrics = self.settings.read(cx).lyrics_enabled();
         let show_track = span.fits(Room::Snug);
         // A narrow bar keeps the transport, playback mode, volume and fullscreen, and puts the
-        // panel, desktop-lyrics and mini-player controls in one more menu.
-        let overflowing = !Chrome::room(window, cx).fits(Room::Wide);
+        // panel, desktop-lyrics and mini-player controls in one more menu. The bar's own width
+        // decides, not the page beside the sidebars, since opening a panel does not shorten it.
+        let room = match floating {
+            true => self
+                .span
+                .map(Room::of)
+                .unwrap_or_else(|| Chrome::room(window, cx)),
+            false => Chrome::window_room(window),
+        };
+        let overflowing = !room.fits(Room::Wide);
         let fm = self.playback.read(cx).fm_session();
         let sides = match SidebarRight::available(window) {
             true if !overflowing => Some(self.side_buttons(cx)),
@@ -1027,7 +1036,6 @@ impl Render for PlayerBar {
         let radius = crate::chrome::window_radius(self.settings.read(cx), cx, window);
         #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         let radius: Option<Pixels> = None;
-        let floating = Self::floating(window, cx);
         let (pill, clear) = Self::island(cx);
         let pill = ui::snapped(pill, window);
         let pad = ui::snapped(Self::island_pad(pill, cx), window);
