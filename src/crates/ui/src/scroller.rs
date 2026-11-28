@@ -27,6 +27,8 @@ pub struct Scroller {
     bottom_inset: Pixels,
     /// How far below the region's top its scrollbar starts, when the caller sets it.
     top_inset: Option<Pixels>,
+    /// How far above the region's bottom its scrollbar ends, apart from any `bottom_inset`.
+    bar_bottom: Pixels,
     /// How tall the band along the top is where content fades out as it scrolls away.
     fade_top: Pixels,
     /// How tall the top band grows to as content scrolls away.
@@ -54,6 +56,7 @@ impl Scroller {
             owns_scroll: true,
             bottom_inset: Pixels::ZERO,
             top_inset: None,
+            bar_bottom: Pixels::ZERO,
             fade_top: Pixels::ZERO,
             fade_scrolled: Pixels::ZERO,
             fade_remaining: Pixels::ZERO,
@@ -117,6 +120,13 @@ impl Scroller {
         self
     }
 
+    /// Ends the scrollbar `inset` above the region's bottom, clear of a control floating over
+    /// its foot. Only the bar moves and the content still scrolls down to the bottom.
+    pub fn bar_bottom(mut self, inset: Pixels) -> Self {
+        self.bar_bottom = inset.max(Pixels::ZERO);
+        self
+    }
+
     /// Fades content out across a band of `height` along the top, so what scrolls up under a
     /// control above the region melts away instead of being cut off at a hard line. The content
     /// starts below the band, so nothing is faded while the region is at rest.
@@ -174,6 +184,7 @@ impl RenderOnce for Scroller {
             owns_scroll,
             bottom_inset,
             top_inset,
+            bar_bottom,
             fade_top,
             fade_scrolled,
             fade_remaining,
@@ -199,7 +210,7 @@ impl RenderOnce for Scroller {
         let held_id = id.clone();
 
         bar.update(cx, |bar, cx| {
-            bar.set_track_bottom(bottom_inset, cx);
+            bar.set_track_bottom(bottom_inset.max(bar_bottom), cx);
             if let Some(top) = top_inset {
                 bar.set_track_top(top, cx);
             }
@@ -226,6 +237,7 @@ impl RenderOnce for Scroller {
         );
         let overrides = std::mem::take(base.style());
         bar.read(cx).sync();
+        bar.read(cx).revive(window);
         let presentation = bar.read(cx).presentation();
         let gliding = bar.clone();
 

@@ -369,6 +369,8 @@ pub(crate) struct Aside {
     /// The last pin while it has not landed yet, cleared once it does.
     queue_pin: Option<Pinned>,
     titled: bool,
+    /// How far above the panel's bottom its scrollbars end, clear of the fullscreen corner.
+    bar_clearance: Pixels,
     aiming: bool,
     rested: Option<Pixels>,
     since: std::time::Instant,
@@ -523,6 +525,7 @@ impl Aside {
             anchor: true,
             queue_pin: None,
             titled: true,
+            bar_clearance: Pixels::ZERO,
             aiming: false,
             rested: None,
             since: std::time::Instant::now(),
@@ -606,6 +609,15 @@ impl Aside {
                 self.accent_task = None;
                 self.accent = None;
             }
+        }
+    }
+
+    /// Ends the panel's scrollbars `clearance` above its bottom, so they stop short of a control
+    /// floating over its foot. The rows and verses keep their place.
+    pub(crate) fn set_bar_clearance(&mut self, clearance: Pixels, cx: &mut Context<Self>) {
+        if self.bar_clearance != clearance {
+            self.bar_clearance = clearance;
+            cx.notify();
         }
     }
 
@@ -2309,6 +2321,7 @@ impl Aside {
             .hold_while(!self.pinned)
             .reflowed(rewrapped)
             .bottom_inset(self.bottom(cx))
+            .bar_bottom(self.bar_clearance)
             .when(lines.is_some(), Scroller::manual_presentation)
             .when(lines.is_some(), |this| {
                 this.capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
@@ -2875,6 +2888,7 @@ impl Render for Aside {
                             div().flex_1().min_h_0().child(
                                 Scroller::listing("queue-rows", &self.scrollbar)
                                     .bottom_inset(self.bottom(cx))
+                                    .bar_bottom(self.bar_clearance)
                                     .when(effects(), |this| {
                                         let under = match self.titled {
                                             true => Pixels::ZERO,
