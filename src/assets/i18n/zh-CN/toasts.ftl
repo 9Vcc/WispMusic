@@ -127,6 +127,7 @@ toast-settings-broken = 请修正 settings.json 的第 { $name } 行以保存更
 toast-tray-unavailable = 没有可放置图标的系统托盘
 toast-undo = 撤销
 toast-link-copied = 链接已复制
+toast-lyrics-copied = 歌词已复制
 toast-link-sign-in = 登录 { $name } 以打开此链接
 toast-link-unreadable = 该链接指向的内容 Wisp 无法打开
 toast-code-copied = 代码已复制

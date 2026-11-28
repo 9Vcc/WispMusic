@@ -85,7 +85,7 @@ pub use settings::{
     remember_window, window_placement,
 };
 pub use signal::{Change, Equalizing, FLOAT_BITS, Following, Signal, SignalPath};
-pub use song::SongDetail;
+pub use song::{SongDetail, SongPageChanged};
 pub use tags::{TagState, Tags};
 pub use toast::{Outcome, Target, Toast, ToastAction, Toasts};
 pub use updates::{Channel, CheckFeedback, Updates, commit, updates_itself, version};

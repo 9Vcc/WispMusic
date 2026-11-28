@@ -66,6 +66,7 @@ lyrics-missing = 抱歉，未找到歌词！
 lyrics-instrumental = 这首歌是纯音乐
 lyrics-failed = 无法连接到歌词服务
 lyrics-follow = 重新跟随歌曲
+lyrics-copy = 复制歌词
 lyrics-source = 歌词来自 { $source }
 lyrics-source-local = 歌词来自本地文件
 lyrics-writers = 由 { $writers } 创作
