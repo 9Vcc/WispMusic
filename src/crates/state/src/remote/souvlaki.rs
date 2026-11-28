@@ -69,6 +69,15 @@ impl Controls {
                             return;
                         }
                     };
+                    let display = hwnd.and_then(|handle| match display(handle as *mut c_void) {
+                        Ok(display) => Some(display),
+                        Err(error) => {
+                            log::warn!(
+                                "remote: cannot reach the transport controls display: {error}"
+                            );
+                            None
+                        }
+                    });
                     if let Err(error) = controls.attach(move |event| {
                         if let Some(command) = command(event) {
                             commands.send(command).ok();
@@ -93,6 +102,12 @@ impl Controls {
                                     duration,
                                     cover_url: cover.as_deref(),
                                 };
+                                if metadata.cover_url.is_none()
+                                    && let Some(display) = &display
+                                    && let Err(error) = display.SetThumbnail(None)
+                                {
+                                    log::warn!("remote: cannot clear the cover: {error}");
+                                }
                                 if let Err(error) = controls.set_metadata(metadata) {
                                     log::warn!(
                                         "remote: cannot publish the current track: {error:?}"
@@ -208,6 +223,24 @@ impl Controls {
     pub fn set_shuffle(&mut self, _on: bool) {}
 
     pub fn set_repeat(&mut self, _repeat: Repeat) {}
+}
+
+/// The display updater of the transport controls that belong to the window `hwnd`. Windows
+/// hands out one set per window, so this is the one `souvlaki` updates.
+#[cfg(target_os = "windows")]
+fn display(
+    hwnd: *mut c_void,
+) -> windows::core::Result<windows::Media::SystemMediaTransportControlsDisplayUpdater> {
+    use windows::Media::SystemMediaTransportControls;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::WinRT::ISystemMediaTransportControlsInterop;
+
+    let interop = windows::core::factory::<
+        SystemMediaTransportControls,
+        ISystemMediaTransportControlsInterop,
+    >()?;
+    let controls: SystemMediaTransportControls = unsafe { interop.GetForWindow(HWND(hwnd)) }?;
+    controls.DisplayUpdater()
 }
 
 fn command(event: MediaControlEvent) -> Option<Command> {

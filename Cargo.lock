@@ -7012,6 +7012,7 @@ dependencies = [
  "ui",
  "wasm-provider",
  "webview",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "wisp-plugin-pack",
 ]
