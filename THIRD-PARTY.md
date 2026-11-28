@@ -39,9 +39,10 @@ The binary embeds:
   <https://github.com/chanind/hanzi-writer-data>。仅用于笔画歌词动效，未打包进二进制。
 
 Several dependencies are covered by the Mozilla Public License 2.0 — notably the
-Symphonia decoders, `option-ext` and `priority-queue`. They are used unmodified;
-their source is available from the upstream repositories linked below and from
-<https://crates.io>.
+Symphonia decoders, `option-ext` and `priority-queue`. Symphonia is built from
+<https://github.com/sonorahq/Symphonia>, whose FLAC decoder is modified to read
+32-bit stereo streams. The others are used unmodified, and their source is
+available from the upstream repositories linked below and from <https://crates.io>.
 
 Where a dependency offers a choice of licenses, WispMusic relies on the permissive
 option: Apache-2.0 for `self_cell`, MPL-2.0 for `priority-queue`.
@@ -52,7 +53,7 @@ first-party and appear under neither heading.
 
 ## Summary
 
-- MIT License — 636 crate(s)
+- MIT License — 641 crate(s)
 - Apache License 2.0 — 35 crate(s)
 - Unicode License v3 — 21 crate(s)
 - Mozilla Public License 2.0 — 18 crate(s)
@@ -67,7 +68,7 @@ first-party and appear under neither heading.
 
 ## MIT License
 
-Used by 636 crate(s):
+Used by 641 crate(s):
 
 - [accesskit 0.24.1](https://github.com/AccessKit/accesskit) — Copyright (c) <year> <copyright holders>
 - [accesskit_atspi_common 0.19.1](https://github.com/AccessKit/accesskit) — Copyright (c) <year> <copyright holders>
@@ -125,7 +126,6 @@ Used by 636 crate(s):
 - [bit-set 0.11.1](https://github.com/contain-rs/bit-vec) — Copyright (c) 2023 The Rust Project Developers
 - [bit-vec 0.10.1](https://github.com/contain-rs/bit-vec) — Copyright (c) 2023 The Rust Project Developers
 - [bit_field 0.10.3](https://github.com/phil-opp/rust-bit-field) — Copyright (c) 2016 Philipp Oppermann
-- [bitflags 1.3.2](https://github.com/bitflags/bitflags) — Copyright (c) 2014 The Rust Project Developers
 - [bitflags 2.13.2](https://github.com/bitflags/bitflags) — Copyright (c) 2014 The Rust Project Developers
 - [block 0.1.6](http://github.com/SSheldon/rust-block) — Copyright (c) <year> <copyright holders>
 - [block-buffer 0.10.4](https://github.com/RustCrypto/utils) — Copyright (c) 2018-2019 The RustCrypto Project Developers
@@ -469,6 +469,7 @@ Used by 636 crate(s):
 - [ref-cast-impl 1.0.27](https://github.com/dtolnay/ref-cast)
 - [regex 1.13.1](https://github.com/rust-lang/regex) — Copyright (c) 2014 The Rust Project Developers
 - [regex-automata 0.4.18](https://github.com/rust-lang/regex) — Copyright (c) 2014 The Rust Project Developers
+- [regex-lite 0.1.9](https://github.com/rust-lang/regex) — Copyright (c) 2014 The Rust Project Developers
 - [regex-syntax 0.8.11](https://github.com/rust-lang/regex) — Copyright (c) 2014 The Rust Project Developers
 - [renderdoc-sys 1.1.0](https://github.com/ebkalderon/renderdoc-rs) — Copyright (c) 2022 Eyal Kalderon
 - [reqwest 0.12.28](https://github.com/seanmonstar/reqwest) — Copyright (c) 2016-2025 Sean McArthur
@@ -637,21 +638,26 @@ Used by 636 crate(s):
 - [winapi 0.3.9](https://github.com/retep998/winapi-rs) — Copyright (c) 2015-2018 The winapi-rs Developers
 - [winapi-util 0.1.11](https://github.com/BurntSushi/winapi-util) — Copyright (c) 2017 Andrew Gallant
 - [windowfunctions 0.1.1](https://github.com/HEnquist/windowfunctions-rs) — Copyright (c) 2025 Henrik Enquist
+- [windows 0.57.0](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows 0.61.3](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows 0.62.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-collections 0.2.0](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-collections 0.3.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
+- [windows-core 0.57.0](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-core 0.61.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-core 0.62.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-future 0.2.1](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-future 0.3.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
+- [windows-implement 0.57.0](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-implement 0.60.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
+- [windows-interface 0.57.0](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-interface 0.59.3](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-link 0.1.3](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-link 0.2.1](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-numerics 0.2.0](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-numerics 0.3.1](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-registry 0.6.1](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
+- [windows-result 0.1.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-result 0.3.4](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-result 0.4.1](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
 - [windows-strings 0.4.2](https://github.com/microsoft/windows-rs) — Copyright (c) <year> <copyright holders>
@@ -1049,20 +1055,20 @@ Used by 18 crate(s):
 - [dwrote 0.11.5](https://github.com/servo/dwrote-rs)
 - [mpris-server 0.11.0](https://github.com/SeaDve/mpris-server)
 - [option-ext 0.2.0](https://github.com/soc/option-ext.git)
-- [symphonia 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-bundle-flac 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-bundle-mp3 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-codec-aac 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-codec-alac 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-codec-pcm 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-codec-vorbis 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-core 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-format-isomp4 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-format-mkv 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-format-ogg 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-format-riff 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-metadata 0.5.5](https://github.com/pdeljanov/Symphonia)
-- [symphonia-utils-xiph 0.5.5](https://github.com/pdeljanov/Symphonia)
+- [symphonia 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-bundle-flac 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-bundle-mp3 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-codec-aac 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-codec-alac 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-codec-pcm 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-codec-vorbis 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-common 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-core 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-format-isomp4 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-format-mkv 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-format-ogg 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-format-riff 0.6.1](https://github.com/pdeljanov/Symphonia)
+- [symphonia-metadata 0.6.1](https://github.com/pdeljanov/Symphonia)
 
 ```text
 Mozilla Public License Version 2.0

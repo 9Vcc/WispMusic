@@ -785,7 +785,7 @@ pub fn ahead<B: Body>(main: &Stream<B>, at: Duration) -> bool {
 /// A decoder over `data` that only reads forward and is not told the length, so opening it part
 /// way into a file reads no further than the first frame. `name` and `id` name the track in the
 /// warning a file that will not decode leaves.
-pub fn forward<R>(name: &str, id: &str, data: R) -> Option<rodio::Decoder<R>>
+pub fn forward<R>(name: &str, id: &str, data: R) -> Option<rodio::Decoder<'static, R>>
 where
     R: Read + Seek + Send + Sync + 'static,
 {
