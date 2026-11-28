@@ -161,7 +161,7 @@ impl Pins {
         let mut hasher = DefaultHasher::new();
         let library = self.library.read(cx);
         for shelf in [Shelf::Streaming, Shelf::Local] {
-            if self.session.read(cx).client_of(shelf).is_none() {
+            if !self.session.read(cx).shelf_in_use(shelf) {
                 continue;
             }
             let held = library.state(shelf);
@@ -195,7 +195,7 @@ impl Pins {
         let library = self.library.read(cx);
         let mut rest = Vec::new();
         for shelf in [Shelf::Streaming, Shelf::Local] {
-            if self.session.read(cx).client_of(shelf).is_none() {
+            if !self.session.read(cx).shelf_in_use(shelf) {
                 continue;
             }
             let held = library.state(shelf);
